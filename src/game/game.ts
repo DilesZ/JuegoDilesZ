@@ -3,13 +3,53 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { clamp, dampAngle, damp, rand, randInt, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, ENEMY_NAMES } from './core';
+import { idlePose } from './animations';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
 import { World } from './world';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { drawMinimap } from './minimap';
+
+export type QualityTier = 'bajo' | 'medio' | 'alto';
+
+/* Grading final: viñeta, grano fílmico, aberración cromática y color */
+const GradeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uTime: { value: 0 },
+    uVignette: { value: 0.44 },
+    uGrain: { value: 0.038 },
+    uCA: { value: 0.0015 },
+    uSat: { value: 1.08 },
+    uCon: { value: 1.04 },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uVignette;
+    uniform float uGrain; uniform float uCA; uniform float uSat; uniform float uCon;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+    void main(){
+      vec2 uv = vUv;
+      vec2 d = uv - 0.5;
+      float r2 = dot(d, d);
+      vec2 off = d * r2 * uCA * 8.0;
+      vec3 col;
+      col.r = texture2D(tDiffuse, uv + off).r;
+      col.g = texture2D(tDiffuse, uv).g;
+      col.b = texture2D(tDiffuse, uv - off).b;
+      float l = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(vec3(l), col, uSat);
+      col = (col - 0.5) * uCon + 0.5;
+      col *= 1.0 - uVignette * smoothstep(0.12, 0.72, r2);
+      col += (hash(uv * vec2(1287.0, 731.0) + fract(uTime) * 43.7) - 0.5) * uGrain;
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }`,
+};
 
 /* ============================================================
    GAME: orquestador principal (render, input, cámara, combate, fases)
@@ -88,45 +128,72 @@ export class Game {
   private onHud: (s: HudState) => void;
   private ctx: GameCtx;
 
+  // calidad y menú cinemático
+  quality: QualityTier = 'alto';
+  private gtao: GTAOPass | null = null;
+  private grade: ShaderPass | null = null;
+  private menuT = 0;
+  private qualityTimer = 2.5;
+  private started = false;
+
   constructor(refs: GameRefs, onHud: (s: HudState) => void) {
     this.refs = refs;
     this.container = refs.container;
     this.onHud = onHud;
 
     // renderer
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(this.pixelRatioFor('alto'));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.14;
     this.renderer.domElement.style.display = 'block';
     this.container.appendChild(this.renderer.domElement);
 
     // escena
-    this.scene.fog = new THREE.FogExp2(0x0b0f1c, 0.014);
+    this.scene.fog = new THREE.FogExp2(0x0d1322, 0.0105);
     this.camera = new THREE.PerspectiveCamera(this.baseFov, window.innerWidth / window.innerHeight, 0.1, 500);
 
     // mundo y sistemas
-    this.world = new World(this.scene);
+    this.world = new World(this.scene, this.renderer);
     this.particles = new Particles(this.scene);
     this.player = new Player();
     this.scene.add(this.player.root);
     this.trail = new SwordTrail(this.scene);
 
-    // jugador en la hoguera
+    // jugador frente a la hoguera
     const bx = WORLD.bonfire.x, bz = WORLD.bonfire.z + 3.4;
     this.player.pos.set(bx, terrainHeight(bx, bz), bz);
     this.player.yaw = Math.atan2(WORLD.bonfire.x - bx, WORLD.bonfire.z - bz) + Math.PI;
     this.camYaw = this.player.yaw + Math.PI;
 
-    // post-procesado
-    this.composer = new EffectComposer(this.renderer);
+    // post-procesado: MSAA + GTAO + bloom + tono + grading
+    const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+      type: THREE.HalfFloatType,
+      samples: 4,
+    });
+    this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.65, 0.82);
+    try {
+      const gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
+      if (typeof gtao.updateGtaoMaterial === 'function') {
+        gtao.updateGtaoMaterial({
+          radius: 0.45, distanceExponent: 1.2, thickness: 1.4,
+          scale: 1.3, samples: 12, screenSpaceRadius: false,
+          distanceFallOff: 1,
+        });
+      }
+      gtao.output = GTAOPass.OUTPUT.Default;
+      this.composer.addPass(gtao);
+      this.gtao = gtao;
+    } catch { this.gtao = null; }
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.85, 0.75);
     this.composer.addPass(bloom);
     this.composer.addPass(new OutputPass());
+    this.grade = new ShaderPass(GradeShader);
+    this.composer.addPass(this.grade);
 
     // capa de números de daño
     this.dmgLayer = document.createElement('div');
@@ -160,12 +227,51 @@ export class Game {
       playerHurt: () => { this.hurtFlash = 1; },
     };
 
-    // spawns iniciales
-    this.spawnGuardians();
-    for (let i = 0; i < 6; i++) this.spawnRoamer(true);
+    this.phase = 'menu';
 
     this.bindEvents();
     this.emitHud();
+  }
+
+  /* ---------- Calidad ---------- */
+
+  private pixelRatioFor(q: QualityTier): number {
+    if (q === 'bajo') return 0.85;
+    if (q === 'medio') return 1.2;
+    return Math.min(window.devicePixelRatio, 1.75);
+  }
+
+  setQuality(q: QualityTier) {
+    this.quality = q;
+    const pr = this.pixelRatioFor(q);
+    this.renderer.setPixelRatio(pr);
+    this.composer.setPixelRatio(pr);
+    this.composer.setSize(window.innerWidth, window.innerHeight);
+    if (this.gtao) this.gtao.enabled = q !== 'bajo';
+    this.emitHud();
+  }
+
+  private autoQuality(dt: number) {
+    this.qualityTimer -= dt;
+    if (this.qualityTimer > 0) return;
+    this.qualityTimer = 2.5;
+    if (this.fps < 42) {
+      if (this.quality === 'alto') this.setQuality('medio');
+      else if (this.quality === 'medio') this.setQuality('bajo');
+    }
+  }
+
+  /* ---------- Inicio de aventura (desde el menú) ---------- */
+
+  beginAdventure() {
+    if (this.started) return;
+    this.started = true;
+    this.spawnGuardians();
+    for (let i = 0; i < 6; i++) this.spawnRoamer(true);
+    this.audio.unlock();
+    this.audio.startMusic();
+    this.setPhase('playing');
+    this.requestLock();
   }
 
   /* ---------- Spawns ---------- */
@@ -389,11 +495,21 @@ export class Game {
   private loop = (t: number) => {
     if (!this.running) return;
     this.raf = requestAnimationFrame(this.loop);
-    let dt = Math.min(0.05, (t - this.lastT) / 1000);
+    const dt = Math.min(0.05, (t - this.lastT) / 1000);
     this.lastT = t;
     this.fps = this.fps * 0.95 + (1 / Math.max(0.0001, dt)) * 0.05;
 
+    if (this.phase === 'menu') {
+      this.menuT += dt;
+      this.updateMenuScene(dt);
+      this.composer.render();
+      this.hudTimer -= dt;
+      if (this.hudTimer <= 0) { this.hudTimer = 0.3; this.emitHud(); }
+      return;
+    }
+
     if (this.phase === 'playing') {
+      this.autoQuality(dt);
       // hit-stop y cámara lenta
       if (this.hitStopT > 0) {
         this.hitStopT -= dt;
@@ -417,6 +533,43 @@ export class Game {
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) { this.hudTimer = 0.08; this.emitHud(); this.drawMinimap(); }
   };
+
+  /* ---------- Escena cinemática del menú ---------- */
+
+  private updateMenuScene(dt: number) {
+    this.world.update(dt, this.camera, (x, y, z) => {
+      this.particles.spawn({
+        x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
+        color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
+      });
+    });
+    this.particles.update(dt, this.camera.position);
+    // héroe contemplando la hoguera
+    this.player.applier.apply(idlePose(this.menuT), dt, 6);
+    this.player.root.position.copy(this.player.pos);
+    this.player.root.rotation.y = this.player.yaw;
+    if (this.grade) this.grade.uniforms.uTime.value = this.menuT;
+
+    // órbita lenta alrededor de la hoguera
+    const a = this.menuT * 0.055 + 2.2;
+    const r = 9.6 + Math.sin(this.menuT * 0.1) * 1.4;
+    const bx = WORLD.bonfire.x, bz = WORLD.bonfire.z;
+    const by = terrainHeight(bx, bz);
+    const desired = new THREE.Vector3(
+      bx + Math.cos(a) * r,
+      by + 4.3 + Math.sin(this.menuT * 0.13) * 0.8,
+      bz + Math.sin(a) * r,
+    );
+    const groundH = terrainHeight(desired.x, desired.z) + 0.5;
+    if (desired.y < groundH) desired.y = groundH;
+    this.camPos.lerp(desired, 1 - Math.exp(-2.2 * dt));
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(bx, by + 1.9, bz);
+    if (Math.abs(this.camera.fov - 52) > 0.05) {
+      this.camera.fov = damp(this.camera.fov, 52, 3, dt);
+      this.camera.updateProjectionMatrix();
+    }
+  }
 
   private updateWorld(dt: number, frozen = false) {
     this.elapsed += frozen ? 0 : dt;
@@ -687,11 +840,12 @@ export class Game {
       d.el.style.top = `${(-v.y * 0.5 + 0.5) * h}px`;
       d.el.style.opacity = `${Math.min(1, d.life * 2.5)}`;
     }
-    // viñeta de daño
+    // viñeta de daño + grano/tiempo del grading
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 2.2);
     const lowHp = this.player.hp / this.player.maxHp < 0.3 && this.player.alive;
     const pulse = lowHp ? 0.22 + Math.sin(this.elapsed * 5) * 0.08 : 0;
     this.refs.vignette.style.opacity = `${Math.min(1, this.hurtFlash * 0.9 + pulse)}`;
+    if (this.grade) this.grade.uniforms.uTime.value = this.elapsed;
   }
 
   private addDamageNumber(pos: THREE.Vector3, text: string, color: string, big = false) {
@@ -759,6 +913,7 @@ export class Game {
       prompt: this.promptText(),
       fps: Math.round(this.fps),
       endless: this.endless,
+      quality: this.quality,
     });
   }
 
@@ -798,7 +953,7 @@ export class Game {
   }
 
   respawn() {
-    // limpiar enemigos vivos y cuerpos
+    // limpiar enemigos vivos, proyectiles y drops
     for (const e of this.enemies) this.scene.remove(e.root);
     this.enemies = [];
     this.boss = null;
@@ -807,6 +962,8 @@ export class Game {
     this.player.lockTarget = null;
     for (const pr of this.projectiles) this.scene.remove(pr.root);
     this.projectiles = [];
+    for (const pk of this.pickups) this.scene.remove(pk.root);
+    this.pickups = [];
     // guardianes frescos en santuarios sin purificar
     this.spawnGuardians();
     for (let i = 0; i < 4; i++) this.spawnRoamer(true);

@@ -126,6 +126,7 @@ export interface HudState {
   prompt: string;        // texto de interacción o ''
   fps: number;
   endless: boolean;
+  quality: 'bajo' | 'medio' | 'alto';
 }
 
 export interface GameRefs {

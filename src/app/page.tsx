@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { HudState } from '@/game/core';
-import type { Game } from '@/game/game';
+import type { Game, QualityTier } from '@/game/game';
 
 /* ============================================================
    AETHERIA — Eco del Reino Caído · Action RPG 3D
+   Menú cinemático sobre el mundo en vivo + HUD de juego
    ============================================================ */
 
 const INITIAL_HUD: HudState = {
@@ -23,6 +24,7 @@ const INITIAL_HUD: HudState = {
   prompt: '',
   fps: 60,
   endless: false,
+  quality: 'alto',
 };
 
 function fmtTime(t: number): string {
@@ -40,17 +42,30 @@ function Bar({ value, max, className, height = 'h-3.5' }: { value: number; max: 
   );
 }
 
-function MenuButton({ onClick, children, primary = false }: { onClick: () => void; children: React.ReactNode; primary?: boolean }) {
+function MenuButton({ onClick, children, primary = false, small = false }: { onClick: () => void; children: React.ReactNode; primary?: boolean; small?: boolean }) {
   return (
     <button
       onClick={onClick}
-      className={`px-8 py-3 min-h-[44px] font-serif tracking-[0.2em] uppercase text-sm border transition-all duration-200
+      className={`${small ? 'px-4 py-2 text-[11px] min-h-[38px]' : 'px-8 py-3 min-h-[44px] text-sm'} font-serif tracking-[0.2em] uppercase border transition-all duration-200
         ${primary
           ? 'border-amber-500/70 bg-amber-900/30 text-amber-100 hover:bg-amber-700/40 hover:border-amber-400 hover:shadow-[0_0_24px_rgba(245,180,80,0.25)]'
           : 'border-stone-600/60 bg-stone-900/70 text-stone-300 hover:bg-stone-800 hover:text-amber-100'}`}
     >
       {children}
     </button>
+  );
+}
+
+/** Esquinas ornamentales del panel */
+function Corners() {
+  const base = 'absolute w-5 h-5 border-amber-500/60 pointer-events-none';
+  return (
+    <>
+      <span className={`${base} top-1.5 left-1.5 border-t-2 border-l-2`} />
+      <span className={`${base} top-1.5 right-1.5 border-t-2 border-r-2`} />
+      <span className={`${base} bottom-1.5 left-1.5 border-b-2 border-l-2`} />
+      <span className={`${base} bottom-1.5 right-1.5 border-b-2 border-r-2`} />
+    </>
   );
 }
 
@@ -67,52 +82,57 @@ const CONTROLS: [string, string][] = [
   ['Esc', 'Pausa'],
 ];
 
+const QUALITIES: { id: QualityTier; label: string }[] = [
+  { id: 'bajo', label: 'Bajo' },
+  { id: 'medio', label: 'Medio' },
+  { id: 'alto', label: 'Alto' },
+];
+
 export default function Home() {
   const containerRef = useRef<HTMLDivElement>(null);
   const minimapRef = useRef<HTMLCanvasElement>(null);
   const vignetteRef = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Game | null>(null);
-  const startingRef = useRef(false);
   const [hud, setHud] = useState<HudState>(INITIAL_HUD);
-  const [booting, setBooting] = useState(false);
   const [booted, setBooted] = useState(false);
+  const [bootError, setBootError] = useState(false);
 
-  const startGame = async () => {
-    if (startingRef.current || gameRef.current) return;
-    startingRef.current = true;
-    setBooting(true);
-    try {
-      const mod = await import('@/game/game');
-      if (!containerRef.current || !minimapRef.current || !vignetteRef.current) {
-        console.log('[AETHERIA] refs ausentes');
-        startingRef.current = false;
-        setBooting(false);
-        return;
-      }
-      const game = new mod.Game(
-        { container: containerRef.current, minimap: minimapRef.current, vignette: vignetteRef.current },
-        setHud,
-      );
-      gameRef.current = game;
-      (window as unknown as { __game?: Game }).__game = game; // utilidad de depuración
-      game.audio.unlock();
-      game.audio.startMusic();
-      game.start();
-      game.requestLock();
-      setBooted(true);
-    } catch (err) {
-      console.error('[AETHERIA] fallo al arrancar:', err);
-      startingRef.current = false;
-      setBooting(false);
-    }
-  };
-
+  /* Arranque: construye el mundo en segundo plano y muestra el
+     menú cinemático con la hoguera en vivo detrás del panel. */
   useEffect(() => {
-    return () => { gameRef.current?.dispose(); gameRef.current = null; };
+    let cancelled = false;
+    const boot = async () => {
+      try {
+        await new Promise(r => setTimeout(r, 250)); // deja pintar el velo de carga
+        const mod = await import('@/game/game');
+        if (cancelled || !containerRef.current || !minimapRef.current || !vignetteRef.current) return;
+        const game = new mod.Game(
+          { container: containerRef.current, minimap: minimapRef.current, vignette: vignetteRef.current },
+          setHud,
+        );
+        gameRef.current = game;
+        (window as unknown as { __game?: Game }).__game = game;
+        game.start();
+        setBooted(true);
+      } catch (err) {
+        console.error('[AETHERIA] fallo al arrancar:', err);
+        if (!cancelled) setBootError(true);
+      }
+    };
+    void boot();
+    return () => { cancelled = true; gameRef.current?.dispose(); gameRef.current = null; };
   }, []);
 
   const g = () => gameRef.current;
-  const inGame = hud.phase !== 'menu' || booted;
+  const startGame = () => {
+    if (!booted) return;
+    g()?.beginAdventure();
+  };
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void document.documentElement.requestFullscreen?.();
+  };
+  const inGame = hud.phase !== 'menu';
   const hpFrac = hud.hp / Math.max(1, hud.maxHp);
 
   return (
@@ -137,8 +157,21 @@ export default function Home() {
         }`}
       />
 
+      {/* ============ VELO DE CARGA ============ */}
+      {!booted && (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-[#05060a]">
+          <div className="w-10 h-10 border-2 border-amber-700/30 border-t-amber-400 rounded-full animate-spin" />
+          <div className="mt-5 text-amber-300/90 font-serif tracking-[0.35em] text-sm uppercase animate-pulse">
+            {bootError ? 'No se pudo forjar el mundo' : 'Forjando el mundo…'}
+          </div>
+          {!bootError && (
+            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Texturas PBR · Auroras · GTAO</div>
+          )}
+        </div>
+      )}
+
       {/* ============ HUD DE JUEGO ============ */}
-      {inGame && hud.phase !== 'menu' && (
+      {booted && inGame && (
         <div className="absolute inset-0 pointer-events-none z-20 font-sans">
           {/* Punto de mira */}
           <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
@@ -152,22 +185,22 @@ export default function Home() {
                 {hud.level}
               </div>
               <div className="flex-1 space-y-1.5">
-                <Bar value={hud.hp} max={hud.maxHp} className={`bg-gradient-to-r from-red-800 to-red-500 ${hpFrac < 0.3 ? 'animate-pulse' : ''}`} />
+                <Bar value={hud.hp} max={hud.maxHp} className={`bg-gradient-to-r from-rose-900 via-red-600 to-red-400 ${hpFrac < 0.3 ? 'animate-pulse' : ''}`} />
                 <Bar value={hud.stamina} max={hud.maxStamina} className="bg-gradient-to-r from-emerald-800 to-emerald-400" height="h-2" />
                 <Bar value={hud.xp} max={hud.xpNext} className="bg-gradient-to-r from-amber-700 to-amber-300" height="h-1" />
               </div>
             </div>
-            <div className="flex items-center gap-4 pl-13 text-xs text-stone-300/90 pl-1" style={{ paddingLeft: '3.25rem' }}>
+            <div className="flex items-center gap-4 text-xs text-stone-300/90 pl-1" style={{ paddingLeft: '3.25rem' }}>
               <span className="text-amber-300/90 font-semibold">◈ {hud.gold}</span>
               <span>☠ {hud.kills}</span>
               <span className="text-stone-400">{fmtTime(hud.time)}</span>
             </div>
           </div>
 
-          {/* Minimapa: etiqueta (el canvas vive fuera de este bloque) */}
+          {/* Estado técnico bajo el minimapa */}
           <div className="absolute top-[188px] right-4">
             <div className="text-[10px] text-stone-400 bg-black/40 px-2 py-0.5 rounded">
-              {hud.enemiesAlive} enemigos · {hud.fps} FPS
+              {hud.enemiesAlive} enemigos · {hud.fps} FPS · {hud.quality}
             </div>
           </div>
 
@@ -230,37 +263,66 @@ export default function Home() {
         </div>
       )}
 
-      {/* ============ MENÚ PRINCIPAL ============ */}
-      {hud.phase === 'menu' && !booted && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-gradient-to-b from-black/95 via-black/85 to-black/95">
-          <div className="max-w-2xl w-full px-6 text-center">
-            <div className="text-amber-600/80 tracking-[0.5em] text-xs uppercase mb-3">Un Action RPG de mundo abierto</div>
-            <h1 className="font-serif text-5xl md:text-6xl text-amber-100 tracking-[0.12em] drop-shadow-[0_0_30px_rgba(245,180,80,0.25)]">
-              AETHERIA
-            </h1>
-            <div className="font-serif text-stone-400 tracking-[0.3em] text-sm mt-2 uppercase">Eco del Reino Caído</div>
-            <p className="text-stone-400 text-sm leading-relaxed mt-6 max-w-lg mx-auto">
-              La luna sangra sobre las ruinas de Aetheria. Tres santuarios corruptos alimentan
-              la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Caballero Caído.
-              Purifícalos, crece en poder y derriba al señor de la noche en su arena.
-            </p>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-2 mt-8 text-[11px]">
-              {CONTROLS.map(([k, v]) => (
-                <div key={k} className="flex flex-col items-center gap-0.5">
-                  <kbd className="px-2 py-1 border border-stone-700 rounded bg-stone-900 text-amber-200/90 font-mono">{k}</kbd>
-                  <span className="text-stone-500">{v}</span>
+      {/* ============ MENÚ PRINCIPAL (mundo en vivo detrás) ============ */}
+      {booted && hud.phase === 'menu' && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(2,3,8,0.18)_0%,rgba(2,3,8,0.62)_62%,rgba(2,3,8,0.88)_100%)]">
+          <div className="max-w-2xl w-full px-5 text-center">
+            <div className="relative backdrop-blur-[3px] bg-black/50 border border-amber-900/40 px-6 sm:px-9 py-9 shadow-[0_0_70px_rgba(0,0,0,0.55)]">
+              <Corners />
+              <div className="text-amber-600/80 tracking-[0.5em] text-[11px] uppercase mb-3">Un Action RPG de mundo abierto</div>
+              <h1 className="font-serif text-5xl md:text-6xl text-amber-100 tracking-[0.12em] drop-shadow-[0_0_34px_rgba(245,180,80,0.35)]">
+                AETHERIA
+              </h1>
+              <div className="font-serif text-stone-400 tracking-[0.3em] text-sm mt-2 uppercase">Eco del Reino Caído</div>
+
+              <div className="flex items-center justify-center gap-3 my-5">
+                <span className="h-px w-16 bg-gradient-to-r from-transparent to-amber-700/60" />
+                <span className="w-1.5 h-1.5 rotate-45 bg-amber-600/70" />
+                <span className="h-px w-16 bg-gradient-to-l from-transparent to-amber-700/60" />
+              </div>
+
+              <p className="text-stone-400 text-[13px] leading-relaxed max-w-lg mx-auto">
+                La luna sangra sobre las ruinas de Aetheria. Tres santuarios corruptos alimentan
+                la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Caballero Caído.
+                Purifícalos, crece en poder y derriba al señor de la noche en su arena.
+              </p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-2 mt-7 text-[11px]">
+                {CONTROLS.map(([k, v]) => (
+                  <div key={k} className="flex flex-col items-center gap-0.5">
+                    <kbd className="px-2 py-1 border border-stone-700 rounded bg-stone-900/90 text-amber-200/90 font-mono">{k}</kbd>
+                    <span className="text-stone-500">{v}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Calidad + pantalla completa */}
+              <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+                <div className="flex items-center border border-stone-700/70 bg-stone-950/70 overflow-hidden">
+                  <span className="px-3 text-[10px] uppercase tracking-widest text-stone-500 border-r border-stone-800 py-2">Gfx</span>
+                  {QUALITIES.map(q => (
+                    <button
+                      key={q.id}
+                      onClick={() => g()?.setQuality(q.id)}
+                      className={`px-3.5 py-2 text-[11px] tracking-widest uppercase transition-colors ${
+                        hud.quality === q.id
+                          ? 'bg-amber-900/50 text-amber-200'
+                          : 'text-stone-400 hover:bg-stone-800/80 hover:text-amber-100'
+                      }`}
+                    >
+                      {q.label}
+                    </button>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div className="mt-9">
-              {booting ? (
-                <div className="text-amber-300 animate-pulse font-serif tracking-widest">FORJANDO EL MUNDO…</div>
-              ) : (
+                <MenuButton small onClick={toggleFullscreen}>⛶ &nbsp;Pantalla completa</MenuButton>
+              </div>
+
+              <div className="mt-7">
                 <MenuButton primary onClick={startGame}>⚔ &nbsp;Comenzar la aventura</MenuButton>
-              )}
-            </div>
-            <div className="mt-4 text-[11px] text-stone-600">
-              Se recomienda teclado y ratón · El cursor se bloqueará al comenzar
+              </div>
+              <div className="mt-4 text-[11px] text-stone-600">
+                Se recomienda teclado y ratón · El cursor se bloqueará al comenzar
+              </div>
             </div>
           </div>
         </div>
