@@ -17,16 +17,16 @@ import { drawMinimap } from './minimap';
 
 export type QualityTier = 'bajo' | 'medio' | 'alto';
 
-/* Grading final: viñeta, grano fílmico, aberración cromática y color */
+/* Grading final estilo anime: limpio, saturado, sin grano notable */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
-    uVignette: { value: 0.44 },
-    uGrain: { value: 0.038 },
-    uCA: { value: 0.0015 },
-    uSat: { value: 1.08 },
-    uCon: { value: 1.04 },
+    uVignette: { value: 0.30 },
+    uGrain: { value: 0.016 },
+    uCA: { value: 0.0006 },
+    uSat: { value: 1.18 },
+    uCon: { value: 1.03 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
@@ -155,13 +155,14 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.14;
+    // NeutralToneMapping conserva la saturación de los colores planos anime
+    this.renderer.toneMapping = THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.domElement.style.display = 'block';
     this.container.appendChild(this.renderer.domElement);
 
     // escena
-    this.scene.fog = new THREE.FogExp2(0x0d1322, 0.0105);
+    this.scene.fog = new THREE.FogExp2(0xc2dcee, 0.0068);
     this.camera = new THREE.PerspectiveCamera(this.baseFov, window.innerWidth / window.innerHeight, 0.1, 500);
 
     // mundo y sistemas
@@ -202,8 +203,8 @@ export class Game {
       const gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
       if (typeof gtao.updateGtaoMaterial === 'function') {
         gtao.updateGtaoMaterial({
-          radius: 0.45, distanceExponent: 1.2, thickness: 1.4,
-          scale: 1.3, samples: 12, screenSpaceRadius: false,
+          radius: 0.4, distanceExponent: 1.2, thickness: 1.4,
+          scale: 0.85, samples: 12, screenSpaceRadius: false,
           distanceFallOff: 1,
         });
       }
@@ -211,7 +212,7 @@ export class Game {
       this.composer.addPass(gtao);
       this.gtao = gtao;
     } catch { this.gtao = null; }
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.85, 0.75);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.38, 0.8, 0.9);
     this.composer.addPass(bloom);
     this.composer.addPass(new OutputPass());
     this.grade = new ShaderPass(GradeShader);
@@ -893,7 +894,8 @@ export class Game {
       if (this.dmgPool.length >= 34) return;
       const el = document.createElement('div');
       el.style.cssText = `position:absolute;transform:translate(-50%,-50%);font-weight:800;pointer-events:none;
-        text-shadow:0 0 6px rgba(0,0,0,0.9), 0 2px 2px rgba(0,0,0,0.8);font-family:'Cinzel',Georgia,serif;letter-spacing:0.04em;`;
+        text-shadow:0 2px 0 rgba(28,20,40,0.95), 0 0 4px rgba(28,20,40,0.85), -1.5px 0 0 rgba(28,20,40,0.8), 1.5px 0 0 rgba(28,20,40,0.8);
+        font-family:'Baloo 2','Nunito',system-ui,sans-serif;letter-spacing:0.05em;`;
       this.dmgLayer.appendChild(el);
       d = { el, worldPos: new THREE.Vector3(), life: 0, vy: 1.6, active: false };
       this.dmgPool.push(d);

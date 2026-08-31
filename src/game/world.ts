@@ -4,13 +4,13 @@ import { mulberry32, terrainHeight, WORLD, fbm, lerp } from './core';
 import {
   buildObelisk, buildBonfire, buildTorch, buildRuinedPillar, buildBrokenArch,
   buildSigil, grassGeometry, grassMaterial, canopyMat, barkMat, stoneMat,
-  woodMat, emisMat, stdMat, mushroomGeos,
-  updateWindAndFlames, registerWind,
+  woodMat, emisMat, stdMat, mushroomGeos, toonMat, addOutlines,
+  updateWindAndFlames, registerWind, type ToonMat,
 } from './models';
 import { Particles } from './particles';
 import {
-  terrainSplat, terrainDetailNormal, glowSprite, mistTexture, moonTexture,
-  waterNormal, arenaFloorTexture, bannerTexture, pbrTex,
+  terrainSplat, glowSprite, mistTexture, moonTexture,
+  waterNormal, arenaFloorTexture, bannerTexture,
 } from './textures';
 import type { DayNightSample } from './daynight';
 
@@ -22,6 +22,15 @@ import type { DayNightSample } from './daynight';
 
 interface Collider { x: number; z: number; r: number }
 
+let _backMat: THREE.MeshBasicMaterial | null = null;
+/** Material de contorno de tinta para mallas instanciadas del mundo */
+function outlineBackMat(): THREE.MeshBasicMaterial {
+  if (!_backMat) {
+    _backMat = new THREE.MeshBasicMaterial({ color: 0x191322, side: THREE.BackSide });
+  }
+  return _backMat;
+}
+
 export interface ShrineState {
   idx: number;
   name: string;
@@ -30,8 +39,8 @@ export interface ShrineState {
   group: THREE.Group;
   crystal: THREE.Mesh;
   runes: THREE.Mesh[];
-  crystalMat: THREE.MeshStandardMaterial;
-  runeMats: THREE.MeshStandardMaterial[];
+  crystalMat: ToonMat;
+  runeMats: ToonMat[];
   light: THREE.PointLight;
   shards: THREE.Mesh[];
   aura: THREE.Mesh;
@@ -67,7 +76,7 @@ export class World {
   bonfirePos = new THREE.Vector3(WORLD.bonfire.x, 0, WORLD.bonfire.z);
   bonfireLight!: THREE.PointLight;
   bonfireFlame: THREE.Mesh | null = null;
-  sigil: { group: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshStandardMaterial } | null = null;
+  sigil: { group: THREE.Group; ring: THREE.Mesh; ringMat: ToonMat } | null = null;
 
   private time = 0;
   private moonLight!: THREE.DirectionalLight;
@@ -103,7 +112,10 @@ export class World {
   private envIntensityTarget = 0.5;
   private nightK = 1; // factor de oscuridad actual (para antorchas etc.)
   private mistMul = 1.2; // multiplicador de niebla rasante
-  private terrainMat: THREE.MeshStandardMaterial | null = null;
+  private terrainMat: THREE.MeshToonMaterial | null = null;
+
+  /* ---- nubes estilo anime (Ghibli) ---- */
+  private clouds: { mesh: THREE.Mesh; mat: ToonMat; speed: number; baseY: number }[] = [];
 
   constructor(scene: THREE.Scene, renderer?: THREE.WebGLRenderer) {
     this.scene = scene;
@@ -111,6 +123,7 @@ export class World {
     this.fx = new Particles(scene, 500, 'additive');
     this.buildSky();
     this.buildLights();
+    this.buildClouds();
     this.buildTerrain();
     this.buildDecorations();
     this.buildLunarBasin();
@@ -297,6 +310,41 @@ export class World {
     this.sunMat = mkSunSprite(64, 0.8, 0xfff3d0);
   }
 
+  /* ---------- Nubes cumulus estilo anime ---------- */
+
+  private buildClouds() {
+    const rng = mulberry32(3141);
+    const puff = (r: number, sx: number, sy: number, x: number, y: number, z: number) => {
+      const s = new THREE.SphereGeometry(r, 10, 8);
+      s.scale(sx, sy, 1);
+      s.translate(x, y, z);
+      return s;
+    };
+    for (let i = 0; i < 11; i++) {
+      const parts: THREE.BufferGeometry[] = [];
+      const w = 7 + rng() * 9;
+      // base plana + bultos redondeados
+      parts.push(puff(w, 1.5, 0.55, 0, 0, 0));
+      const lobes = 3 + ((rng() * 3) | 0);
+      for (let k = 0; k < lobes; k++) {
+        const lx = (k / (lobes - 1) - 0.5) * w * 1.6;
+        const lr = w * (0.42 + rng() * 0.3);
+        parts.push(puff(lr, 1, 0.9, lx, lr * 0.42, (rng() - 0.5) * 2.4));
+      }
+      const geo = mergeGeometries(parts)!;
+      const mat = toonMat(0xffffff, { fog: false });
+      const mesh = new THREE.Mesh(geo, mat);
+      const a = rng() * Math.PI * 2;
+      const r = 165 + rng() * 150;
+      const baseY = 72 + rng() * 30;
+      mesh.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
+      mesh.scale.setScalar(1.35 + rng() * 1.0);
+      mesh.rotation.y = rng() * Math.PI * 2;
+      this.scene.add(mesh);
+      this.clouds.push({ mesh, mat, speed: 0.5 + rng() * 0.9, baseY });
+    }
+  }
+
   /* ---------- Luces ---------- */
 
   private buildLights() {
@@ -376,6 +424,9 @@ export class World {
       this.scene.fog.density = s.fogDensity;
     }
 
+    // nubes Ghibli: tinte según hora del día
+    for (const c of this.clouds) c.mat.color.copy(s.cloudTint);
+
     // agua de la Fuente Lunar
     if (this.waterMat) {
       (this.waterMat.uniforms.uSky.value as THREE.Color).copy(s.waterTint);
@@ -411,16 +462,18 @@ export class World {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    const mat = new THREE.MeshStandardMaterial({
+    const mat = new THREE.MeshToonMaterial({
       map: terrainSplat(),
-      normalMap: pbrTex('grass_normal.jpg', { srgb: false, repeat: 46 }),
-      normalScale: new THREE.Vector2(0.55, 0.55),
-      bumpMap: terrainDetailNormal(),
-      bumpScale: 0.06,
-      roughnessMap: pbrTex('grass_rough.jpg', { srgb: false, repeat: 46 }),
       vertexColors: true,
-      roughness: 1.0, metalness: 0,
-      envMapIntensity: 0.35,
+      gradientMap: (() => {
+        // rampa suave de 4 bandas para un terreno pintado, no duro
+        const v = new Uint8Array([150, 150, 150, 255, 200, 200, 200, 255, 240, 240, 240, 255, 255, 255, 255, 255]);
+        const tex = new THREE.DataTexture(v, 4, 1, THREE.RGBAFormat);
+        tex.minFilter = tex.magFilter = THREE.NearestFilter;
+        tex.colorSpace = THREE.NoColorSpace;
+        tex.needsUpdate = true;
+        return tex;
+      })(),
     });
     this.terrainMat = mat;
     const terrain = new THREE.Mesh(geo, mat);
@@ -460,6 +513,31 @@ export class World {
     trunks.castShadow = canopies.castShadow = true;
     trunks.receiveShadow = canopies.receiveShadow = true;
 
+    // contornos de tinta instanciados (siguen las mismas matrices)
+    const canopyOutlineGeo = (() => {
+      const g = canopyGeo.clone();
+      const pos = g.getAttribute('position') as THREE.BufferAttribute;
+      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.09, pos.getY(i) + nor.getY(i) * 0.09, pos.getZ(i) + nor.getZ(i) * 0.09);
+      }
+      g.computeBoundingSphere();
+      return g;
+    })();
+    const trunkOutlineGeo = (() => {
+      const g = trunkGeo.clone();
+      const pos = g.getAttribute('position') as THREE.BufferAttribute;
+      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.05, pos.getY(i) + nor.getY(i) * 0.05, pos.getZ(i) + nor.getZ(i) * 0.05);
+      }
+      g.computeBoundingSphere();
+      return g;
+    })();
+    const canopyOutlines = new THREE.InstancedMesh(canopyOutlineGeo, outlineBackMat(), treeCount);
+    const trunkOutlines = new THREE.InstancedMesh(trunkOutlineGeo, outlineBackMat(), treeCount);
+    canopyOutlines.frustumCulled = trunkOutlines.frustumCulled = false;
+
     // ==== Árboles muertos (cerca de ruinas/santuarios) ====
     const deadGeo = (() => {
       const parts: THREE.BufferGeometry[] = [];
@@ -476,7 +554,7 @@ export class World {
       }
       return mergeGeometries(parts)!;
     })();
-    const deadMat = new THREE.MeshStandardMaterial({ color: 0x4a4038, roughness: 0.95, normalMap: barkMat().normalMap });
+    const deadMat = toonMat(0x6e5a48);
     const deadCount = 34;
     const dead = new THREE.InstancedMesh(deadGeo, deadMat, deadCount);
     dead.castShadow = true; dead.receiveShadow = true;
@@ -486,6 +564,18 @@ export class World {
     const rockGeo = new THREE.DodecahedronGeometry(1, 0);
     const rocks = new THREE.InstancedMesh(rockGeo, stoneMat(), rockCount);
     rocks.castShadow = rocks.receiveShadow = true;
+    const rockOutlineGeo = (() => {
+      const g = rockGeo.clone();
+      const pos = g.getAttribute('position') as THREE.BufferAttribute;
+      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.06, pos.getY(i) + nor.getY(i) * 0.06, pos.getZ(i) + nor.getZ(i) * 0.06);
+      }
+      g.computeBoundingSphere();
+      return g;
+    })();
+    const rockOutlines = new THREE.InstancedMesh(rockOutlineGeo, outlineBackMat(), rockCount);
+    rockOutlines.frustumCulled = false;
 
     // colocación de árboles/rocas
     let placed = 0, deadPlaced = 0, guard = 0;
@@ -504,10 +594,11 @@ export class World {
       dummy.updateMatrix();
       trunks.setMatrixAt(placed, dummy.matrix);
       canopies.setMatrixAt(placed, dummy.matrix);
-      const tone = 0.8 + rng() * 0.5;
-      tint.setRGB(tone * 0.30, tone * 0.55, tone * 0.31);
+      const tone = 0.8 + rng() * 0.4;
+      // verde anime vivo con variación (sin llegar a neón)
+      tint.setRGB(0.34 + rng() * 0.18, 0.78 + rng() * 0.16, 0.40 + rng() * 0.16);
       canopies.setColorAt(placed, tint);
-      tint.setRGB(tone * 0.72, tone * 0.62, tone * 0.55);
+      tint.setRGB(tone * 0.78, tone * 0.58, tone * 0.42);
       trunks.setColorAt(placed, tint);
       this.colliders.push({ x, z, r: 0.55 * s });
       // algunos árboles muertos acompañando
@@ -531,7 +622,11 @@ export class World {
     }
     trunks.count = canopies.count = placed;
     dead.count = deadPlaced;
-    this.scene.add(trunks, canopies, dead);
+    canopyOutlines.count = trunkOutlines.count = placed;
+    // los contornos copian las matrices ya colocadas
+    canopyOutlines.instanceMatrix.copy(canopies.instanceMatrix);
+    trunkOutlines.instanceMatrix.copy(trunks.instanceMatrix);
+    this.scene.add(trunks, canopies, dead, canopyOutlines, trunkOutlines);
 
     // rocas
     let rocksPlaced = 0; guard = 0;
@@ -546,14 +641,16 @@ export class World {
       dummy.rotation.set(rng() * 0.4, rng() * Math.PI * 2, rng() * 0.4);
       dummy.updateMatrix();
       rocks.setMatrixAt(rocksPlaced, dummy.matrix);
-      const tone = 0.8 + rng() * 0.4;
-      tint.setRGB(tone * 0.95, tone, tone * 1.06);
+      const tone = 0.86 + rng() * 0.22;
+      tint.setRGB(tone, tone * 1.0, tone * 1.12);
       rocks.setColorAt(rocksPlaced, tint);
+      rockOutlines.setMatrixAt(rocksPlaced, dummy.matrix);
       if (s > 0.9) this.colliders.push({ x, z, r: s * 0.9 });
       rocksPlaced++;
     }
     rocks.count = rocksPlaced;
-    this.scene.add(rocks);
+    rockOutlines.count = rocksPlaced;
+    this.scene.add(rocks, rockOutlines);
 
     // ==== Hierba instanciada con viento ====
     const grassCount = 9000;
@@ -578,9 +675,9 @@ export class World {
 
     // ==== Setas luminosas ====
     const { stem, cap } = mushroomGeos();
-    const stemMat = stdMat(0xcfc4ae, { roughness: 0.8 });
-    const capPurple = stdMat(0x5a3a7a, { emissive: 0x8a4aff, emissiveIntensity: 0.9, roughness: 0.55 });
-    const capTeal = stdMat(0x1a5a52, { emissive: 0x2ad8c0, emissiveIntensity: 1.0, roughness: 0.55 });
+    const stemMat = stdMat(0xe8dcc4);
+    const capPurple = stdMat(0x8a4ac8, { emissive: 0xb06aff, emissiveIntensity: 1.1 });
+    const capTeal = stdMat(0x1a8a7c, { emissive: 0x2af0d8, emissiveIntensity: 1.2 });
     const musStem = new THREE.InstancedMesh(stem, stemMat, 120);
     const musP = new THREE.InstancedMesh(cap, capPurple, 60);
     const musT = new THREE.InstancedMesh(cap, capTeal, 60);
@@ -681,7 +778,7 @@ export class World {
       geo.rotateX(-Math.PI / 2);
       const mat = new THREE.MeshBasicMaterial({
         map: tex, transparent: true, opacity: o, depthWrite: false,
-        color: 0x9db8d8,
+        color: 0xcfe2f2,
       });
       const m = new THREE.Mesh(geo, mat);
       const y = terrainHeight(x, z);
@@ -774,8 +871,8 @@ export class World {
         uTime: this.waterTime,
         uNormals: { value: waterNormal() },
         uMoonDir: { value: this.moonDir },
-        uDeep: { value: new THREE.Color(0x0a1626) },
-        uSky: { value: new THREE.Color(0x27405e) },
+        uDeep: { value: new THREE.Color(0x145a78) },
+        uSky: { value: new THREE.Color(0x3f86b0) },
       },
       vertexShader: `varying vec2 vUv; varying vec3 vW;
         void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz;
@@ -863,8 +960,8 @@ export class World {
       group.position.set(s.x, h, s.z);
       this.scene.add(group);
       this.colliders.push({ x: s.x, z: s.z, r: 1.35 });
-      const crystalMat = crystal.material as THREE.MeshStandardMaterial;
-      const runeMats = runes.map(r => r.material as THREE.MeshStandardMaterial);
+      const crystalMat = crystal.material as ToonMat;
+      const runeMats = runes.map(r => r.material as ToonMat);
       const light = new THREE.PointLight(0xd8323c, 5, 17, 1.8);
       light.position.set(s.x, h + 4.1, s.z);
       this.scene.add(light);
@@ -946,10 +1043,10 @@ export class World {
     sh.aura.visible = false;
     sh.beam.visible = true;
     sh.beamTarget = 1;
-    const rrMat = sh.runeRing.material as THREE.MeshStandardMaterial;
+    const rrMat = sh.runeRing.material as ToonMat;
     rrMat.color.set(0x37d8c8);
     rrMat.emissive.set(0x37d8c8);
-    const shardMat = sh.shards[0]?.material as THREE.MeshStandardMaterial | undefined;
+    const shardMat = sh.shards[0]?.material as ToonMat | undefined;
     if (shardMat) { shardMat.color.set(0x37d8c8); shardMat.emissive.set(0x37d8c8); }
     for (let i = 0; i < 30; i++) {
       this.fx.spawn({
@@ -969,10 +1066,7 @@ export class World {
     // suelo con textura rúnica
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(A.r - 0.3, 44),
-      new THREE.MeshStandardMaterial({
-        map: arenaFloorTexture(), roughness: 0.92, metalness: 0.04,
-        normalMap: stoneMat().normalMap, envMapIntensity: 0.4,
-      }),
+      toonMat(0xffffff, { map: arenaFloorTexture() }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(A.x, h + 0.32, A.z);
@@ -995,9 +1089,16 @@ export class World {
       this.colliders.push({ x: px, z: pz, r: 0.6 });
     }
     // estandartes raídos
-    const bannerMat = new THREE.MeshStandardMaterial({
+    const bannerMat = new THREE.MeshToonMaterial({
       map: bannerTexture(), transparent: true, alphaTest: 0.3,
-      side: THREE.DoubleSide, roughness: 0.95,
+      side: THREE.DoubleSide, gradientMap: (() => {
+        const v = new Uint8Array([140, 140, 140, 255, 210, 210, 210, 255, 255, 255, 255, 255]);
+        const t = new THREE.DataTexture(v, 3, 1, THREE.RGBAFormat);
+        t.minFilter = t.magFilter = THREE.NearestFilter;
+        t.colorSpace = THREE.NoColorSpace;
+        t.needsUpdate = true;
+        return t;
+      })(),
     });
     registerWind(bannerMat, 0.09, 'bottom');
     for (let i = 0; i < 6; i++) {
@@ -1031,7 +1132,7 @@ export class World {
     sg.group.position.set(A.x, h + 0.25, A.z);
     sg.group.visible = false;
     this.scene.add(sg.group);
-    this.sigil = { group: sg.group, ring: sg.ring, ringMat: sg.ring.material as THREE.MeshStandardMaterial };
+    this.sigil = { group: sg.group, ring: sg.ring, ringMat: sg.ring.material as ToonMat };
   }
 
   setArenaRage(on: boolean) { this.arenaRage = on; }
@@ -1096,6 +1197,13 @@ export class World {
     this.skyTime.value = this.time;
     this.waterTime.value = this.time;
     updateWindAndFlames(this.time);
+
+    // deriva lenta de las nubes anime
+    for (const c of this.clouds) {
+      c.mesh.position.x += c.speed * dt;
+      c.mesh.position.y = c.baseY + Math.sin(this.time * 0.11 + c.baseY) * 1.6;
+      if (c.mesh.position.x > 320) c.mesh.position.x = -320;
+    }
 
     // la luz activa (sol de día / luna de noche) sigue al jugador
     if (camera instanceof THREE.PerspectiveCamera) {

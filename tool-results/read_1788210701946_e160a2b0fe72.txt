@@ -1,0 +1,729 @@
+     1→     1→import * as THREE from 'three';
+     2→     2→import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+     3→     3→import {
+     4→     4→  barkMaps, metalMaps, stoneMaps, woodMaps, grassBladeTexture,
+     5→     5→  terrainDetailNormal,
+     6→     6→} from './textures';
+     7→     7→
+     8→     8→/* ============================================================
+     9→     9→   MODELOS PROCEDURALES + MATERIALES PBR
+    10→    10→   Estilo "fantasía estilizada": geometría simple con texturas
+    11→    11→   procedurales, normales, entorno reflectante y rim light.
+    12→    12→   ============================================================ */
+    13→    13→
+    14→    14→/* ---------- Registro de viento y llamas (animados por World) ---------- */
+    15→    15→
+    16→    16→interface WindEntry { mat: THREE.Material; amp: number }
+    17→    17→const windMats: WindEntry[] = [];
+    18→    18→const flameMats: THREE.ShaderMaterial[] = [];
+    19→    19→const _time = { value: 0 };
+    20→    20→
+    21→    21→export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | 'bottom' = 'top') {
+    22→    22→  if (windMats.some(w => w.mat === mat)) return;
+    23→    23→  windMats.push({ mat, amp });
+    24→    24→  mat.onBeforeCompile = (shader) => {
+    25→    25→    shader.uniforms.uTime = _time;
+    26→    26→    shader.uniforms.uAmp = { value: amp };
+    27→    27→    shader.vertexShader = shader.vertexShader
+    28→    28→      .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform float uAmp;')
+    29→    29→      .replace('#include <begin_vertex>', `#include <begin_vertex>
+    30→    30→        {
+    31→    31→          float wx = 0.0, wz = 0.0;
+    32→    32→          #ifdef USE_INSTANCING
+    33→    33→            wx = instanceMatrix[3][0]; wz = instanceMatrix[3][2];
+    34→    34→          #endif
+    35→    35→          float swayF = pow(${anchor === 'top' ? 'max(uv.y, 0.0)' : 'max(1.0 - uv.y, 0.0)'}, 1.5);
+    36→    36→          float sway = sin(uTime * 1.6 + wx * 0.35 + wz * 0.5) + 0.45 * sin(uTime * 2.9 + wx * 1.4 + wz * 0.8);
+    37→    37→          transformed.x += sway * uAmp * swayF;
+    38→    38→          transformed.z += sway * uAmp * 0.6 * swayF;
+    39→    39→        }`);
+    40→    40→  };
+    41→    41→  mat.customProgramCacheKey = () => `wind_${amp}_${anchor}`;
+    42→    42→}
+    43→    43→
+    44→    44→export function updateWindAndFlames(t: number) {
+    45→    45→  _time.value = t;
+    46→    46→  for (const m of flameMats) m.uniforms.uTime.value = t;
+    47→    47→}
+    48→    48→
+    49→    49→/** Material de llama procedural (plano con forma de fuego animado) */
+    50→    50→export function makeFlameMaterial(core: number, outer: number, scaleY = 1): THREE.ShaderMaterial {
+    51→    51→  const mat = new THREE.ShaderMaterial({
+    52→    52→    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    53→    53→    uniforms: {
+    54→    54→      uTime: { value: 0 },
+    55→    55→      uCore: { value: new THREE.Color(core) },
+    56→    56→      uOuter: { value: new THREE.Color(outer) },
+    57→    57→      uScaleY: { value: scaleY },
+    58→    58→    },
+    59→    59→    vertexShader: `varying vec2 vUv;
+    60→    60→      void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    61→    61→    fragmentShader: `varying vec2 vUv; uniform float uTime; uniform vec3 uCore; uniform vec3 uOuter; uniform float uScaleY;
+    62→    62→      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+    63→    63→      float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+    64→    64→        return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+    65→    65→      void main(){
+    66→    66→        vec2 uv = vUv; uv.y *= uScaleY;
+    67→    67→        float t = uTime;
+    68→    68→        // ondulación horizontal creciente con la altura
+    69→    69→        float wob = (noise(vec2(uv.y*3.0 - t*2.4, t*0.8)) - 0.5) * 0.34 * uv.y;
+    70→    70→        float x = uv.x - 0.5 + wob;
+    71→    71→        // silueta de llama: ancho decreciente hacia arriba
+    72→    72→        float width = mix(0.42, 0.02, pow(uv.y, 0.72));
+    73→    73→        float body = 1.0 - smoothstep(width*0.15, width, abs(x));
+    74→    74→        // flicker vertical
+    75→    75→        float flick = 0.82 + 0.18 * noise(vec2(t*3.1, uv.y*2.0));
+    76→    76→        body *= flick * smoothstep(0.0, 0.10, uv.y) * (1.0 - smoothstep(0.72, 1.0, uv.y + abs(x)*0.8));
+    77→    77→        if (body <= 0.004) discard;
+    78→    78→        float core = smoothstep(0.12, 0.75, body) * (1.0 - uv.y*0.55);
+    79→    79→        vec3 col = mix(uOuter, uCore, clamp(core, 0.0, 1.0));
+    80→    80→        col *= 1.35 + 0.65 * body;
+    81→    81→        gl_FragColor = vec4(col, body);
+    82→    82→      }`,
+    83→    83→  });
+    84→    84→  flameMats.push(mat);
+    85→    85→  return mat;
+    86→    86→}
+    87→    87→
+    88→    88→/** Geometría de llama: dos planos cruzados */
+    89→    89→export function flameGeometry(w: number, h: number): THREE.BufferGeometry {
+    90→    90→  const p1 = new THREE.PlaneGeometry(w, h);
+    91→    91→  p1.translate(0, h / 2, 0);
+    92→    92→  const p2 = new THREE.PlaneGeometry(w, h);
+    93→    93→  p2.translate(0, h / 2, 0);
+    94→    94→  p2.rotateY(Math.PI / 2);
+    95→    95→  return mergeGeometries([p1, p2])!;
+    96→    96→}
+    97→    97→
+    98→    98→/* ---------- Materiales compartidos texturizados ---------- */
+    99→    99→
+   100→   100→export function noiseNormal(repeat: number): THREE.CanvasTexture {
+   101→   101→  const t = terrainDetailNormal().clone() as THREE.CanvasTexture;
+   102→   102→  t.repeat.set(repeat, repeat);
+   103→   103→  t.needsUpdate = true;
+   104→   104→  return t;
+   105→   105→}
+   106→   106→
+   107→   107→let _bark: THREE.MeshStandardMaterial | null = null;
+   108→   108→export function barkMat(): THREE.MeshStandardMaterial {
+   109→   109→  if (!_bark) {
+   110→   110→    const { map, normalMap } = barkMaps();
+   111→   111→    _bark = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.92, metalness: 0 });
+   112→   112→  }
+   113→   113→  return _bark;
+   114→   114→}
+   115→   115→
+   116→   116→let _stone: THREE.MeshStandardMaterial | null = null;
+   117→   117→export function stoneMat(): THREE.MeshStandardMaterial {
+   118→   118→  if (!_stone) {
+   119→   119→    const { map, normalMap } = stoneMaps();
+   120→   120→    _stone = new THREE.MeshStandardMaterial({ map, normalMap, color: 0xc8c8d2, roughness: 0.9, metalness: 0.02 });
+   121→   121→  }
+   122→   122→  return _stone;
+   123→   123→}
+   124→   124→
+   125→   125→let _wood: THREE.MeshStandardMaterial | null = null;
+   126→   126→export function woodMat(): THREE.MeshStandardMaterial {
+   127→   127→  if (!_wood) {
+   128→   128→    const { map, normalMap } = woodMaps();
+   129→   129→    _wood = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.85 });
+   130→   130→  }
+   131→   131→  return _wood;
+   132→   132→}
+   133→   133→
+   134→   134→export function forgedMat(color = 0xbfc6d2): THREE.MeshStandardMaterial {
+   135→   135→  const { map, normalMap, roughnessMap } = metalMaps();
+   136→   136→  return new THREE.MeshStandardMaterial({
+   137→   137→    map, normalMap, roughnessMap, color,
+   138→   138→    metalness: 0.85, roughness: 0.5, envMapIntensity: 1.1,
+   139→   139→  });
+   140→   140→}
+   141→   141→
+   142→   142→/* ---------- Materiales básicos (compat API) ---------- */
+   143→   143→
+   144→   144→export function stdMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
+   145→   145→  return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.05, ...opts });
+   146→   146→}
+   147→   147→export function metalMat(color: number) {
+   148→   148→  return new THREE.MeshStandardMaterial({ color, roughness: 0.38, metalness: 0.82, envMapIntensity: 1.0 });
+   149→   149→}
+   150→   150→export function emisMat(color: number, intensity = 1.6) {
+   151→   151→  return new THREE.MeshStandardMaterial({
+   152→   152→    color, emissive: color, emissiveIntensity: intensity, roughness: 0.55, metalness: 0,
+   153→   153→  });
+   154→   154→}
+   155→   155→
+   156→   156→/** Añade rim light (fresnel) a un material estándar */
+   157→   157→export function addRim(mat: THREE.MeshStandardMaterial, color: number, strength = 0.35, power = 3.2) {
+   158→   158→  const c = new THREE.Color(color);
+   159→   159→  mat.onBeforeCompile = (shader) => {
+   160→   160→    shader.uniforms.uRimColor = { value: c };
+   161→   161→    shader.uniforms.uRimStrength = { value: strength };
+   162→   162→    shader.uniforms.uRimPower = { value: power };
+   163→   163→    shader.fragmentShader = shader.fragmentShader
+   164→   164→      .replace('#include <common>', `#include <common>
+   165→   165→        uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;`)
+   166→   166→      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+   167→   167→        {
+   168→   168→          float rimF = pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), uRimPower);
+   169→   169→          totalEmissiveRadiance += uRimColor * rimF * uRimStrength;
+   170→   170→        }`);
+   171→   171→  };
+   172→   172→  mat.customProgramCacheKey = () => `rim_${color}_${strength}_${power}`;
+   173→   173→  return mat;
+   174→   174→}
+   175→   175→
+   176→   176→function mesh(geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0, cast = true) {
+   177→   177→  const m = new THREE.Mesh(geo, mat);
+   178→   178→  m.position.set(x, y, z);
+   179→   179→  m.castShadow = cast;
+   180→   180→  return m;
+   181→   181→}
+   182→   182→
+   183→   183→/* ---------- Armas ---------- */
+   184→   184→
+   185→   185→/** Hoja de sección romboidal (más creíble que una caja) */
+   186→   186→function bladeGeo(len: number, wBase: number, tipFrac = 0.22): THREE.BufferGeometry {
+   187→   187→  const g = new THREE.CylinderGeometry(wBase * 0.22, wBase, len * (1 - tipFrac), 4, 1);
+   188→   188→  g.translate(0, len * (1 - tipFrac) / 2, 0);
+   189→   189→  const tip = new THREE.ConeGeometry(wBase * 0.22, len * tipFrac, 4);
+   190→   190→  tip.rotateY(Math.PI / 4);
+   191→   191→  tip.translate(0, len * (1 - tipFrac) + (len * tipFrac) / 2, 0);
+   192→   192→  const merged = mergeGeometries([g.toNonIndexed(), tip.toNonIndexed()])!;
+   193→   193→  merged.rotateY(Math.PI / 4);
+   194→   194→  merged.scale(1, 1, 0.42);
+   195→   195→  merged.computeVertexNormals();
+   196→   196→  return merged;
+   197→   197→}
+   198→   198→
+   199→   199→export function buildSword(scale = 1): THREE.Group {
+   200→   200→  const g = new THREE.Group();
+   201→   201→  const steel = forgedMat(0xcdd6e2);
+   202→   202→  const gold = forgedMat(0xc7a24a);
+   203→   203→  const blade = mesh(bladeGeo(0.85 * scale, 0.05 * scale), steel, 0, 0.1 * scale, 0);
+   204→   204→  // ranura luminosa (runa encendida)
+   205→   205→  const rune = mesh(new THREE.BoxGeometry(0.012 * scale, 0.5 * scale, 0.024 * scale),
+   206→   206→    emisMat(0x54e0ff, 1.5), 0, 0.5 * scale, 0, false);
+   207→   207→  const guard = mesh(new THREE.TorusGeometry(0.085 * scale, 0.02 * scale, 6, 12, Math.PI), gold, 0, 0.1 * scale, 0);
+   208→   208→  guard.rotation.z = Math.PI;
+   209→   209→  const grip = mesh(new THREE.CylinderGeometry(0.026 * scale, 0.03 * scale, 0.2 * scale, 8), woodMat(), 0, -0.02 * scale, 0);
+   210→   210→  const pommel = mesh(new THREE.OctahedronGeometry(0.045 * scale, 0), gold, 0, -0.14 * scale, 0);
+   211→   211→  g.add(blade, rune, guard, grip, pommel);
+   212→   212→  return g;
+   213→   213→}
+   214→   214→
+   215→   215→export function buildGreatsword(scale = 1): THREE.Group {
+   216→   216→  const g = new THREE.Group();
+   217→   217→  const dark = forgedMat(0x4a4a58);
+   218→   218→  const blade = mesh(bladeGeo(1.62 * scale, 0.15 * scale, 0.16), dark, 0, 0.12 * scale, 0);
+   219→   219→  // grietas incandescentes
+   220→   220→  const crackMat = emisMat(0xff3a1a, 1.8);
+   221→   221→  for (let i = 0; i < 3; i++) {
+   222→   222→    const crack = mesh(new THREE.BoxGeometry(0.016 * scale, 0.3 * scale - i * 0.04 * scale, 0.05 * scale),
+   223→   223→      crackMat, 0, (0.45 + i * 0.35) * scale, 0, false);
+   224→   224→    crack.rotation.z = (i - 1) * 0.18;
+   225→   225→    g.add(crack);
+   226→   226→  }
+   227→   227→  // púas del lomo
+   228→   228→  for (let i = 0; i < 3; i++) {
+   229→   229→    const spike = mesh(new THREE.ConeGeometry(0.03 * scale, 0.12 * scale, 4), dark,
+   230→   230→      0.07 * scale, (0.35 + i * 0.4) * scale, 0);
+   231→   231→    spike.rotation.z = -1.9;
+   232→   232→    g.add(spike);
+   233→   233→  }
+   234→   234→  const guard = mesh(new THREE.BoxGeometry(0.44 * scale, 0.07 * scale, 0.1 * scale), forgedMat(0x2a2a34), 0, 0.1 * scale, 0);
+   235→   235→  const grip = mesh(new THREE.CylinderGeometry(0.04 * scale, 0.05 * scale, 0.34 * scale, 8), woodMat(), 0, -0.1 * scale, 0);
+   236→   236→  const skull = mesh(new THREE.IcosahedronGeometry(0.075 * scale, 0), emisMat(0xff2a1a, 1.6), 0, -0.3 * scale, 0);
+   237→   237→  g.add(blade, guard, grip, skull);
+   238→   238→  return g;
+   239→   239→}
+   240→   240→
+   241→   241→export function buildClub(): THREE.Group {
+   242→   242→  const g = new THREE.Group();
+   243→   243→  const stick = mesh(new THREE.CylinderGeometry(0.045, 0.06, 0.75, 8), barkMat(), 0, 0.3, 0);
+   244→   244→  const head = mesh(new THREE.DodecahedronGeometry(0.17, 0), woodMat(), 0, 0.72, 0);
+   245→   245→  const spike = mesh(new THREE.ConeGeometry(0.05, 0.15, 4), forgedMat(0x8a8a94), 0, 0.88, 0);
+   246→   246→  g.add(stick, head, spike);
+   247→   247→  return g;
+   248→   248→}
+   249→   249→
+   250→   250→export function buildAxe(): THREE.Group {
+   251→   251→  const g = new THREE.Group();
+   252→   252→  const handle = mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.15, 8), woodMat(), 0, 0.45, 0);
+   253→   253→  // hoja: media luna con forma de cuña
+   254→   254→  const headGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.07, 3);
+   255→   255→  const head = mesh(headGeo, forgedMat(0x9aa2ae), 0.13, 0.95, 0);
+   256→   256→  head.rotation.x = Math.PI / 2;
+   257→   257→  head.rotation.z = Math.PI;
+   258→   258→  const edge = mesh(new THREE.TorusGeometry(0.3, 0.022, 5, 10, Math.PI * 0.8), forgedMat(0xd8dee8), 0.13, 0.95, 0);
+   259→   259→  edge.rotation.x = Math.PI / 2;
+   260→   260→  edge.rotation.z = Math.PI * 0.62;
+   261→   261→  g.add(handle, head, edge);
+   262→   262→  return g;
+   263→   263→}
+   264→   264→
+   265→   265→export function buildBow(): THREE.Group {
+   266→   266→  const g = new THREE.Group();
+   267→   267→  const arc = mesh(new THREE.TorusGeometry(0.42, 0.03, 6, 14, Math.PI * 1.15), woodMat(), 0, 0.35, 0);
+   268→   268→  arc.rotation.z = Math.PI * 0.42;
+   269→   269→  const strMat = new THREE.LineBasicMaterial({ color: 0xd8d3c0 });
+   270→   270→  const pts = [new THREE.Vector3(-0.38, 0.05, 0), new THREE.Vector3(0.06, 0.35, 0), new THREE.Vector3(-0.38, 0.65, 0)];
+   271→   271→  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), strMat);
+   272→   272→  g.add(arc, line);
+   273→   273→  return g;
+   274→   274→}
+   275→   275→
+   276→   276→export function buildShield(): THREE.Group {
+   277→   277→  const g = new THREE.Group();
+   278→   278→  const face = mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.045, 14), forgedMat(0x5a6a82), 0, 0, 0);
+   279→   279→  face.rotation.x = Math.PI / 2;
+   280→   280→  const rim = mesh(new THREE.TorusGeometry(0.3, 0.028, 6, 16), forgedMat(0x8a6a2f), 0, 0, 0);
+   281→   281→  const boss0 = mesh(new THREE.SphereGeometry(0.075, 8, 6), forgedMat(0xc7a24a), 0, 0, 0.035);
+   282→   282→  const sigil = mesh(new THREE.TorusGeometry(0.14, 0.014, 5, 12), emisMat(0x54e0ff, 0.9), 0, 0, 0.03, false);
+   283→   283→  g.add(face, rim, boss0, sigil);
+   284→   284→  return g;
+   285→   285→}
+   286→   286→
+   287→   287→export function buildArrowMesh(): THREE.Group {
+   288→   288→  const g = new THREE.Group();
+   289→   289→  const shaft = mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.7, 5), woodMat(), 0, 0, 0, false);
+   290→   290→  shaft.rotation.x = Math.PI / 2;
+   291→   291→  const tip = mesh(new THREE.ConeGeometry(0.045, 0.14, 4), forgedMat(0xcdd6e2), 0, 0, 0.4, false);
+   292→   292→  tip.rotation.x = Math.PI / 2;
+   293→   293→  g.add(shaft, tip);
+   294→   294→  return g;
+   295→   295→}
+   296→   296→
+   297→   297→/* ---------- Humanoide paramétrico ---------- */
+   298→   298→
+   299→   299→export interface HumanoidOpts {
+   300→   300→  scale?: number;
+   301→   301→  skin: number;
+   302→   302→  torso: number;
+   303→   303→  legs: number;
+   304→   304→  arms?: number;
+   305→   305→  eyes?: number | null;
+   306→   306→  eyeIntensity?: number;
+   307→   307→  weapon?: 'sword' | 'greatsword' | 'club' | 'axe' | 'bow' | 'none';
+   308→   308→  shield?: boolean;
+   309→   309→  helmet?: 'none' | 'knight' | 'horns' | 'hood';
+   310→   310→  helmetColor?: number;
+   311→   311→  shoulder?: number | null;
+   312→   312→  chest?: number | null;
+   313→   313→  cape?: number | null;
+   314→   314→  capeTattered?: boolean;
+   315→   315→  rim?: { color: number; strength: number };
+   316→   316→  bigHead?: boolean;
+   317→   317→  hunched?: boolean;
+   318→   318→}
+   319→   319→
+   320→   320→export interface HumanoidRig {
+   321→   321→  root: THREE.Group;
+   322→   322→  body: THREE.Group;
+   323→   323→  torso: THREE.Group;
+   324→   324→  head: THREE.Group;
+   325→   325→  armL: THREE.Group;
+   326→   326→  armR: THREE.Group;
+   327→   327→  legL: THREE.Group;
+   328→   328→  legR: THREE.Group;
+   329→   329→  handR: THREE.Group;
+   330→   330→  handL: THREE.Group;
+   331→   331→  weapon: THREE.Group | null;
+   332→   332→  weaponMat: THREE.MeshStandardMaterial | null;
+   333→   333→  height: number;
+   334→   334→}
+   335→   335→
+   336→   336→export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
+   337→   337→  const s = o.scale ?? 1;
+   338→   338→  const root = new THREE.Group();
+   339→   339→
+   340→   340→  const mkBody = (color: number, rough: number) => {
+   341→   341→    const m = stdMat(color, { roughness: rough });
+   342→   342→    if (o.rim) addRim(m, o.rim.color, o.rim.strength);
+   343→   343→    return m;
+   344→   344→  };
+   345→   345→  const skin = mkBody(o.skin, 0.68);
+   346→   346→  const torsoMat = mkBody(o.torso, 0.82);
+   347→   347→  const legMat = mkBody(o.legs, 0.82);
+   348→   348→  const armMat = mkBody(o.arms ?? o.skin, 0.72);
+   349→   349→
+   350→   350→  const legLen = 0.52, torsoH = 0.55, headR = o.bigHead ? 0.21 : 0.155;
+   351→   351→
+   352→   352→  const body = new THREE.Group();
+   353→   353→  body.position.y = legLen;
+   354→   354→  root.add(body);
+   355→   355→
+   356→   356→  const pelvis = mesh(new THREE.BoxGeometry(0.3, 0.16, 0.2), legMat, 0, 0.04, 0);
+   357→   357→  body.add(pelvis);
+   358→   358→
+   359→   359→  const torso = new THREE.Group();
+   360→   360→  body.add(torso);
+   361→   361→  const chest = mesh(new THREE.BoxGeometry(0.34, torsoH, 0.22), torsoMat, 0, torsoH / 2, 0);
+   362→   362→  torso.add(chest);
+   363→   363→  if (o.chest !== null && o.chest !== undefined) {
+   364→   364→    torso.add(mesh(new THREE.BoxGeometry(0.37, torsoH * 0.55, 0.25), forgedMat(o.chest), 0, torsoH * 0.62, 0));
+   365→   365→  }
+   366→   366→  if (o.hunched) torso.rotation.x = 0.35;
+   367→   367→
+   368→   368→  // Capa
+   369→   369→  if (o.cape !== null && o.cape !== undefined) {
+   370→   370→    const capeGroup = new THREE.Group();
+   371→   371→    capeGroup.position.set(0, torsoH * 0.9, -0.15);
+   372→   372→    capeGroup.rotation.x = 0.14;
+   373→   373→    capeGroup.rotation.y = Math.PI;
+   374→   374→    const geo = new THREE.PlaneGeometry(0.5, 0.68, 4, 6);
+   375→   375→    geo.translate(0, -0.34, 0);
+   376→   376→    if (o.capeTattered) {
+   377→   377→      const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+   378→   378→      for (let i = 0; i < pos.count; i++) {
+   379→   379→        if (pos.getY(i) < -0.3) {
+   380→   380→          pos.setY(i, pos.getY(i) - Math.random() * 0.1);
+   381→   381→          pos.setX(i, pos.getX(i) + (Math.random() - 0.5) * 0.06);
+   382→   382→        }
+   383→   383→      }
+   384→   384→      geo.computeVertexNormals();
+   385→   385→    }
+   386→   386→    const capeMat = stdMat(o.cape, { roughness: 0.95, side: THREE.DoubleSide });
+   387→   387→    registerWind(capeMat, 0.05);
+   388→   388→    const cape = new THREE.Mesh(geo, capeMat);
+   389→   389→    cape.castShadow = true;
+   390→   390→    capeGroup.add(cape);
+   391→   391→    torso.add(capeGroup);
+   392→   392→  }
+   393→   393→
+   394→   394→  // Cabeza
+   395→   395→  const head = new THREE.Group();
+   396→   396→  head.position.y = torsoH + 0.06;
+   397→   397→  torso.add(head);
+   398→   398→  head.add(mesh(new THREE.SphereGeometry(headR, 12, 10), skin, 0, headR * 0.8, 0));
+   399→   399→  if (o.eyes !== null && o.eyes !== undefined) {
+   400→   400→    const eyeMat = emisMat(o.eyes, o.eyeIntensity ?? 2.2);
+   401→   401→    const eL = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, -0.06, headR * 0.85, headR * 0.78, false);
+   402→   402→    const eR = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, 0.06, headR * 0.85, headR * 0.78, false);
+   403→   403→    head.add(eL, eR);
+   404→   404→  }
+   405→   405→  if (o.helmet === 'knight') {
+   406→   406→    const hm = forgedMat(o.helmetColor ?? 0x9aa2ad);
+   407→   407→    head.add(mesh(new THREE.SphereGeometry(headR + 0.035, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.62), hm, 0, headR * 0.82, 0));
+   408→   408→    head.add(mesh(new THREE.BoxGeometry(headR * 1.7, 0.05, 0.03), hm, 0, headR * 0.72, headR * 0.82));
+   409→   409→    // penacho
+   410→   410→    const plumeMat = emisMat(0xb8443a, 0.5);
+   411→   411→    const plume = mesh(new THREE.ConeGeometry(0.035, 0.2, 6), plumeMat, 0, headR * 1.5, -0.02, false);
+   412→   412→    plume.rotation.x = -0.5;
+   413→   413→    head.add(plume);
+   414→   414→  } else if (o.helmet === 'horns') {
+   415→   415→    const hm = forgedMat(o.helmetColor ?? 0x22222a);
+   416→   416→    head.add(mesh(new THREE.SphereGeometry(headR + 0.03, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.6), hm, 0, headR * 0.84, 0));
+   417→   417→    const hornGeo = new THREE.ConeGeometry(0.05, 0.3, 6);
+   418→   418→    const h1 = mesh(hornGeo, stdMat(0x6b5a4a), -0.16, headR * 1.25, -0.02);
+   419→   419→    h1.rotation.z = 0.7;
+   420→   420→    const h2 = mesh(hornGeo, stdMat(0x6b5a4a), 0.16, headR * 1.25, -0.02);
+   421→   421→    h2.rotation.z = -0.7;
+   422→   422→    head.add(h1, h2);
+   423→   423→  } else if (o.helmet === 'hood') {
+   424→   424→    const hm = stdMat(o.helmetColor ?? 0x2d2a33, { roughness: 0.95 });
+   425→   425→    const hood = mesh(new THREE.ConeGeometry(headR + 0.06, 0.3, 7), hm, 0, headR * 1.0, -0.02);
+   426→   426→    hood.rotation.x = 0.22;
+   427→   427→    head.add(hood);
+   428→   428→  }
+   429→   429→
+   430→   430→  // Brazos
+   431→   431→  const makeArm = (side: number) => {
+   432→   432→    const arm = new THREE.Group();
+   433→   433→    arm.position.set(side * 0.225, torsoH * 0.88, 0);
+   434→   434→    torso.add(arm);
+   435→   435→    arm.add(mesh(new THREE.CylinderGeometry(0.052, 0.045, 0.5, 8), armMat, 0, -0.25, 0));
+   436→   436→    if (o.shoulder !== null && o.shoulder !== undefined) {
+   437→   437→      arm.add(mesh(new THREE.SphereGeometry(0.1, 8, 6), forgedMat(o.shoulder), 0, 0.02, 0));
+   438→   438→    }
+   439→   439→    const hand = new THREE.Group();
+   440→   440→    hand.position.y = -0.5;
+   441→   441→    arm.add(hand);
+   442→   442→    hand.add(mesh(new THREE.SphereGeometry(0.055, 6, 5), skin, 0, 0, 0));
+   443→   443→    return { arm, hand };
+   444→   444→  };
+   445→   445→  const aL = makeArm(-1), aR = makeArm(1);
+   446→   446→  aL.arm.rotation.x = -0.12; aR.arm.rotation.x = -0.12;
+   447→   447→  aL.arm.rotation.z = 0.1; aR.arm.rotation.z = -0.1;
+   448→   448→
+   449→   449→  // Piernas
+   450→   450→  const makeLeg = (side: number) => {
+   451→   451→    const leg = new THREE.Group();
+   452→   452→    leg.position.set(side * 0.11, 0.02, 0);
+   453→   453→    body.add(leg);
+   454→   454→    leg.add(mesh(new THREE.CylinderGeometry(0.065, 0.05, legLen, 8), legMat, 0, -legLen / 2 + 0.02, 0));
+   455→   455→    leg.add(mesh(new THREE.BoxGeometry(0.1, 0.06, 0.2), stdMat(0x2a2018), 0, -legLen + 0.02, 0.04));
+   456→   456→    return leg;
+   457→   457→  };
+   458→   458→  const legL = makeLeg(-1), legR = makeLeg(1);
+   459→   459→
+   460→   460→  // Arma en mano derecha
+   461→   461→  let weapon: THREE.Group | null = null;
+   462→   462→  let weaponMat: THREE.MeshStandardMaterial | null = null;
+   463→   463→  if (o.weapon && o.weapon !== 'none') {
+   464→   464→    weapon = new THREE.Group();
+   465→   465→    weapon.position.y = -0.06;
+   466→   466→    let w: THREE.Group;
+   467→   467→    switch (o.weapon) {
+   468→   468→      case 'sword': w = buildSword(1); break;
+   469→   469→      case 'greatsword': w = buildGreatsword(1); break;
+   470→   470→      case 'club': w = buildClub(); break;
+   471→   471→      case 'axe': w = buildAxe(); break;
+   472→   472→      case 'bow': w = buildBow(); break;
+   473→   473→      default: w = buildSword(1);
+   474→   474→    }
+   475→   475→    weapon.add(w);
+   476→   476→    weapon.traverse(m => {
+   477→   477→      if (m instanceof THREE.Mesh) {
+   478→   478→        const mm = m.material as THREE.MeshStandardMaterial;
+   479→   479→        if (mm && mm.emissive && mm.emissiveIntensity > 0) weaponMat = mm;
+   480→   480→      }
+   481→   481→    });
+   482→   482→    aR.hand.add(weapon);
+   483→   483→  }
+   484→   484→
+   485→   485→  // Escudo en mano izquierda
+   486→   486→  if (o.shield) {
+   487→   487→    const sh = buildShield();
+   488→   488→    sh.position.y = -0.34;
+   489→   489→    sh.rotation.x = Math.PI / 2;
+   490→   490→    sh.rotation.y = -0.25;
+   491→   491→    aL.hand.add(sh);
+   492→   492→  }
+   493→   493→
+   494→   494→  root.scale.setScalar(s);
+   495→   495→  return {
+   496→   496→    root, body, torso, head,
+   497→   497→    armL: aL.arm, armR: aR.arm, legL, legR,
+   498→   498→    handR: aR.hand, handL: aL.hand, weapon, weaponMat: weaponMat ?? null,
+   499→   499→    height: (legLen + torsoH + headR * 2.4) * s,
+   500→   500→  };
+   501→   501→}
+   502→   502→
+   503→   503→/* ---------- Creadores de personajes ---------- */
+   504→   504→
+   505→   505→export function buildPlayerRig(): HumanoidRig {
+   506→   506→  return buildHumanoid({
+   507→   507→    skin: 0xd9b08c, torso: 0x46506b, legs: 0x333c4e, arms: 0x46506b,
+   508→   508→    eyes: null, weapon: 'sword', shield: true,
+   509→   509→    helmet: 'knight', helmetColor: 0x9aa2ad,
+   510→   510→    chest: 0x8a93a1, shoulder: 0x8a93a1,
+   511→   511→    cape: 0x611b26,
+   512→   512→    rim: { color: 0x9fc4ff, strength: 0.22 },
+   513→   513→  });
+   514→   514→}
+   515→   515→export function buildGoblinRig(): HumanoidRig {
+   516→   516→  return buildHumanoid({
+   517→   517→    scale: 0.72, skin: 0x7ba33e, torso: 0x5d4022, legs: 0x4a331c,
+   518→   518→    eyes: 0xffd23e, weapon: 'club', bigHead: true, hunched: true,
+   519→   519→  });
+   520→   520→}
+   521→   521→export function buildArcherRig(): HumanoidRig {
+   522→   522→  return buildHumanoid({
+   523→   523→    scale: 0.95, skin: 0xd8d3c0, torso: 0x37332e, legs: 0x2e2a26,
+   524→   524→    eyes: 0x9df2ff, weapon: 'bow', helmet: 'hood', helmetColor: 0x37332e,
+   525→   525→  });
+   526→   526→}
+   527→   527→export function buildOrcRig(): HumanoidRig {
+   528→   528→  return buildHumanoid({
+   529→   529→    scale: 1.42, skin: 0x9a5641, torso: 0x4a3a30, legs: 0x3a2d24,
+   530→   530→    eyes: 0xff7a2a, weapon: 'axe', shoulder: 0x6b6b70, hunched: true,
+   531→   531→  });
+   532→   532→}
+   533→   533→export function buildBossRig(): HumanoidRig {
+   534→   534→  return buildHumanoid({
+   535→   535→    scale: 1.95, skin: 0x3a3a46, torso: 0x2a2a35, legs: 0x22222c,
+   536→   536→    eyes: 0xff2211, eyeIntensity: 3, weapon: 'greatsword',
+   537→   537→    helmet: 'horns', helmetColor: 0x1c1c26, chest: 0x1c1c26, shoulder: 0x1c1c26,
+   538→   538→    cape: 0x160b10, capeTattered: true,
+   539→   539→    rim: { color: 0xff3a24, strength: 0.4 },
+   540→   540→  });
+   541→   541→}
+   542→   542→
+   543→   543→/* ---------- Props del mundo ---------- */
+   544→   544→
+   545→   545→export function buildObelisk(cleansed: boolean): {
+   546→   546→  group: THREE.Group; crystal: THREE.Mesh; runes: THREE.Mesh[]; shards: THREE.Mesh[];
+   547→   547→} {
+   548→   548→  const g = new THREE.Group();
+   549→   549→  const st = stoneMat();
+   550→   550→  const base = mesh(new THREE.CylinderGeometry(1.15, 1.45, 0.5, 8), st, 0, 0.25, 0);
+   551→   551→  const shaft = mesh(new THREE.CylinderGeometry(0.35, 0.64, 3.4, 7), st, 0, 2.0, 0);
+   552→   552→  const ring = mesh(new THREE.TorusGeometry(0.52, 0.06, 6, 14), st, 0, 3.55, 0);
+   553→   553→  ring.rotation.x = Math.PI / 2;
+   554→   554→  const crystalMat = cleansed ? emisMat(0x37d8c8, 2.4) : emisMat(0xd8323c, 1.8);
+   555→   555→  const crystal = mesh(new THREE.OctahedronGeometry(0.46, 0), crystalMat, 0, 4.15, 0);
+   556→   556→  g.add(base, shaft, ring, crystal);
+   557→   557→  const runes: THREE.Mesh[] = [];
+   558→   558→  for (let i = 0; i < 4; i++) {
+   559→   559→    const r = mesh(new THREE.BoxGeometry(0.1, 0.3, 0.03),
+   560→   560→      cleansed ? emisMat(0x37d8c8, 1.6) : emisMat(0xd8323c, 1.2),
+   561→   561→      Math.sin((i / 4) * Math.PI * 2) * 0.56, 1.2 + (i % 2) * 0.8, Math.cos((i / 4) * Math.PI * 2) * 0.56, false);
+   562→   562→    r.lookAt(0, r.position.y, 0);
+   563→   563→    g.add(r);
+   564→   564→    runes.push(r);
+   565→   565→  }
+   566→   566→  // fragmentos orbitando el cristal
+   567→   567→  const shards: THREE.Mesh[] = [];
+   568→   568→  const shardMat = cleansed ? emisMat(0x37d8c8, 1.4) : emisMat(0xd8323c, 1.1);
+   569→   569→  for (let i = 0; i < 3; i++) {
+   570→   570→    const sh = mesh(new THREE.TetrahedronGeometry(0.11), shardMat, 0, 0, 0, false);
+   571→   571→    g.add(sh);
+   572→   572→    shards.push(sh);
+   573→   573→  }
+   574→   574→  return { group: g, crystal, runes, shards };
+   575→   575→}
+   576→   576→
+   577→   577→export function buildBonfire(): { group: THREE.Group; light: THREE.PointLight; logs: THREE.Mesh[] } {
+   578→   578→  const g = new THREE.Group();
+   579→   579→  const logs: THREE.Mesh[] = [];
+   580→   580→  for (let i = 0; i < 5; i++) {
+   581→   581→    const log = mesh(new THREE.CylinderGeometry(0.09, 0.11, 1.3, 6), barkMat(),
+   582→   582→      Math.sin((i / 5) * Math.PI * 2) * 0.35, 0.22, Math.cos((i / 5) * Math.PI * 2) * 0.35);
+   583→   583→    log.rotation.z = Math.PI / 2.4;
+   584→   584→    log.rotation.y = (i / 5) * Math.PI * 2;
+   585→   585→    g.add(log); logs.push(log);
+   586→   586→  }
+   587→   587→  // anillo de piedras
+   588→   588→  for (let i = 0; i < 8; i++) {
+   589→   589→    const a = (i / 8) * Math.PI * 2;
+   590→   590→    const st = mesh(new THREE.DodecahedronGeometry(0.16 + (i % 2) * 0.05, 0), stoneMat(),
+   591→   591→      Math.cos(a) * 0.78, 0.08, Math.sin(a) * 0.78);
+   592→   592→    st.rotation.set(Math.random(), Math.random() * 3, Math.random());
+   593→   593→    g.add(st);
+   594→   594→  }
+   595→   595→  // llamas shader (cruzadas) + núcleo brillante
+   596→   596→  const flame = new THREE.Mesh(flameGeometry(1.05, 1.5), makeFlameMaterial(0xffe9a8, 0xff6a1a));
+   597→   597→  flame.position.y = 0.28;
+   598→   598→  flame.name = 'flame';
+   599→   599→  g.add(flame);
+   600→   600→  const inner = new THREE.Mesh(flameGeometry(0.5, 0.7), makeFlameMaterial(0xffffff, 0xffc23e));
+   601→   601→  inner.position.y = 0.22;
+   602→   602→  inner.name = 'flameInner';
+   603→   603→  g.add(inner);
+   604→   604→  const light = new THREE.PointLight(0xff9040, 16, 22, 1.55);
+   605→   605→  light.position.set(0, 1.5, 0);
+   606→   606→  g.add(light);
+   607→   607→  const glow = mesh(new THREE.CylinderGeometry(1.55, 1.85, 0.06, 14), stdMat(0x1c1c22), 0, 0.03, 0, false);
+   608→   608→  g.add(glow);
+   609→   609→  return { group: g, light, logs };
+   610→   610→}
+   611→   611→
+   612→   612→export function buildTorch(soul = false): { group: THREE.Group; light: THREE.PointLight; flame: THREE.Mesh } {
+   613→   613→  const g = new THREE.Group();
+   614→   614→  const pole = mesh(new THREE.CylinderGeometry(0.06, 0.085, 2.4, 7), woodMat(), 0, 1.2, 0);
+   615→   615→  const bowl = mesh(new THREE.CylinderGeometry(0.22, 0.12, 0.22, 8), forgedMat(0x4a4a52), 0, 2.45, 0);
+   616→   616→  const flame = new THREE.Mesh(
+   617→   617→    flameGeometry(0.42, 0.62),
+   618→   618→    soul ? makeFlameMaterial(0xffc9b0, 0xd8202e) : makeFlameMaterial(0xffe2a0, 0xff7a1e),
+   619→   619→  );
+   620→   620→  flame.position.y = 2.62;
+   621→   621→  const light = new THREE.PointLight(soul ? 0xe03040 : 0xff8030, 6.5, 14, 1.8);
+   622→   622→  light.position.set(0, 2.95, 0);
+   623→   623→  g.add(pole, bowl, flame, light);
+   624→   624→  return { group: g, light, flame };
+   625→   625→}
+   626→   626→
+   627→   627→export function buildRuinedPillar(h = 2.4): THREE.Group {
+   628→   628→  const g = new THREE.Group();
+   629→   629→  const st = stoneMat();
+   630→   630→  g.add(mesh(new THREE.BoxGeometry(0.72, 0.26, 0.72), st, 0, 0.13, 0));
+   631→   631→  const col = mesh(new THREE.CylinderGeometry(0.26, 0.3, h, 10), st, 0, h / 2 + 0.22, 0);
+   632→   632→  col.rotation.z = 0.03;
+   633→   633→  g.add(col);
+   634→   634→  // capitel caído
+   635→   635→  const cap = mesh(new THREE.BoxGeometry(0.78, 0.22, 0.78), st, 0.08, h + 0.3, 0.05);
+   636→   636→  cap.rotation.set(0.1, 0.4, -0.12);
+   637→   637→  g.add(cap);
+   638→   638→  return g;
+   639→   639→}
+   640→   640→
+   641→   641→export function buildBrokenArch(): THREE.Group {
+   642→   642→  const g = new THREE.Group();
+   643→   643→  const st = stoneMat();
+   644→   644→  const l = mesh(new THREE.BoxGeometry(0.55, 3.4, 0.55), st, -1.5, 1.7, 0);
+   645→   645→  const r = mesh(new THREE.BoxGeometry(0.55, 2.6, 0.55), st, 1.5, 1.3, 0.1);
+   646→   646→  r.rotation.z = 0.08;
+   647→   647→  const top = mesh(new THREE.BoxGeometry(3.8, 0.5, 0.6), st, -0.2, 3.55, 0);
+   648→   648→  top.rotation.z = -0.1;
+   649→   649→  g.add(l, r, top);
+   650→   650→  return g;
+   651→   651→}
+   652→   652→
+   653→   653→export function buildPickupOrb(color: number): { group: THREE.Group; core: THREE.Mesh } {
+   654→   654→  const g = new THREE.Group();
+   655→   655→  const core = mesh(new THREE.IcosahedronGeometry(0.16, 0), emisMat(color, 2.4), 0, 0, 0, false);
+   656→   656→  const halo = mesh(new THREE.SphereGeometry(0.24, 10, 8),
+   657→   657→    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending, depthWrite: false }), 0, 0, 0, false);
+   658→   658→  g.add(core, halo);
+   659→   659→  return { group: g, core };
+   660→   660→}
+   661→   661→
+   662→   662→export function buildSigil(): { group: THREE.Group; ring: THREE.Mesh } {
+   663→   663→  const g = new THREE.Group();
+   664→   664→  const mat = stoneMat();
+   665→   665→  g.add(mesh(new THREE.CylinderGeometry(2.2, 2.5, 0.3, 24), mat, 0, 0.15, 0));
+   666→   666→  const ring = mesh(new THREE.TorusGeometry(1.5, 0.09, 8, 32), emisMat(0xd8323c, 1.6), 0, 0.4, 0, false);
+   667→   667→  ring.rotation.x = Math.PI / 2;
+   668→   668→  g.add(ring);
+   669→   669→  return { group: g, ring };
+   670→   670→}
+   671→   671→
+   672→   672→/* ---------- Hierba: mata de 3 hojas curvadas (textura alpha) ---------- */
+   673→   673→
+   674→   674→export function grassGeometry(): THREE.BufferGeometry {
+   675→   675→  const blades: THREE.BufferGeometry[] = [];
+   676→   676→  const H = 0.6;
+   677→   677→  for (let i = 0; i < 3; i++) {
+   678→   678→    const p = new THREE.PlaneGeometry(0.2, H, 1, 3);
+   679→   679→    p.translate(0, H / 2, 0);
+   680→   680→    // curvatura de la hoja
+   681→   681→    const pos = p.getAttribute('position') as THREE.BufferAttribute;
+   682→   682→    for (let v = 0; v < pos.count; v++) {
+   683→   683→      const y = pos.getY(v);
+   684→   684→      const k = Math.pow(y / H, 2);
+   685→   685→      pos.setZ(v, k * 0.16);
+   686→   686→      pos.setX(v, pos.getX(v) * (1 - k * 0.35));
+   687→   687→    }
+   688→   688→    p.rotateY((i / 3) * Math.PI + 0.3);
+   689→   689→    p.rotateX(((i * 37) % 10 - 5) * 0.02);
+   690→   690→    blades.push(p);
+   691→   691→  }
+   692→   692→  const merged = mergeGeometries(blades)!;
+   693→   693→  merged.computeVertexNormals();
+   694→   694→  return merged;
+   695→   695→}
+   696→   696→
+   697→   697→export function grassMaterial(): THREE.MeshStandardMaterial {
+   698→   698→  const mat = new THREE.MeshStandardMaterial({
+   699→   699→    map: grassBladeTexture(),
+   700→   700→    alphaTest: 0.42,
+   701→   701→    side: THREE.DoubleSide,
+   702→   702→    roughness: 0.9, metalness: 0,
+   703→   703→    color: 0xa8c07a,
+   704→   704→  });
+   705→   705→  registerWind(mat, 0.09);
+   706→   706→  return mat;
+   707→   707→}
+   708→   708→
+   709→   709→/** Material de copa de pino (dos tonos) con viento */
+   710→   710→export function canopyMat(color: number): THREE.MeshStandardMaterial {
+   711→   711→  const m = new THREE.MeshStandardMaterial({
+   712→   712→    color, roughness: 0.9, metalness: 0, flatShading: true,
+   713→   713→    normalMap: noiseNormal(3),
+   714→   714→    normalScale: new THREE.Vector2(0.6, 0.6),
+   715→   715→  });
+   716→   716→  registerWind(m, 0.06);
+   717→   717→  return m;
+   718→   718→}
+   719→   719→
+   720→   720→/** Seta luminosa (para instanciar en grupos) */
+   721→   721→export function mushroomGeos(): { stem: THREE.BufferGeometry; cap: THREE.BufferGeometry } {
+   722→   722→  const stem = new THREE.CylinderGeometry(0.03, 0.045, 0.16, 6);
+   723→   723→  stem.translate(0, 0.08, 0);
+   724→   724→  const cap = new THREE.SphereGeometry(0.09, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55);
+   725→   725→  cap.scale(1, 0.75, 1);
+   726→   726→  cap.translate(0, 0.15, 0);
+   727→   727→  return { stem, cap };
+   728→   728→}
+   729→   729→

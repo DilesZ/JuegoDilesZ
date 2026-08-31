@@ -122,47 +122,53 @@
 }
 
 /* ============================================================
-   AETHERIA — Tipografía de fantasía (Google Fonts, OFL)
-   Cinzel / Cinzel Decorative: titulares épico-medievales
-   Grenze Gotisch: nombre del jefe y acentos góticos
-   Alegreya Sans: cuerpo legible
+   AETHERIA — Tipografía ANIME (Google Fonts via fontsource, OFL)
+   Baloo 2: titulares redondeados estilo anime/Ghibli
+   Nunito: cuerpo legible con carácter amable
+   (Cinzel / Grenze Gotisch se conservan como alternativa gótica)
    ============================================================ */
 @font-face {
-  font-family: 'Cinzel';
-  src: url('/fonts/Cinzel.ttf') format('truetype');
-  font-weight: 400 900;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Cinzel Decorative';
-  src: url('/fonts/CinzelDecorative-Bold.ttf') format('truetype');
-  font-weight: 700;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Grenze Gotisch';
-  src: url('/fonts/GrenzeGotisch.ttf') format('truetype');
-  font-weight: 100 900;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Alegreya Sans';
-  src: url('/fonts/AlegreyaSans-Regular.ttf') format('truetype');
+  font-family: 'Baloo 2';
+  src: url('/fonts/baloo-2-latin-400.woff2') format('woff2');
   font-weight: 400;
   font-display: swap;
 }
 @font-face {
-  font-family: 'Alegreya Sans';
-  src: url('/fonts/AlegreyaSans-Bold.ttf') format('truetype');
+  font-family: 'Baloo 2';
+  src: url('/fonts/baloo-2-latin-700.woff2') format('woff2');
   font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Baloo 2';
+  src: url('/fonts/baloo-2-latin-800.woff2') format('woff2');
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Nunito';
+  src: url('/fonts/nunito-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Nunito';
+  src: url('/fonts/nunito-latin-700.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Nunito';
+  src: url('/fonts/nunito-latin-800.woff2') format('woff2');
+  font-weight: 800;
   font-display: swap;
 }
 
 @theme {
-  --font-display: 'Cinzel', Georgia, serif;
-  --font-logo: 'Cinzel Decorative', Georgia, serif;
-  --font-gothic: 'Grenze Gotisch', Georgia, serif;
-  --font-body: 'Alegreya Sans', system-ui, sans-serif;
+  --font-display: 'Baloo 2', 'Nunito', system-ui, sans-serif;
+  --font-logo: 'Baloo 2', system-ui, sans-serif;
+  --font-gothic: 'Baloo 2', system-ui, sans-serif;
+  --font-body: 'Nunito', system-ui, sans-serif;
 }
 
 /* Marco ornamental de esquinas dobles para paneles */

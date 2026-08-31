@@ -3,12 +3,11 @@ import { clamp, lerp } from './core';
 import type { World } from './world';
 
 /* ============================================================
-   CICLO DÍA/NOCHE — AETHERIA
-   Paleta con keyframes por hora del día interpolada suavemente.
-   El juego EMPIEZA DE DÍA (t = 0.30 ≈ 07:12 de la mañana).
-   Controla: cielo (shader), sol y luna (malla + luz direccional
-   compartida), niebla, estrellas, aurora, luciérnagas, antorchas,
-   niebla rasante, exposición y tinte atmosférico.
+   CICLO DÍA/NOCHE — AETHERIA (ESTILO ANIME)
+   Paleta saturada tipo Ghibli/anime: día azul vivo con nubes
+   blancas, atardeceres rosa-naranja, noche azul-violeta con
+   estrellas. Keyframes por hora interpolados suavemente.
+   El juego EMPIEZA DE DÍA (t = 0.34 ≈ 08:09).
    ============================================================ */
 
 export interface DayNightSample {
@@ -46,6 +45,7 @@ export interface DayNightSample {
   torchBoost: number;              // realce de llamas de noche
   envIntensity: number;
   waterTint: THREE.Color;
+  cloudTint: THREE.Color;          // color de las nubes Ghibli
   exposure: number;
 }
 
@@ -59,22 +59,22 @@ interface Stop {
   sunA: number; moonA: number; glow: number; tint: number;
   stars: number; aurora: number; ff: number;
   mist: number; torch: number; env: number;
-  water: number; exp: number; night: number;
+  water: number; cloud: number; exp: number; night: number;
 }
 
-/* Keyframes a lo largo de las 24 h (t = hora/24) */
+/* Keyframes a lo largo de las 24 h (t = hora/24) — paleta ANIME */
 const STOPS: Stop[] = [
-  //        t     skyTop    skyMid    skyBot    fog       fogD     light     li    hemiS     hemiG     hemiI fill      fillI  sunA moonA glow  tint      stars aurora ff   mist torch env   water    exp   night
-  { t: 0.00, skyTop: 0x040711, skyMid: 0x0a1322, skyBottom: 0x101a28, fog: 0x0a0f1a, fogD: 0.0115, light: 0xa9c2ff, lightI: 1.15, hemiS: 0x1c2b4a, hemiG: 0x0d0b08, hemiI: 0.42, fill: 0x22304d, fillI: 0.25, sunA: 0, moonA: 1, glow: 0.0, tint: 0x8098c8, stars: 1, aurora: 1, ff: 1, mist: 1.3, torch: 1.4, env: 0.45, water: 0x27405e, exp: 1.16, night: 1 },
-  { t: 0.21, skyTop: 0x060a18, skyMid: 0x101a30, skyBottom: 0x1d2740, fog: 0x0d1220, fogD: 0.0110, light: 0x9fb6e8, lightI: 1.05, hemiS: 0x243354, hemiG: 0x120e0a, hemiI: 0.45, fill: 0x28385c, fillI: 0.25, sunA: 0, moonA: 0.9, glow: 0.05, tint: 0x8898c8, stars: 0.85, aurora: 0.85, ff: 0.9, mist: 1.4, torch: 1.35, env: 0.5, water: 0x27405e, exp: 1.14, night: 0.95 },
-  { t: 0.265, skyTop: 0x2a3d64, skyMid: 0x6f6a8e, skyBottom: 0xd98a56, fog: 0x6a5648, fogD: 0.0092, light: 0xffb877, lightI: 2.3, hemiS: 0x4a4a66, hemiG: 0x241a12, hemiI: 0.72, fill: 0x6a5a58, fillI: 0.38, sunA: 0.85, moonA: 0.25, glow: 1.0, tint: 0xff9a4a, stars: 0.06, aurora: 0.12, ff: 0.15, mist: 1.55, torch: 1.1, env: 0.7, water: 0x585a6e, exp: 1.1, night: 0.35 },
-  { t: 0.33, skyTop: 0x3f74b8, skyMid: 0x8fb8dd, skyBottom: 0xd8e6ea, fog: 0xa8bcc8, fogD: 0.0072, light: 0xfff1d8, lightI: 2.3, hemiS: 0x7d9cc0, hemiG: 0x3a4632, hemiI: 0.9, fill: 0xcfe0f0, fillI: 0.42, sunA: 1, moonA: 0, glow: 0.55, tint: 0xffe8c0, stars: 0, aurora: 0, ff: 0, mist: 0.7, torch: 0.55, env: 1.0, water: 0x4a7a9e, exp: 1.06, night: 0 },
-  { t: 0.50, skyTop: 0x3568b0, skyMid: 0x86b4dc, skyBottom: 0xcfe2ec, fog: 0xb0c4d2, fogD: 0.0062, light: 0xfffbe8, lightI: 2.45, hemiS: 0x86a8cc, hemiG: 0x42503a, hemiI: 1.0, fill: 0xd8e8f8, fillI: 0.46, sunA: 1, moonA: 0, glow: 0.4, tint: 0xfff2cf, stars: 0, aurora: 0, ff: 0, mist: 0.55, torch: 0.45, env: 1.1, water: 0x4a86ac, exp: 1.05, night: 0 },
-  { t: 0.66, skyTop: 0x3a6cae, skyMid: 0x93b4d4, skyBottom: 0xe2dfc8, fog: 0xb2bcb4, fogD: 0.0070, light: 0xffedc8, lightI: 2.3, hemiS: 0x84a0bc, hemiG: 0x40462e, hemiI: 0.9, fill: 0xd8dcd0, fillI: 0.42, sunA: 1, moonA: 0, glow: 0.6, tint: 0xffd9a0, stars: 0, aurora: 0, ff: 0, mist: 0.7, torch: 0.6, env: 1.0, water: 0x4a7a9a, exp: 1.05, night: 0 },
-  { t: 0.735, skyTop: 0x33406e, skyMid: 0x8a5f7e, skyBottom: 0xe8865a, fog: 0x7a5a4e, fogD: 0.0088, light: 0xff9a5e, lightI: 2.5, hemiS: 0x5c4a70, hemiG: 0x2a1c16, hemiI: 0.75, fill: 0x7a5a68, fillI: 0.4, sunA: 0.9, moonA: 0.1, glow: 1.1, tint: 0xff8a3a, stars: 0.1, aurora: 0.15, ff: 0.25, mist: 1.1, torch: 1.0, env: 0.75, water: 0x58506a, exp: 1.08, night: 0.3 },
-  { t: 0.79, skyTop: 0x101a34, skyMid: 0x2c2848, skyBottom: 0x5c3a52, fog: 0x2e2a3e, fogD: 0.0098, light: 0xb8a0d8, lightI: 0.9, hemiS: 0x303254, hemiG: 0x140f0c, hemiI: 0.48, fill: 0x343050, fillI: 0.28, sunA: 0.3, moonA: 0.5, glow: 0.35, tint: 0xc088a8, stars: 0.5, aurora: 0.55, ff: 0.7, mist: 1.25, torch: 1.25, env: 0.6, water: 0x33405e, exp: 1.12, night: 0.7 },
-  { t: 0.86, skyTop: 0x040711, skyMid: 0x0a1322, skyBottom: 0x101a28, fog: 0x0a0f1a, fogD: 0.0115, light: 0xa9c2ff, lightI: 1.15, hemiS: 0x1c2b4a, hemiG: 0x0d0b08, hemiI: 0.42, fill: 0x22304d, fillI: 0.25, sunA: 0, moonA: 1, glow: 0, tint: 0x8098c8, stars: 1, aurora: 1, ff: 1, mist: 1.3, torch: 1.4, env: 0.45, water: 0x27405e, exp: 1.16, night: 1 },
-  { t: 1.00, skyTop: 0x040711, skyMid: 0x0a1322, skyBottom: 0x101a28, fog: 0x0a0f1a, fogD: 0.0115, light: 0xa9c2ff, lightI: 1.15, hemiS: 0x1c2b4a, hemiG: 0x0d0b08, hemiI: 0.42, fill: 0x22304d, fillI: 0.25, sunA: 0, moonA: 1, glow: 0, tint: 0x8098c8, stars: 1, aurora: 1, ff: 1, mist: 1.3, torch: 1.4, env: 0.45, water: 0x27405e, exp: 1.16, night: 1 },
+  //        t     skyTop    skyMid    skyBot    fog       fogD     light     li    hemiS     hemiG     hemiI fill      fillI  sunA moonA glow  tint      stars aurora ff   mist torch env   water    cloud    exp   night
+  { t: 0.00, skyTop: 0x0b1032, skyMid: 0x1a2456, skyBottom: 0x303a70, fog: 0x141b38, fogD: 0.0110, light: 0xaebfff, lightI: 1.25, hemiS: 0x27305e, hemiG: 0x15121c, hemiI: 0.5, fill: 0x2a3866, fillI: 0.28, sunA: 0, moonA: 1, glow: 0.0, tint: 0x9fb0e8, stars: 1, aurora: 1, ff: 1, mist: 1.25, torch: 1.4, env: 0.35, water: 0x1d4a66, cloud: 0x39456e, exp: 1.04, night: 1 },
+  { t: 0.21, skyTop: 0x101640, skyMid: 0x22306a, skyBottom: 0x3c4884, fog: 0x1a2244, fogD: 0.0105, light: 0xa8bcf2, lightI: 1.15, hemiS: 0x2c3666, hemiG: 0x181420, hemiI: 0.52, fill: 0x303e70, fillI: 0.28, sunA: 0, moonA: 0.9, glow: 0.05, tint: 0xa2b0e8, stars: 0.85, aurora: 0.85, ff: 0.9, mist: 1.35, torch: 1.35, env: 0.4, water: 0x1d4a66, cloud: 0x414d78, exp: 1.03, night: 0.95 },
+  { t: 0.265, skyTop: 0x4a5aa8, skyMid: 0xd88aa0, skyBottom: 0xffc27a, fog: 0xc89890, fogD: 0.0085, light: 0xffc990, lightI: 2.5, hemiS: 0x8a7ab0, hemiG: 0x4a3a30, hemiI: 0.8, fill: 0xe0b0a0, fillI: 0.4, sunA: 0.9, moonA: 0.15, glow: 1.1, tint: 0xffb070, stars: 0.05, aurora: 0.1, ff: 0.15, mist: 1.4, torch: 1.1, env: 0.7, water: 0x6a7ab0, cloud: 0xffd0b8, exp: 1.0, night: 0.35 },
+  { t: 0.33, skyTop: 0x2f7ad9, skyMid: 0x74b4ea, skyBottom: 0xd6ecf6, fog: 0xc2dcee, fogD: 0.0068, light: 0xfff3d8, lightI: 2.6, hemiS: 0x7fb0e0, hemiG: 0x5a7a46, hemiI: 1.05, fill: 0xd0e6ff, fillI: 0.5, sunA: 1, moonA: 0, glow: 0.5, tint: 0xffe8c0, stars: 0, aurora: 0, ff: 0, mist: 0.6, torch: 0.5, env: 1.0, water: 0x2e7a9e, cloud: 0xffffff, exp: 1.0, night: 0 },
+  { t: 0.50, skyTop: 0x2a72d4, skyMid: 0x6fb0e8, skyBottom: 0xcfeaf4, fog: 0xc6e0ee, fogD: 0.006, light: 0xfffbee, lightI: 2.75, hemiS: 0x86b8e6, hemiG: 0x5f8248, hemiI: 1.15, fill: 0xdceeff, fillI: 0.55, sunA: 1, moonA: 0, glow: 0.4, tint: 0xfff2cf, stars: 0, aurora: 0, ff: 0, mist: 0.5, torch: 0.45, env: 1.1, water: 0x2e86aa, cloud: 0xffffff, exp: 1.0, night: 0 },
+  { t: 0.66, skyTop: 0x3076cf, skyMid: 0x7ab0e0, skyBottom: 0xeae2c0, fog: 0xcadcd2, fogD: 0.0066, light: 0xffeecb, lightI: 2.6, hemiS: 0x84a8d4, hemiG: 0x5c7842, hemiI: 1.0, fill: 0xdce8dd, fillI: 0.48, sunA: 1, moonA: 0, glow: 0.6, tint: 0xffd9a0, stars: 0, aurora: 0, ff: 0, mist: 0.65, torch: 0.6, env: 1.0, water: 0x2e7a9a, cloud: 0xfff4e0, exp: 1.0, night: 0 },
+  { t: 0.735, skyTop: 0x4a4a8e, skyMid: 0xc06a92, skyBottom: 0xff9a5e, fog: 0xc08a78, fogD: 0.0082, light: 0xffa060, lightI: 2.6, hemiS: 0x9a6a92, hemiG: 0x3a2a20, hemiI: 0.8, fill: 0xffb090, fillI: 0.45, sunA: 0.95, moonA: 0.1, glow: 1.15, tint: 0xff8a4a, stars: 0.08, aurora: 0.15, ff: 0.25, mist: 1.0, torch: 1.0, env: 0.75, water: 0x6a6a9e, cloud: 0xffb898, exp: 1.0, night: 0.3 },
+  { t: 0.79, skyTop: 0x1a2450, skyMid: 0x3a3466, skyBottom: 0x6a4a68, fog: 0x322e4e, fogD: 0.0096, light: 0xb8a8e0, lightI: 1.1, hemiS: 0x303258, hemiG: 0x16121a, hemiI: 0.5, fill: 0x34305a, fillI: 0.28, sunA: 0.25, moonA: 0.55, glow: 0.35, tint: 0xd090b0, stars: 0.5, aurora: 0.55, ff: 0.7, mist: 1.2, torch: 1.25, env: 0.55, water: 0x2c4066, cloud: 0x4a4a80, exp: 1.02, night: 0.7 },
+  { t: 0.86, skyTop: 0x0b1032, skyMid: 0x1a2456, skyBottom: 0x303a70, fog: 0x141b38, fogD: 0.0110, light: 0xaebfff, lightI: 1.25, hemiS: 0x27305e, hemiG: 0x15121c, hemiI: 0.5, fill: 0x2a3866, fillI: 0.28, sunA: 0, moonA: 1, glow: 0, tint: 0x9fb0e8, stars: 1, aurora: 1, ff: 1, mist: 1.25, torch: 1.4, env: 0.35, water: 0x1d4a66, cloud: 0x39456e, exp: 1.04, night: 1 },
+  { t: 1.00, skyTop: 0x0b1032, skyMid: 0x1a2456, skyBottom: 0x303a70, fog: 0x141b38, fogD: 0.0110, light: 0xaebfff, lightI: 1.25, hemiS: 0x27305e, hemiG: 0x15121c, hemiI: 0.5, fill: 0x2a3866, fillI: 0.28, sunA: 0, moonA: 1, glow: 0, tint: 0x9fb0e8, stars: 1, aurora: 1, ff: 1, mist: 1.25, torch: 1.4, env: 0.35, water: 0x1d4a66, cloud: 0x39456e, exp: 1.04, night: 1 },
 ];
 
 const cA = new THREE.Color();
@@ -113,13 +113,14 @@ function sampleStops(t: number, out: DayNightSample) {
   out.torchBoost = numLerp(a.torch, b.torch, s);
   out.envIntensity = numLerp(a.env, b.env, s);
   out.waterTint.copy(cA.setHex(a.water)).lerp(cB.setHex(b.water), s);
+  out.cloudTint.copy(cA.setHex(a.cloud)).lerp(cB.setHex(b.cloud), s);
   out.exposure = numLerp(a.exp, b.exp, s);
   out.night = numLerp(a.night, b.night, s);
   out.isNight = out.night > 0.5;
 }
 
 export class DayNightCycle {
-  /** Hora del mundo: 0..1 (0 = medianoche). El juego empieza de día (07:12). */
+  /** Hora del mundo: 0..1 (0 = medianoche). El juego empieza de día (08:09). */
   t = 0.34;
   day = 1;
   /** Duración del día completo en segundos de juego */
@@ -145,7 +146,7 @@ export class DayNightCycle {
       fillColor: new THREE.Color(), fillIntensity: 0.3,
       sunA: 0, moonA: 1, sunGlow: 0, sunTint: new THREE.Color(),
       stars: 1, aurora: 1, fireflies: 1, mistMul: 1, torchBoost: 1, envIntensity: 0.5,
-      waterTint: new THREE.Color(), exposure: 1.14,
+      waterTint: new THREE.Color(), cloudTint: new THREE.Color(), exposure: 1.0,
     };
     this.sampleClock();
     // aplicar el estado inicial de inmediato (evita flash de noche al cargar)

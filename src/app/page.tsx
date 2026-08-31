@@ -192,7 +192,7 @@ export default function Home() {
             {bootError ? 'No se pudo forjar el mundo' : 'Forjando el mundo…'}
           </div>
           {!bootError && (
-            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Texturas PBR CC0 · Ciclo día/noche · GTAO</div>
+            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Toon shading anime · Nubes Ghibli · Ciclo día/noche</div>
           )}
         </div>
       )}

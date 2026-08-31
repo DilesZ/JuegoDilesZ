@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { clamp, damp, dampAngle, rand, terrainHeight, WORLD, lerp } from './core';
-import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type HumanoidRig } from './models';
+import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type HumanoidRig, type CharMat } from './models';
 import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS, ZERO_POSE } from './animations';
 import type { Particles } from './particles';
 import type { AudioEngine } from './audio';
@@ -54,15 +54,17 @@ export abstract class Entity {
   alive = true;
   removable = false;
   knock = new THREE.Vector3();
-  protected mats: THREE.MeshStandardMaterial[] = [];
+  protected mats: CharMat[] = [];
   protected flashT = 0;
 
   protected collectMats() {
-    const set = new Set<THREE.MeshStandardMaterial>();
+    const set = new Set<CharMat>();
     this.root.traverse(o => {
       if (o instanceof THREE.Mesh) {
-        const m = o.material as THREE.MeshStandardMaterial;
-        if (m && m.isMeshStandardMaterial) set.add(m);
+        const m = o.material as CharMat;
+        if (m && ((m as THREE.MeshStandardMaterial).isMeshStandardMaterial || (m as THREE.MeshToonMaterial).isMeshToonMaterial)) {
+          set.add(m);
+        }
       }
     });
     this.mats = [...set];

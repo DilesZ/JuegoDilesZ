@@ -2,19 +2,45 @@ import * as THREE from 'three';
 import { fbm, mulberry32, WORLD } from './core';
 
 /* ============================================================
-   TEXTURAS — CC0 fotográficas (ambientCG) + procedurales (canvas)
-   - PBR fotográfico real: césped, tierra, roca y corteza escaneados
-     (ambientCG.com, licencia CC0) cargados de /public/textures.
-   - Procedurales: splat del terreno, sprites, luna, agua, arena,
-     estandartes (canvas). Color en sRGB, normales en lineal.
+   TEXTURAS — ESTILO ANIME (toon shading)
+   - Rampa de bandas para MeshToonMaterial (cel shading plano).
+   - Todo pintado por canvas con paleta saturada tipo anime:
+     nada de fotos PBR — colores planos vivos, sombras limpias.
    ============================================================ */
+
+let _ramp3: THREE.DataTexture | null = null;
+let _ramp4: THREE.DataTexture | null = null;
+
+/** Rampa de cel shading: 3 bandas (sombra / media / luz) */
+export function toonRamp3(): THREE.DataTexture {
+  if (_ramp3) return _ramp3;
+  const v = new Uint8Array([110, 110, 110, 255, 205, 205, 205, 255, 255, 255, 255, 255]);
+  _ramp3 = new THREE.DataTexture(v, 3, 1, THREE.RGBAFormat);
+  _ramp3.minFilter = _ramp3.magFilter = THREE.NearestFilter;
+  _ramp3.colorSpace = THREE.NoColorSpace;
+  _ramp3.needsUpdate = true;
+  return _ramp3;
+}
+
+/** Rampa suave de 4 bandas (para piel / detalles finos) */
+export function toonRamp4(): THREE.DataTexture {
+  if (_ramp4) return _ramp4;
+  const v = new Uint8Array([
+    90, 90, 100, 255, 160, 160, 168, 255, 225, 225, 228, 255, 255, 255, 255, 255,
+  ]);
+  _ramp4 = new THREE.DataTexture(v, 4, 1, THREE.RGBAFormat);
+  _ramp4.minFilter = _ramp4.magFilter = THREE.NearestFilter;
+  _ramp4.colorSpace = THREE.NoColorSpace;
+  _ramp4.needsUpdate = true;
+  return _ramp4;
+}
 
 const cache = new Map<string, THREE.CanvasTexture>();
 const photoCache = new Map<string, THREE.Texture>();
 const texLoader = new THREE.TextureLoader();
 texLoader.setCrossOrigin('anonymous');
 
-/** Carga una textura fotográfica CC0 de /public/textures (con cache). */
+/** Carga una textura de /public/textures (con cache). Uso residual. */
 export function pbrTex(file: string, opts: { srgb?: boolean; repeat?: number } = {}): THREE.Texture {
   const key = `${file}|${opts.srgb ? 1 : 0}|${opts.repeat ?? 1}`;
   if (photoCache.has(key)) return photoCache.get(key)!;
@@ -74,56 +100,41 @@ function normalFromHeight(height: Float32Array, size: number, strength = 2): THR
 export const WORLD_TEX_SIZE = 200;
 
 /**
- * Textura grande de color para el terreno: base fotográfica CC0 de césped
- * (ambientCG Grass001) sobre la que se pintan parches de tierra, roca en
- * altura y senderos de grava que conectan hoguera, santuarios y arena.
- * Si la foto aún no ha cargado, pinta una base pictórica equivalente y
- * REDIBUJA el mismo canvas cuando la imagen llega (needsUpdate).
+ * Textura grande de color para el terreno (ESTILO ANIME):
+ * praderas verde vivas pintadas a mano, parches de tierra cálida,
+ * roca azulada en altura y senderos claros que conectan hoguera,
+ * santuarios y arena. Paleta saturada tipo Ghibli, sin fotos.
  */
 export function terrainSplat(): THREE.CanvasTexture {
   if (cache.has('splat')) return cache.get('splat')!;
   const S = 1024;
   const [c, ctx] = makeCanvas(S, S);
 
-  const paint = (grassImg: HTMLImageElement | null) => {
+  const paint = () => {
     const px = S / WORLD_TEX_SIZE; // píxeles por unidad de mundo
     const rng = mulberry32(4242);
 
-    const grassA = [46, 62, 34], grassB = [66, 88, 44], grassDry = [92, 96, 48];
-    const dirt = [74, 58, 38], dirtDark = [56, 44, 30];
-    const rock = [86, 88, 98], rockDark = [64, 66, 76];
+    const grassA = [72, 158, 78], grassB = [108, 190, 96], grassDry = [176, 182, 96];
+    const grassLight = [150, 212, 118];
+    const dirt = [156, 118, 72], dirtDark = [118, 88, 54];
+    const rock = [142, 148, 168], rockDark = [108, 112, 132];
 
-    // 1) base: foto CC0 de césped en mosaico + variación pictórica
+    // 1) base pintada: celdas grandes de verde vivo con manchas claras
     ctx.clearRect(0, 0, S, S);
-    if (grassImg) {
-      const tiles = 9;
-      const tile = S / tiles;
-      for (let ty = 0; ty < tiles; ty++) {
-        for (let tx = 0; tx < tiles; tx++) {
-          ctx.drawImage(grassImg, tx * tile, ty * tile, tile + 1, tile + 1);
-        }
-      }
-      // integración tonal: verde hacia abajo, ocre seco arriba
-      const grad = ctx.createLinearGradient(0, S, 0, 0);
-      grad.addColorStop(0, 'rgba(38,58,28,0.34)');
-      grad.addColorStop(0.5, 'rgba(30,44,24,0.16)');
-      grad.addColorStop(1, 'rgba(96,92,52,0.30)');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, S, S);
-    } else {
-      const cell = 7;
+    {
+      const cell = 10;
       for (let cy = 0; cy < S; cy += cell) {
         for (let cx = 0; cx < S; cx += cell) {
           const wx = (cx / S) * WORLD_TEX_SIZE - 100;
           const wz = (cy / S) * WORLD_TEX_SIZE - 100;
           const n = fbm(wx * 0.06, wz * 0.06, 3) * 0.5 + 0.5;
           const n2 = fbm(wx * 0.21 + 40, wz * 0.21 - 17, 2) * 0.5 + 0.5;
-          let r: number, g: number, b: number;
           const mix01 = (a: number[], bb: number[], t: number) => [a[0] + (bb[0] - a[0]) * t, a[1] + (bb[1] - a[1]) * t, a[2] + (bb[2] - a[2]) * t];
           let col = mix01(grassA, grassB, n);
-          if (n > 0.62) col = mix01(col, grassDry, (n - 0.62) * 2.2);
-          const jitter = (rng() - 0.5) * 14;
-          r = col[0] + jitter; g = col[1] + jitter * 1.2; b = col[2] + jitter * 0.7;
+          if (n > 0.60) col = mix01(col, grassDry, (n - 0.60) * 2.1);
+          if (n2 > 0.72) col = mix01(col, grassLight, (n2 - 0.72) * 2.6);
+          const jitter = (rng() - 0.5) * 16;
+          let r = col[0] + jitter, g = col[1] + jitter * 1.15, b = col[2] + jitter * 0.6;
           const rr = Math.hypot(wx, wz);
           if (rr > 78) {
             const t = Math.min(1, (rr - 78) / 16);
@@ -136,24 +147,29 @@ export function terrainSplat(): THREE.CanvasTexture {
       }
     }
 
-    // variación de matiz por celdas (une la foto con el estilo del mundo)
+    // manchas redondeadas claras/oscuras (parches pintados suaves)
+    for (let i = 0; i < 90; i++) {
+      const x = rng() * S, y = rng() * S, R = 18 + rng() * 60;
+      const light = rng() > 0.45;
+      const g2 = ctx.createRadialGradient(x, y, 0, x, y, R);
+      g2.addColorStop(0, light ? 'rgba(178,224,140,0.20)' : 'rgba(52,128,64,0.18)');
+      g2.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g2;
+      ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // roca en la corona del mundo
     const cell2 = 26;
     for (let cy = 0; cy < S; cy += cell2) {
       for (let cx = 0; cx < S; cx += cell2) {
         const wx = (cx / S) * WORLD_TEX_SIZE - 100;
         const wz = (cy / S) * WORLD_TEX_SIZE - 100;
-        const n = fbm(wx * 0.06, wz * 0.06, 3) * 0.5 + 0.5;
         const rr = Math.hypot(wx, wz);
-        const a = 0.05 + n * 0.07;
         if (rr > 78) {
           const t = Math.min(1, (rr - 78) / 16);
           ctx.fillStyle = `rgba(${rock[0]},${rock[1]},${rock[2]},${0.5 * t})`;
-        } else if (n > 0.6) {
-          ctx.fillStyle = `rgba(${grassDry[0]},${grassDry[1]},${grassDry[2]},${a})`;
-        } else {
-          ctx.fillStyle = `rgba(${grassA[0] - 10},${grassA[1]},${grassA[2] - 6},${a})`;
+          ctx.fillRect(cx, cy, cell2, cell2);
         }
-        ctx.fillRect(cx, cy, cell2, cell2);
       }
     }
 
@@ -167,13 +183,13 @@ export function terrainSplat(): THREE.CanvasTexture {
     const R = (2 + rng() * 5) * px;
     const g = ctx.createRadialGradient(x, y, 0, x, y, R);
     const dc = rng() > 0.5 ? dirt : dirtDark;
-    g.addColorStop(0, `rgba(${dc[0]},${dc[1]},${dc[2]},0.55)`);
+    g.addColorStop(0, `rgba(${dc[0]},${dc[1]},${dc[2]},0.6)`);
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
   }
 
-  // 3) senderos: hoguera → santuarios/arena, con bordes suaves y grava
+  // 3) senderos: hoguera → santuarios/arena, claros estilo anime
   const W = WORLD;
   const drawPath = (x1: number, z1: number, x2: number, z2: number, wUnits: number) => {
     const mx = (x1 + x2) / 2 + (z2 - z1) * 0.18;
@@ -182,24 +198,24 @@ export function terrainSplat(): THREE.CanvasTexture {
     p.moveTo((x1 + 100) * px, (z1 + 100) * px);
     p.quadraticCurveTo((mx + 100) * px, (mz + 100) * px, (x2 + 100) * px, (z2 + 100) * px);
     ctx.lineCap = 'round';
-    ctx.strokeStyle = 'rgba(30,24,16,0.35)';
+    ctx.strokeStyle = 'rgba(96,72,44,0.4)';
     ctx.lineWidth = wUnits * px * 1.7;
     ctx.stroke(p);
-    ctx.strokeStyle = 'rgba(88,70,46,0.85)';
+    ctx.strokeStyle = 'rgba(196,158,104,0.9)';
     ctx.lineWidth = wUnits * px;
     ctx.stroke(p);
-    ctx.strokeStyle = 'rgba(112,92,62,0.5)';
+    ctx.strokeStyle = 'rgba(226,196,142,0.55)';
     ctx.lineWidth = wUnits * px * 0.45;
     ctx.stroke(p);
-    // piedritas sueltas
+    // piedritas claras
     const steps = Math.hypot(x2 - x1, z2 - z1) * 2.2;
     for (let i = 0; i < steps; i++) {
       const t = rng();
       const bx = (1 - t) * (1 - t) * x1 + 2 * (1 - t) * t * mx + t * t * x2;
       const bz = (1 - t) * (1 - t) * z1 + 2 * (1 - t) * t * mz + t * t * z2;
       const ox = (rng() - 0.5) * wUnits * 1.1, oz = (rng() - 0.5) * wUnits * 1.1;
-      const shade = 90 + rng() * 60;
-      ctx.fillStyle = `rgba(${shade},${shade * 0.94},${shade * 0.85},${0.35 + rng() * 0.4})`;
+      const shade = 170 + rng() * 70;
+      ctx.fillStyle = `rgba(${shade},${shade * 0.97},${shade * 0.9},${0.35 + rng() * 0.4})`;
       ctx.beginPath();
       ctx.arc((bx + ox + 100) * px, (bz + oz + 100) * px, (0.05 + rng() * 0.12) * px, 0, Math.PI * 2);
       ctx.fill();
@@ -213,24 +229,16 @@ export function terrainSplat(): THREE.CanvasTexture {
       const x = (p.x + 100) * px, y = (p.z + 100) * px;
       const R = 26;
       const g = ctx.createRadialGradient(x, y, 4, x, y, R);
-      g.addColorStop(0, 'rgba(70,56,38,0.5)');
+      g.addColorStop(0, 'rgba(150,116,72,0.5)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
   };
 
-  paint(null);
+  paint();
   const t = toTexture(c, true, false);
   cache.set('splat', t);
-
-  // Mejora asíncrona: cuando llega la foto CC0 de césped, repinta el canvas
-  const img = new Image();
-  img.onload = () => {
-    paint(img);
-    t.needsUpdate = true;
-  };
-  img.src = '/textures/grass_color.jpg';
   return t;
 }
 
@@ -253,12 +261,30 @@ export function terrainDetailNormal(): THREE.CanvasTexture {
 
 /* ---------- Materiales de props ---------- */
 
-/** Corteza de pino: foto PBR CC0 (ambientCG Bark004) con fallback pictórico */
-export function barkMaps(): { map: THREE.Texture; normalMap: THREE.Texture } {
-  return {
-    map: pbrTex('bark_color.jpg'),
-    normalMap: pbrTex('bark_normal.jpg', { srgb: false }),
-  };
+/** Corteza de pino pintada (anime): marrón cálido con vetas verticales claras */
+export function barkMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture | null } {
+  const key = 'barkAnime';
+  if (cache.has(key)) return { map: cache.get(key)!, normalMap: null };
+  const S = 128;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.fillStyle = '#7c5636';
+  ctx.fillRect(0, 0, S, S);
+  const rng = mulberry32(606);
+  for (let i = 0; i < 46; i++) {
+    const x = rng() * S;
+    const w = 3 + rng() * 9;
+    const light = rng() > 0.42;
+    ctx.fillStyle = light ? 'rgba(158,112,66,0.5)' : 'rgba(84,54,32,0.55)';
+    ctx.fillRect(x, 0, w, S);
+  }
+  for (let i = 0; i < 26; i++) {
+    const y = rng() * S, x = rng() * S, w = 4 + rng() * 12;
+    ctx.fillStyle = 'rgba(60,38,22,0.5)';
+    ctx.fillRect(x, y, w, 2 + rng() * 3);
+  }
+  const t = toTexture(c, true);
+  cache.set(key, t);
+  return { map: t, normalMap: null };
 }
 
 /** Metal forjado: base gris con arañazos + mapa de rugosidad + normal */
@@ -269,14 +295,14 @@ export function metalMaps(): { map: THREE.CanvasTexture; normalMap: THREE.Canvas
   }
   const S = 256;
   const [c, ctx] = makeCanvas(S, S);
-  ctx.fillStyle = '#9aa2ac';
+  ctx.fillStyle = '#c4cedd';
   ctx.fillRect(0, 0, S, S);
   const rng = mulberry32(777);
   // cepillado horizontal
   for (let i = 0; i < 260; i++) {
     const y = rng() * S;
-    const shade = 120 + rng() * 90;
-    ctx.strokeStyle = `rgba(${shade},${shade + 4},${shade + 10},${0.06 + rng() * 0.1})`;
+    const shade = 170 + rng() * 70;
+    ctx.strokeStyle = `rgba(${shade},${shade + 5},${shade + 14},${0.08 + rng() * 0.1})`;
     ctx.lineWidth = 0.6 + rng() * 1.4;
     ctx.beginPath();
     ctx.moveTo(0, y);
@@ -287,7 +313,7 @@ export function metalMaps(): { map: THREE.CanvasTexture; normalMap: THREE.Canvas
   for (let i = 0; i < 40; i++) {
     const x = rng() * S, y = rng() * S;
     const len = 6 + rng() * 30, a = rng() * Math.PI;
-    ctx.strokeStyle = `rgba(228,232,240,${0.12 + rng() * 0.2})`;
+    ctx.strokeStyle = `rgba(240,246,255,${0.16 + rng() * 0.2})`;
     ctx.lineWidth = 0.7;
     ctx.beginPath();
     ctx.moveTo(x, y);
@@ -333,12 +359,47 @@ export function metalMaps(): { map: THREE.CanvasTexture; normalMap: THREE.Canvas
   return { map, normalMap, roughnessMap };
 }
 
-/** Piedra: foto PBR CC0 (ambientCG Rock012) con fallback pictórico */
-export function stoneMaps(): { map: THREE.Texture; normalMap: THREE.Texture } {
-  return {
-    map: pbrTex('rock_color.jpg', { repeat: 1.4 }),
-    normalMap: pbrTex('rock_normal.jpg', { srgb: false, repeat: 1.4 }),
-  };
+/** Piedra pintada (anime): gris lavanda claro con grietas y musgo */
+export function stoneMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture | null } {
+  const key = 'stoneAnime';
+  if (cache.has(key)) return { map: cache.get(key)!, normalMap: null };
+  const S = 128;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.fillStyle = '#aab0c4';
+  ctx.fillRect(0, 0, S, S);
+  const rng = mulberry32(808);
+  for (let i = 0; i < 30; i++) {
+    const x = rng() * S, y = rng() * S, R = 8 + rng() * 26;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+    g.addColorStop(0, rng() > 0.5 ? 'rgba(196,202,220,0.5)' : 'rgba(132,138,160,0.45)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+  }
+  // grietas
+  ctx.strokeStyle = 'rgba(84,88,108,0.7)';
+  ctx.lineWidth = 1.6;
+  for (let i = 0; i < 14; i++) {
+    let x = rng() * S, y = rng() * S;
+    ctx.beginPath(); ctx.moveTo(x, y);
+    for (let k = 0; k < 5; k++) {
+      x += (rng() - 0.5) * 26; y += (rng() - 0.5) * 26;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // musgo
+  for (let i = 0; i < 12; i++) {
+    const x = rng() * S, y = rng() * S, R = 4 + rng() * 12;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+    g.addColorStop(0, 'rgba(122,188,102,0.5)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+  }
+  const t = toTexture(c, true);
+  cache.set(key, t);
+  return { map: t, normalMap: null };
 }
 
 /** Madera con vetas para mangos/troncos de hoguera */
@@ -347,13 +408,13 @@ export function woodMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasT
   if (cache.has(key)) return { map: cache.get(key)!, normalMap: cache.get(key + 'N')! };
   const S = 128;
   const [c, ctx] = makeCanvas(S, S);
-  ctx.fillStyle = '#5b4226';
+  ctx.fillStyle = '#8a663c';
   ctx.fillRect(0, 0, S, S);
   const rng = mulberry32(202);
   for (let i = 0; i < 60; i++) {
     const y = rng() * S;
-    const v = 40 + rng() * 55;
-    ctx.strokeStyle = `rgba(${v + 30},${v + 8},${v - 18},${0.2 + rng() * 0.3})`;
+    const v = 70 + rng() * 55;
+    ctx.strokeStyle = `rgba(${v + 40},${v + 12},${v - 20},${0.2 + rng() * 0.3})`;
     ctx.lineWidth = 1 + rng() * 3;
     ctx.beginPath();
     ctx.moveTo(0, y);
@@ -377,9 +438,9 @@ export function grassBladeTexture(): THREE.CanvasTexture {
   const [c, ctx] = makeCanvas(W, H);
   ctx.clearRect(0, 0, W, H);
   const g = ctx.createLinearGradient(0, H, 0, 0);
-  g.addColorStop(0, '#2c4018');
-  g.addColorStop(0.55, '#4a6a2a');
-  g.addColorStop(1, '#7a9a46');
+  g.addColorStop(0, '#2f7a26');
+  g.addColorStop(0.55, '#58b03a');
+  g.addColorStop(1, '#98e060');
   ctx.fillStyle = g;
   // hoja curvada
   ctx.beginPath();
@@ -512,7 +573,7 @@ export function arenaFloorTexture(): THREE.CanvasTexture {
   if (cache.has('arena')) return cache.get('arena')!;
   const S = 512;
   const [c, ctx] = makeCanvas(S, S);
-  ctx.fillStyle = '#41414c';
+  ctx.fillStyle = '#63636f';
   ctx.fillRect(0, 0, S, S);
   const rng = mulberry32(666);
   const cx = S / 2;
@@ -536,8 +597,8 @@ export function arenaFloorTexture(): THREE.CanvasTexture {
   for (let i = 0; i < 700; i++) {
     const a = rng() * Math.PI * 2, rr = rng() * S * 0.7;
     const x = cx + Math.cos(a) * rr, y = cx + Math.sin(a) * rr;
-    const v = (52 + rng() * 46) | 0;
-    ctx.fillStyle = `rgba(${v},${v},${v + 6},${0.08 + rng() * 0.14})`;
+    const v = (86 + rng() * 52) | 0;
+    ctx.fillStyle = `rgba(${v},${v},${v + 8},${0.08 + rng() * 0.14})`;
     ctx.beginPath(); ctx.arc(x, y, 2 + rng() * 12, 0, Math.PI * 2); ctx.fill();
   }
   // círculo rúnico escarlata
@@ -566,7 +627,7 @@ export function bannerTexture(): THREE.CanvasTexture {
   const W = 128, H = 256;
   const [c, ctx] = makeCanvas(W, H);
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#4a1420';
+  ctx.fillStyle = '#6b1e2e';
   ctx.fillRect(0, 0, W, H);
   const rng = mulberry32(1313);
   // trama

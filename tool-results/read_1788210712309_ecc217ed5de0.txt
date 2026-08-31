@@ -1,0 +1,1206 @@
+     1→import * as THREE from 'three';
+     2→import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+     3→import { mulberry32, terrainHeight, WORLD, fbm, lerp } from './core';
+     4→import {
+     5→  buildObelisk, buildBonfire, buildTorch, buildRuinedPillar, buildBrokenArch,
+     6→  buildSigil, grassGeometry, grassMaterial, canopyMat, barkMat, stoneMat,
+     7→  woodMat, emisMat, stdMat, mushroomGeos,
+     8→  updateWindAndFlames, registerWind,
+     9→} from './models';
+    10→import { Particles } from './particles';
+    11→import {
+    12→  terrainSplat, terrainDetailNormal, glowSprite, mistTexture, moonTexture,
+    13→  waterNormal, arenaFloorTexture, bannerTexture, pbrTex,
+    14→} from './textures';
+    15→import type { DayNightSample } from './daynight';
+    16→
+    17→/* ============================================================
+    18→   MUNDO: cielo con aurora, terreno con senderos, vegetación con
+    19→   viento, niebla rasante, luciérnagas, fuente lunar, santuarios
+    20→   con haz de purificación y arena del jefe con estandartes.
+    21→   ============================================================ */
+    22→
+    23→interface Collider { x: number; z: number; r: number }
+    24→
+    25→export interface ShrineState {
+    26→  idx: number;
+    27→  name: string;
+    28→  pos: THREE.Vector3;
+    29→  cleansed: boolean;
+    30→  group: THREE.Group;
+    31→  crystal: THREE.Mesh;
+    32→  runes: THREE.Mesh[];
+    33→  crystalMat: THREE.MeshStandardMaterial;
+    34→  runeMats: THREE.MeshStandardMaterial[];
+    35→  light: THREE.PointLight;
+    36→  shards: THREE.Mesh[];
+    37→  aura: THREE.Mesh;
+    38→  runeRing: THREE.Mesh;
+    39→  beam: THREE.Mesh;
+    40→  beamMat: THREE.ShaderMaterial;
+    41→  beamTarget: number;
+    42→}
+    43→
+    44→const AURORA_FRAG = /* glsl */`
+    45→varying vec2 vUv;
+    46→uniform float uTime; uniform float uPhase; uniform float uGlobalA; uniform vec3 uColA; uniform vec3 uColB;
+    47→void main(){
+    48→  float x = vUv.x * 6.28318;
+    49→  float band = sin(x*2.0 + uTime*0.11 + uPhase) * 0.5
+    50→             + sin(x*5.0 - uTime*0.17 + uPhase*2.1) * 0.3
+    51→             + sin(x*11.0 + uTime*0.29) * 0.2;
+    52→  float y = vUv.y;
+    53→  float curtain = smoothstep(0.02, 0.3, y) * (1.0 - smoothstep(0.45, 0.98, y));
+    54→  float rays = 0.5 + 0.5 * sin(x*26.0 + band*4.0 + uTime*0.4 + uPhase*3.0);
+    55→  float i = curtain * (0.35 + 0.65 * rays);
+    56→  vec3 col = mix(uColA, uColB, clamp(y * 1.5, 0.0, 1.0));
+    57→  gl_FragColor = vec4(col * i * 0.9 * uGlobalA, i * uGlobalA);
+    58→}`;
+    59→
+    60→const AURORA_VERT = `varying vec2 vUv;
+    61→void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`;
+    62→
+    63→export class World {
+    64→  scene: THREE.Scene;
+    65→  colliders: Collider[] = [];
+    66→  shrines: ShrineState[] = [];
+    67→  bonfirePos = new THREE.Vector3(WORLD.bonfire.x, 0, WORLD.bonfire.z);
+    68→  bonfireLight!: THREE.PointLight;
+    69→  bonfireFlame: THREE.Mesh | null = null;
+    70→  sigil: { group: THREE.Group; ring: THREE.Mesh; ringMat: THREE.MeshStandardMaterial } | null = null;
+    71→
+    72→  private time = 0;
+    73→  private moonLight!: THREE.DirectionalLight;
+    74→  private skyTime: { value: number } = { value: 0 };
+    75→  private waterTime: { value: number } = { value: 0 };
+    76→  private mist: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; baseO: number; spin: number }[] = [];
+    77→  private smoke: Particles;
+    78→  private fx: Particles;
+    79→  private shrineWispT = 0;
+    80→  private meteorT = 9;
+    81→  private auroraMats: THREE.ShaderMaterial[] = [];
+    82→  private moonDir = new THREE.Vector3();
+    83→
+    84→  /* ---- referencias para el ciclo día/noche ---- */
+    85→  private dn = {
+    86→    sunDir: { value: new THREE.Vector3(0, 1, 0) },
+    87→    sunTint: { value: new THREE.Color(0xffe8c0) },
+    88→    sunGlow: { value: 0.5 },
+    89→    starsA: { value: 1 },
+    90→    auroraA: { value: 1 },
+    91→    ffA: { value: 1 },
+    92→  };
+    93→  private skyMat!: THREE.ShaderMaterial;
+    94→  private hemi!: THREE.HemisphereLight;
+    95→  private fill!: THREE.DirectionalLight;
+    96→  private moonGroup: THREE.Group | null = null;
+    97→  private moonHaloMats: THREE.SpriteMaterial[] = [];
+    98→  private moonMat: THREE.MeshBasicMaterial | null = null;
+    99→  private sunSprites: THREE.Sprite[] = [];
+   100→  private sunMat: THREE.SpriteMaterial | null = null;
+   101→  private sunGlowMat: THREE.SpriteMaterial | null = null;
+   102→  private waterMat: THREE.ShaderMaterial | null = null;
+   103→  private envIntensityTarget = 0.5;
+   104→  private nightK = 1; // factor de oscuridad actual (para antorchas etc.)
+   105→  private mistMul = 1.2; // multiplicador de niebla rasante
+   106→  private terrainMat: THREE.MeshStandardMaterial | null = null;
+   107→
+   108→  constructor(scene: THREE.Scene, renderer?: THREE.WebGLRenderer) {
+   109→    this.scene = scene;
+   110→    this.smoke = new Particles(scene, 420, 'alpha');
+   111→    this.fx = new Particles(scene, 500, 'additive');
+   112→    this.buildSky();
+   113→    this.buildLights();
+   114→    this.buildTerrain();
+   115→    this.buildDecorations();
+   116→    this.buildLunarBasin();
+   117→    this.buildBonfire();
+   118→    this.buildShrines();
+   119→    this.buildArena();
+   120→    if (renderer) this.buildEnvironmentMap(renderer);
+   121→  }
+   122→
+   123→  height(x: number, z: number): number { return terrainHeight(x, z); }
+   124→
+   125→  resolve(pos: THREE.Vector3, radius: number) {
+   126→    for (const c of this.colliders) {
+   127→      const dx = pos.x - c.x, dz = pos.z - c.z;
+   128→      const d2 = dx * dx + dz * dz;
+   129→      const minD = c.r + radius;
+   130→      if (d2 < minD * minD && d2 > 1e-6) {
+   131→        const d = Math.sqrt(d2);
+   132→        const push = (minD - d) / d;
+   133→        pos.x += dx * push;
+   134→        pos.z += dz * push;
+   135→      }
+   136→    }
+   137→  }
+   138→
+   139→  /* ---------- Cielo: aurora, estrellas titilantes, luna ---------- */
+   140→
+   141→  private makeAuroraMat(colA: number, colB: number, phase: number): THREE.ShaderMaterial {
+   142→    const m = new THREE.ShaderMaterial({
+   143→      vertexShader: AURORA_VERT,
+   144→      fragmentShader: AURORA_FRAG,
+   145→      uniforms: {
+   146→        uTime: this.skyTime,
+   147→        uPhase: { value: phase },
+   148→        uGlobalA: this.dn.auroraA,
+   149→        uColA: { value: new THREE.Color(colA) },
+   150→        uColB: { value: new THREE.Color(colB) },
+   151→      },
+   152→      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+   153→      blending: THREE.AdditiveBlending, fog: false,
+   154→    });
+   155→    this.auroraMats.push(m);
+   156→    return m;
+   157→  }
+   158→
+   159→  private buildSky() {
+   160→    // cúpula con degradado dinámico + dispersión atmosférica hacia el sol
+   161→    const skyGeo = new THREE.SphereGeometry(420, 24, 16);
+   162→    const skyMat = new THREE.ShaderMaterial({
+   163→      side: THREE.BackSide, depthWrite: false, fog: false,
+   164→      uniforms: {
+   165→        top: { value: new THREE.Color(0x040711) },
+   166→        mid: { value: new THREE.Color(0x0a1322) },
+   167→        bottom: { value: new THREE.Color(0x101a28) },
+   168→        uSunDir: this.dn.sunDir,
+   169→        uSunTint: this.dn.sunTint,
+   170→        uSunGlow: this.dn.sunGlow,
+   171→      },
+   172→      vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+   173→      fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
+   174→        uniform vec3 uSunDir; uniform vec3 uSunTint; uniform float uSunGlow;
+   175→        void main(){
+   176→          vec3 n = normalize(vP);
+   177→          float h = n.y;
+   178→          vec3 c = h > 0.0 ? mix(mid, top, pow(h, 0.55)) : mix(mid, bottom, pow(-h, 0.5));
+   179→          // banda de horizonte
+   180→          c += vec3(0.02, 0.05, 0.06) * exp(-abs(h) * 9.0);
+   181→          // dispersión atmosférica: resplandor alrededor del sol
+   182→          float sd = max(dot(n, normalize(uSunDir)), 0.0);
+   183→          c += uSunTint * (pow(sd, 5.0) * 0.32 + pow(sd, 42.0) * 0.55) * uSunGlow;
+   184→          gl_FragColor = vec4(c, 1.0);
+   185→        }`,
+   186→    });
+   187→    this.skyMat = skyMat;
+   188→    const sky = new THREE.Mesh(skyGeo, skyMat);
+   189→    sky.renderOrder = -10;
+   190→    this.scene.add(sky);
+   191→
+   192→    // estrellas con parpadeo y color variado
+   193→    const rng = mulberry32(777);
+   194→    const starCount = 1400;
+   195→    const pos = new Float32Array(starCount * 3);
+   196→    const sizes = new Float32Array(starCount);
+   197→    const phase = new Float32Array(starCount);
+   198→    const col = new Float32Array(starCount * 3);
+   199→    for (let i = 0; i < starCount; i++) {
+   200→      const th = rng() * Math.PI * 2;
+   201→      const ph = Math.acos(rng() * 0.88);
+   202→      const r = 400;
+   203→      pos[i * 3] = Math.sin(ph) * Math.cos(th) * r;
+   204→      pos[i * 3 + 1] = Math.cos(ph) * r + 20;
+   205→      pos[i * 3 + 2] = Math.sin(ph) * Math.sin(th) * r;
+   206→      sizes[i] = 0.8 + rng() * 2.4;
+   207→      phase[i] = rng() * Math.PI * 2;
+   208→      // blanco azulado, blanco cálido o dorado
+   209→      const k = rng();
+   210→      const c = k < 0.6 ? [0.85, 0.9, 1.0] : k < 0.85 ? [1.0, 0.98, 0.92] : [1.0, 0.85, 0.6];
+   211→      col[i * 3] = c[0]; col[i * 3 + 1] = c[1]; col[i * 3 + 2] = c[2];
+   212→    }
+   213→    const starGeo = new THREE.BufferGeometry();
+   214→    starGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+   215→    starGeo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+   216→    starGeo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+   217→    starGeo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+   218→    const starMat = new THREE.ShaderMaterial({
+   219→      transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+   220→      uniforms: { uTime: this.skyTime, uGlobalA: this.dn.starsA },
+   221→      vertexShader: `attribute float aSize; attribute float aPhase; attribute vec3 aColor;
+   222→        uniform float uTime; uniform float uGlobalA; varying float vA; varying vec3 vC;
+   223→        void main(){ vC = aColor;
+   224→          vA = (0.55 + 0.45 * sin(uTime * 1.9 + aPhase)) * uGlobalA;
+   225→          vec4 mv = modelViewMatrix * vec4(position,1.0);
+   226→          gl_PointSize = clamp(aSize * (620.0 / -mv.z), 1.0, 7.0);
+   227→          gl_Position = projectionMatrix * mv; }`,
+   228→      fragmentShader: `varying float vA; varying vec3 vC;
+   229→        void main(){ vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+   230→          float a = smoothstep(0.5, 0.08, d) * vA;
+   231→          gl_FragColor = vec4(vC, a); }`,
+   232→    });
+   233→    const stars = new THREE.Points(starGeo, starMat);
+   234→    stars.renderOrder = -9;
+   235→    this.scene.add(stars);
+   236→
+   237→    // auroras boreales (3 cintas)
+   238→    const auroraGeo = new THREE.PlaneGeometry(560, 130, 1, 1);
+   239→    const ribbons: [number, number, number, number, number, number][] = [
+   240→      // [y, z, rotY, phase, colA, colB]
+   241→      [158, -240, 0.0, 0.0, 0x2bd8a4, 0x3affc8],
+   242→      [172, -230, -0.55, 2.2, 0x36e07a, 0x7ae0ff],
+   243→      [150, -250, 0.5, 4.4, 0x8a5cff, 0x2bd8a4],
+   244→    ];
+   245→    for (const [y, z, ry, ph, ca, cb] of ribbons) {
+   246→      const m = new THREE.Mesh(auroraGeo, this.makeAuroraMat(ca, cb, ph));
+   247→      m.position.set(0, y, z);
+   248→      m.rotation.y = ry;
+   249→      m.rotation.x = -0.12;
+   250→      m.renderOrder = -7;
+   251→      this.scene.add(m);
+   252→    }
+   253→
+   254→    // luna con textura + halos (grupo para el ciclo día/noche)
+   255→    const moonGroup = new THREE.Group();
+   256→    const moonMat = new THREE.MeshBasicMaterial({ map: moonTexture(), fog: false, transparent: true });
+   257→    const moon = new THREE.Mesh(new THREE.SphereGeometry(15, 24, 18), moonMat);
+   258→    moon.position.set(-185, 168, -150);
+   259→    moon.renderOrder = -8;
+   260→    moonGroup.add(moon);
+   261→    this.moonMat = moonMat;
+   262→    this.moonDir.copy(moon.position).normalize();
+   263→
+   264→    const mkHalo = (scale: number, opacity: number, color: number) => {
+   265→      const sm = new THREE.SpriteMaterial({
+   266→        map: glowSprite(), color, opacity,
+   267→        transparent: true,
+   268→        blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+   269→      });
+   270→      const s = new THREE.Sprite(sm);
+   271→      s.position.copy(moon.position);
+   272→      s.scale.setScalar(scale);
+   273→      s.renderOrder = -8;
+   274→      moonGroup.add(s);
+   275→      this.moonHaloMats.push(sm);
+   276→      return s;
+   277→    };
+   278→    mkHalo(58, 0.5, 0x9fb4e8);
+   279→    mkHalo(150, 0.16, 0x6d84c8);
+   280→    this.moonGroup = moonGroup;
+   281→    this.scene.add(moonGroup);
+   282→
+   283→    // SOL: disco cálido + glorias aditivas (visible de día)
+   284→    const mkSunSprite = (scale: number, opacity: number, color: number) => {
+   285→      const sm = new THREE.SpriteMaterial({
+   286→        map: glowSprite(), color, opacity,
+   287→        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+   288→      });
+   289→      const s = new THREE.Sprite(sm);
+   290→      s.scale.setScalar(scale);
+   291→      s.renderOrder = -8;
+   292→      this.scene.add(s);
+   293→      this.sunSprites.push(s);
+   294→      return sm;
+   295→    };
+   296→    this.sunGlowMat = mkSunSprite(210, 0.34, 0xffd9a0);
+   297→    this.sunMat = mkSunSprite(64, 0.8, 0xfff3d0);
+   298→  }
+   299→
+   300→  /* ---------- Luces ---------- */
+   301→
+   302→  private buildLights() {
+   303→    this.hemi = new THREE.HemisphereLight(0x2e4070, 0x1a1512, 0.5);
+   304→    this.scene.add(this.hemi);
+   305→
+   306→    // luz con sombras compartida: SOL de día, LUNA de noche
+   307→    this.moonLight = new THREE.DirectionalLight(0xaec6ff, 1.22);
+   308→    this.moonLight.position.set(-40, 55, -30);
+   309→    this.moonLight.castShadow = true;
+   310→    this.moonLight.shadow.mapSize.set(2048, 2048);
+   311→    this.moonLight.shadow.camera.near = 5;
+   312→    this.moonLight.shadow.camera.far = 200;
+   313→    const S = 44;
+   314→    this.moonLight.shadow.camera.left = -S;
+   315→    this.moonLight.shadow.camera.right = S;
+   316→    this.moonLight.shadow.camera.top = S;
+   317→    this.moonLight.shadow.camera.bottom = -S;
+   318→    this.moonLight.shadow.bias = -0.0006;
+   319→    this.moonLight.shadow.normalBias = 0.03;
+   320→    this.scene.add(this.moonLight);
+   321→    this.scene.add(this.moonLight.target);
+   322→
+   323→    // relleno frío suave desde el lado opuesto (levanta negros)
+   324→    this.fill = new THREE.DirectionalLight(0x36426a, 0.3);
+   325→    this.fill.position.set(34, 40, 28);
+   326→    this.scene.add(this.fill);
+   327→  }
+   328→
+   329→  /**
+   330→   * Aplica el estado del ciclo día/noche a cielo, luces, niebla,
+   331→   * sol/luna, estrellas, aurora, luciérnagas y ambiente nocturno.
+   332→   */
+   333→  applyDayNight(s: DayNightSample, renderer: THREE.WebGLRenderer) {
+   334→    this.nightK = s.night;
+   335→    this.mistMul = s.mistMul;
+   336→
+   337→    // cielo
+   338→    const su = this.skyMat.uniforms;
+   339→    (su.top.value as THREE.Color).copy(s.skyTop);
+   340→    (su.mid.value as THREE.Color).copy(s.skyMid);
+   341→    (su.bottom.value as THREE.Color).copy(s.skyBottom);
+   342→    this.dn.sunDir.value.copy(s.lightDir);
+   343→    this.dn.sunTint.value.copy(s.sunTint);
+   344→    this.dn.sunGlow.value = s.sunGlow;
+   345→
+   346→    // estrellas, aurora, luciérnagas
+   347→    this.dn.starsA.value = s.stars;
+   348→    this.dn.auroraA.value = s.aurora;
+   349→    this.dn.ffA.value = s.fireflies;
+   350→
+   351→    // sol y luna visibles
+   352→    this.sunSprites.forEach((sp) => { sp.position.copy(s.lightDir).multiplyScalar(385); });
+   353→    if (this.sunMat) this.sunMat.opacity = 0.85 * s.sunA;
+   354→    if (this.sunGlowMat) this.sunGlowMat.opacity = 0.34 * s.sunA;
+   355→    if (this.moonGroup) {
+   356→      this.moonGroup.visible = s.moonA > 0.02;
+   357→      this.moonGroup.position.set(0, 0, 0);
+   358→    }
+   359→    if (this.moonMat) this.moonMat.opacity = s.moonA;
+   360→    this.moonHaloMats.forEach((m, i) => { m.opacity = (i === 0 ? 0.5 : 0.16) * s.moonA; });
+   361→
+   362→    // luz direccional con sombras (sol de día / luna de noche)
+   363→    this.moonLight.color.copy(s.lightColor);
+   364→    this.moonLight.intensity = s.lightIntensity;
+   365→
+   366→    // hemisférica + relleno
+   367→    this.hemi.color.copy(s.hemiSky);
+   368→    this.hemi.groundColor.copy(s.hemiGround);
+   369→    this.hemi.intensity = s.hemiIntensity;
+   370→    this.fill.color.copy(s.fillColor);
+   371→    this.fill.intensity = s.fillIntensity;
+   372→
+   373→    // niebla volumétrica global
+   374→    if (this.scene.fog instanceof THREE.FogExp2) {
+   375→      this.scene.fog.color.copy(s.fogColor);
+   376→      this.scene.fog.density = s.fogDensity;
+   377→    }
+   378→
+   379→    // agua de la Fuente Lunar
+   380→    if (this.waterMat) {
+   381→      (this.waterMat.uniforms.uSky.value as THREE.Color).copy(s.waterTint);
+   382→      (this.waterMat.uniforms.uMoonDir.value as THREE.Vector3).copy(s.lightDir);
+   383→    }
+   384→
+   385→    // exposición y reflejos de entorno
+   386→    renderer.toneMappingExposure = s.exposure;
+   387→    this.envIntensityTarget = s.envIntensity;
+   388→    const sc = this.scene as THREE.Scene & { environmentIntensity?: number };
+   389→    if (sc.environmentIntensity !== undefined) sc.environmentIntensity = s.envIntensity;
+   390→  }
+   391→
+   392→  /* ---------- Terreno con splat y senderos ---------- */
+   393→
+   394→  private buildTerrain() {
+   395→    const seg = 150;
+   396→    const geo = new THREE.PlaneGeometry(WORLD.size, WORLD.size, seg, seg);
+   397→    geo.rotateX(-Math.PI / 2);
+   398→    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+   399→    const colors = new Float32Array(pos.count * 3);
+   400→    const c = new THREE.Color();
+   401→    for (let i = 0; i < pos.count; i++) {
+   402→      const x = pos.getX(i), z = pos.getZ(i);
+   403→      const h = terrainHeight(x, z);
+   404→      pos.setY(i, h);
+   405→      // sombreado por pendiente + variación
+   406→      const n = fbm(x * 0.11, z * 0.11, 3) * 0.5 + 0.5;
+   407→      const slope = 1 - Math.min(1, Math.abs(fbm(x * 0.05 + 31, z * 0.05 - 12, 2)) * 1.4);
+   408→      const shade = (0.86 + n * 0.22) * lerp(0.82, 1, slope);
+   409→      c.setRGB(shade, shade, shade);
+   410→      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+   411→    }
+   412→    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+   413→    geo.computeVertexNormals();
+   414→    const mat = new THREE.MeshStandardMaterial({
+   415→      map: terrainSplat(),
+   416→      normalMap: pbrTex('grass_normal.jpg', { srgb: false, repeat: 46 }),
+   417→      normalScale: new THREE.Vector2(0.55, 0.55),
+   418→      bumpMap: terrainDetailNormal(),
+   419→      bumpScale: 0.06,
+   420→      roughnessMap: pbrTex('grass_rough.jpg', { srgb: false, repeat: 46 }),
+   421→      vertexColors: true,
+   422→      roughness: 1.0, metalness: 0,
+   423→      envMapIntensity: 0.35,
+   424→    });
+   425→    this.terrainMat = mat;
+   426→    const terrain = new THREE.Mesh(geo, mat);
+   427→    terrain.receiveShadow = true;
+   428→    terrain.name = 'terrain';
+   429→    this.scene.add(terrain);
+   430→  }
+   431→
+   432→  /* ---------- Decoración instanciada ---------- */
+   433→
+   434→  private buildDecorations() {
+   435→    const rng = mulberry32(1337);
+   436→    const dummy = new THREE.Object3D();
+   437→    const tint = new THREE.Color();
+   438→
+   439→    // ==== Pinos: tronco + copa fusionada de 3 conos ====
+   440→    const canopyGeo = (() => {
+   441→      const parts: THREE.BufferGeometry[] = [];
+   442→      const defs: [number, number, number][] = [ // [radio, alto, y]
+   443→        [1.95, 3.1, 3.0], [1.5, 2.7, 4.7], [1.0, 2.3, 6.2],
+   444→      ];
+   445→      defs.forEach(([r, h, y], i) => {
+   446→        const cone = new THREE.ConeGeometry(r, h, 8);
+   447→        cone.rotateZ(((i * 53) % 7 - 3) * 0.03);
+   448→        cone.translate(((i * 31) % 5 - 2) * 0.06, y, ((i * 17) % 5 - 2) * 0.06);
+   449→        parts.push(cone);
+   450→      });
+   451→      return mergeGeometries(parts)!;
+   452→    })();
+   453→    const trunkGeo = new THREE.CylinderGeometry(0.2, 0.38, 3.2, 8);
+   454→    trunkGeo.translate(0, 1.5, 0);
+   455→
+   456→    const treeCount = 135;
+   457→    const canopyM = canopyMat(0xffffff); // tono por instancia
+   458→    const trunks = new THREE.InstancedMesh(trunkGeo, barkMat(), treeCount);
+   459→    const canopies = new THREE.InstancedMesh(canopyGeo, canopyM, treeCount);
+   460→    trunks.castShadow = canopies.castShadow = true;
+   461→    trunks.receiveShadow = canopies.receiveShadow = true;
+   462→
+   463→    // ==== Árboles muertos (cerca de ruinas/santuarios) ====
+   464→    const deadGeo = (() => {
+   465→      const parts: THREE.BufferGeometry[] = [];
+   466→      const trunk = new THREE.CylinderGeometry(0.14, 0.3, 3.6, 7);
+   467→      trunk.translate(0, 1.8, 0);
+   468→      parts.push(trunk);
+   469→      for (let i = 0; i < 4; i++) {
+   470→        const b = new THREE.CylinderGeometry(0.05, 0.09, 1.5 + (i % 2) * 0.5, 5);
+   471→        b.translate(0, 0.7, 0);
+   472→        b.rotateZ(0.7 + (i % 2) * 0.5);
+   473→        b.rotateY(i * 1.65);
+   474→        b.translate(0, 2.2 + (i % 3) * 0.45, 0);
+   475→        parts.push(b);
+   476→      }
+   477→      return mergeGeometries(parts)!;
+   478→    })();
+   479→    const deadMat = new THREE.MeshStandardMaterial({ color: 0x4a4038, roughness: 0.95, normalMap: barkMat().normalMap });
+   480→    const deadCount = 34;
+   481→    const dead = new THREE.InstancedMesh(deadGeo, deadMat, deadCount);
+   482→    dead.castShadow = true; dead.receiveShadow = true;
+   483→
+   484→    // ==== Rocas ====
+   485→    const rockCount = 95;
+   486→    const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+   487→    const rocks = new THREE.InstancedMesh(rockGeo, stoneMat(), rockCount);
+   488→    rocks.castShadow = rocks.receiveShadow = true;
+   489→
+   490→    // colocación de árboles/rocas
+   491→    let placed = 0, deadPlaced = 0, guard = 0;
+   492→    const deadSpots: [number, number][] = [];
+   493→    while (placed < treeCount && guard++ < 6000) {
+   494→      const a = rng() * Math.PI * 2;
+   495→      const r = 18 + rng() * (WORLD.radius - 24);
+   496→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   497→      if (this.nearCamp(x, z, 14)) continue;
+   498→      const h = terrainHeight(x, z);
+   499→      if (h > 7.5) continue;
+   500→      const s = 0.8 + rng() * 1.15;
+   501→      dummy.position.set(x, h - 0.1, z);
+   502→      dummy.scale.set(s, s * (0.92 + rng() * 0.2), s);
+   503→      dummy.rotation.y = rng() * Math.PI * 2;
+   504→      dummy.updateMatrix();
+   505→      trunks.setMatrixAt(placed, dummy.matrix);
+   506→      canopies.setMatrixAt(placed, dummy.matrix);
+   507→      const tone = 0.8 + rng() * 0.5;
+   508→      tint.setRGB(tone * 0.30, tone * 0.55, tone * 0.31);
+   509→      canopies.setColorAt(placed, tint);
+   510→      tint.setRGB(tone * 0.72, tone * 0.62, tone * 0.55);
+   511→      trunks.setColorAt(placed, tint);
+   512→      this.colliders.push({ x, z, r: 0.55 * s });
+   513→      // algunos árboles muertos acompañando
+   514→      if (deadPlaced < deadCount && rng() < 0.22) {
+   515→        const dx = x + (rng() - 0.5) * 7, dz = z + (rng() - 0.5) * 7;
+   516→        if (!this.nearCamp(dx, dz, 12)) {
+   517→          const dh = terrainHeight(dx, dz);
+   518→          if (dh < 8) {
+   519→            dummy.position.set(dx, dh - 0.05, dz);
+   520→            dummy.scale.setScalar(0.8 + rng() * 0.9);
+   521→            dummy.rotation.set((rng() - 0.5) * 0.14, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
+   522→            dummy.updateMatrix();
+   523→            dead.setMatrixAt(deadPlaced, dummy.matrix);
+   524→            deadSpots.push([dx, dz]);
+   525→            this.colliders.push({ x: dx, z: dz, r: 0.4 });
+   526→            deadPlaced++;
+   527→          }
+   528→        }
+   529→      }
+   530→      placed++;
+   531→    }
+   532→    trunks.count = canopies.count = placed;
+   533→    dead.count = deadPlaced;
+   534→    this.scene.add(trunks, canopies, dead);
+   535→
+   536→    // rocas
+   537→    let rocksPlaced = 0; guard = 0;
+   538→    while (rocksPlaced < rockCount && guard++ < 4000) {
+   539→      const a = rng() * Math.PI * 2;
+   540→      const r = 14 + rng() * (WORLD.radius - 14);
+   541→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   542→      if (this.nearCamp(x, z, 10)) continue;
+   543→      const s = 0.4 + rng() * 1.7;
+   544→      dummy.position.set(x, terrainHeight(x, z) + s * 0.22, z);
+   545→      dummy.scale.set(s * (0.9 + rng() * 0.4), s * 0.72, s * (0.9 + rng() * 0.4));
+   546→      dummy.rotation.set(rng() * 0.4, rng() * Math.PI * 2, rng() * 0.4);
+   547→      dummy.updateMatrix();
+   548→      rocks.setMatrixAt(rocksPlaced, dummy.matrix);
+   549→      const tone = 0.8 + rng() * 0.4;
+   550→      tint.setRGB(tone * 0.95, tone, tone * 1.06);
+   551→      rocks.setColorAt(rocksPlaced, tint);
+   552→      if (s > 0.9) this.colliders.push({ x, z, r: s * 0.9 });
+   553→      rocksPlaced++;
+   554→    }
+   555→    rocks.count = rocksPlaced;
+   556→    this.scene.add(rocks);
+   557→
+   558→    // ==== Hierba instanciada con viento ====
+   559→    const grassCount = 9000;
+   560→    const grass = new THREE.InstancedMesh(grassGeometry(), grassMaterial(), grassCount);
+   561→    let gPlaced = 0; guard = 0;
+   562→    while (gPlaced < grassCount && guard++ < 60000) {
+   563→      const a = rng() * Math.PI * 2;
+   564→      const r = Math.sqrt(rng()) * (WORLD.radius - 6);
+   565→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   566→      const h = terrainHeight(x, z);
+   567→      if (h > 6.5) continue;
+   568→      if (this.nearCamp(x, z, 4.5)) continue;
+   569→      dummy.position.set(x, h - 0.02, z);
+   570→      dummy.scale.setScalar(0.75 + rng() * 0.9);
+   571→      dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+   572→      dummy.updateMatrix();
+   573→      grass.setMatrixAt(gPlaced, dummy.matrix);
+   574→      gPlaced++;
+   575→    }
+   576→    grass.count = gPlaced;
+   577→    this.scene.add(grass);
+   578→
+   579→    // ==== Setas luminosas ====
+   580→    const { stem, cap } = mushroomGeos();
+   581→    const stemMat = stdMat(0xcfc4ae, { roughness: 0.8 });
+   582→    const capPurple = stdMat(0x5a3a7a, { emissive: 0x8a4aff, emissiveIntensity: 0.9, roughness: 0.55 });
+   583→    const capTeal = stdMat(0x1a5a52, { emissive: 0x2ad8c0, emissiveIntensity: 1.0, roughness: 0.55 });
+   584→    const musStem = new THREE.InstancedMesh(stem, stemMat, 120);
+   585→    const musP = new THREE.InstancedMesh(cap, capPurple, 60);
+   586→    const musT = new THREE.InstancedMesh(cap, capTeal, 60);
+   587→    let ms = 0, mp = 0, mt = 0; guard = 0;
+   588→    while ((mp < 60 || mt < 60) && guard++ < 5000) {
+   589→      const a = rng() * Math.PI * 2;
+   590→      const r = 14 + rng() * (WORLD.radius - 20);
+   591→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   592→      if (this.nearCamp(x, z, 14)) continue;
+   593→      const h = terrainHeight(x, z);
+   594→      if (h > 6.5) continue;
+   595→      const n = 2 + ((rng() * 3) | 0);
+   596→      for (let i = 0; i < n; i++) {
+   597→        const mx = x + (rng() - 0.5) * 1.6, mz = z + (rng() - 0.5) * 1.6;
+   598→        const s = 0.7 + rng() * 1.1;
+   599→        dummy.position.set(mx, terrainHeight(mx, mz) - 0.02, mz);
+   600→        dummy.scale.setScalar(s);
+   601→        dummy.rotation.set(0, rng() * Math.PI * 2, (rng() - 0.5) * 0.25);
+   602→        dummy.updateMatrix();
+   603→        if (ms < 120) musStem.setMatrixAt(ms++, dummy.matrix);
+   604→        const purple = rng() < 0.55;
+   605→        if (purple && mp < 60) musP.setMatrixAt(mp++, dummy.matrix);
+   606→        else if (!purple && mt < 60) musT.setMatrixAt(mt++, dummy.matrix);
+   607→      }
+   608→    }
+   609→    musStem.count = ms; musP.count = mp; musT.count = mt;
+   610→    this.scene.add(musStem, musP, musT);
+   611→
+   612→    // ==== Ruinas dispersas ====
+   613→    const ruinSpots: [number, number][] = [[28, -28], [-30, -8], [12, 40], [-16, 58], [44, 52], [-44, -40], [64, -12], [20, -60]];
+   614→    for (const [x, z] of ruinSpots) {
+   615→      const g = new THREE.Group();
+   616→      const n = 1 + Math.floor(rng() * 3);
+   617→      for (let i = 0; i < n; i++) {
+   618→        const px = x + (rng() - 0.5) * 6;
+   619→        const pz = z + (rng() - 0.5) * 6;
+   620→        const ph = 1.2 + rng() * 2.2;
+   621→        const p = buildRuinedPillar(ph);
+   622→        p.position.set(px, terrainHeight(px, pz), pz);
+   623→        p.rotation.y = rng() * Math.PI;
+   624→        g.add(p);
+   625→        this.colliders.push({ x: px, z: pz, r: 0.55 });
+   626→      }
+   627→      if (rng() < 0.4) {
+   628→        const arch = buildBrokenArch();
+   629→        arch.position.set(x + 3, terrainHeight(x + 3, z), z + 2);
+   630→        arch.rotation.y = rng() * Math.PI * 2;
+   631→        g.add(arch);
+   632→      }
+   633→      // columna caída
+   634→      if (rng() < 0.6) {
+   635→        const fall = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.3, 2.2, 8), stoneMat());
+   636→        fall.rotation.z = Math.PI / 2;
+   637→        fall.rotation.y = rng() * Math.PI;
+   638→        const fx = x + (rng() - 0.5) * 5, fz = z + (rng() - 0.5) * 5;
+   639→        fall.position.set(fx, terrainHeight(fx, fz) + 0.3, fz);
+   640→        fall.castShadow = fall.receiveShadow = true;
+   641→        g.add(fall);
+   642→        this.colliders.push({ x: fx, z: fz, r: 0.8 });
+   643→      }
+   644→      this.scene.add(g);
+   645→    }
+   646→
+   647→    // ==== Niebla rasante ====
+   648→    this.buildMist(rng);
+   649→
+   650→    // ==== Luciérnagas ====
+   651→    this.buildFireflies();
+   652→
+   653→    // Antorchas alrededor de cada santuario y en la arena
+   654→    for (const s of WORLD.shrines) this.addTorchRing(s.x, s.z, s.r - 2, 4, rng, false);
+   655→    this.addTorchRing(WORLD.arena.x, WORLD.arena.z, WORLD.arena.r - 3, 6, rng, true);
+   656→    this.addTorch(WORLD.bonfire.x + 3.4, WORLD.bonfire.z - 2.4, terrainHeight(WORLD.bonfire.x + 3.4, WORLD.bonfire.z - 2.4), false);
+   657→    this.addTorch(WORLD.bonfire.x - 3.2, WORLD.bonfire.z - 2.8, terrainHeight(WORLD.bonfire.x - 3.2, WORLD.bonfire.z - 2.8), false);
+   658→
+   659→    void deadSpots;
+   660→  }
+   661→
+   662→  private nearCamp(x: number, z: number, margin: number): boolean {
+   663→    if (Math.hypot(x - WORLD.bonfire.x, z - WORLD.bonfire.z) < margin + 3) return true;
+   664→    for (const s of WORLD.shrines) if (Math.hypot(x - s.x, z - s.z) < margin + 3) return true;
+   665→    if (Math.hypot(x - WORLD.arena.x, z - WORLD.arena.z) < WORLD.arena.r + margin - 4) return true;
+   666→    return false;
+   667→  }
+   668→
+   669→  /* ---------- Niebla rasante ---------- */
+   670→
+   671→  private buildMist(rng: ReturnType<typeof mulberry32>) {
+   672→    const tex = mistTexture();
+   673→    const spots: [number, number, number][] = [
+   674→      // [x, z, opacidad]
+   675→      [20, 18, 0.1], [-24, 30, 0.12], [10, -30, 0.09], [-38, -22, 0.11],
+   676→      [52, 34, 0.1], [-8, 52, 0.1], [36, -8, 0.08], [-52, 8, 0.1],
+   677→      [WORLD.arena.x - 12, WORLD.arena.z + 10, 0.13], [WORLD.shrines[2].x + 8, WORLD.shrines[2].z + 6, 0.12],
+   678→    ];
+   679→    for (const [x, z, o] of spots) {
+   680→      const geo = new THREE.PlaneGeometry(30, 30);
+   681→      geo.rotateX(-Math.PI / 2);
+   682→      const mat = new THREE.MeshBasicMaterial({
+   683→        map: tex, transparent: true, opacity: o, depthWrite: false,
+   684→        color: 0x9db8d8,
+   685→      });
+   686→      const m = new THREE.Mesh(geo, mat);
+   687→      const y = terrainHeight(x, z);
+   688→      m.position.set(x, y + 0.55 + rng() * 0.5, z);
+   689→      m.rotation.y = rng() * Math.PI * 2;
+   690→      m.renderOrder = 4;
+   691→      this.scene.add(m);
+   692→      this.mist.push({ mesh: m, mat, baseO: o, spin: (rng() - 0.5) * 0.02 });
+   693→    }
+   694→  }
+   695→
+   696→  /* ---------- Luciérnagas ---------- */
+   697→
+   698→  private buildFireflies() {
+   699→    const rng = mulberry32(555);
+   700→    const N = 130;
+   701→    const pos = new Float32Array(N * 3);
+   702→    const phase = new Float32Array(N);
+   703→    const speed = new Float32Array(N);
+   704→    const size = new Float32Array(N);
+   705→    let i = 0, guard = 0;
+   706→    while (i < N && guard++ < 3000) {
+   707→      const a = rng() * Math.PI * 2;
+   708→      const r = 8 + rng() * (WORLD.radius - 16);
+   709→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   710→      const h = terrainHeight(x, z);
+   711→      if (h > 6) continue;
+   712→      pos[i * 3] = x; pos[i * 3 + 1] = h + 0.4 + rng() * 1.4; pos[i * 3 + 2] = z;
+   713→      phase[i] = rng() * Math.PI * 2;
+   714→      speed[i] = 0.5 + rng() * 0.9;
+   715→      size[i] = 3 + rng() * 4;
+   716→      i++;
+   717→    }
+   718→    const geo = new THREE.BufferGeometry();
+   719→    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+   720→    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+   721→    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+   722→    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+   723→    const mat = new THREE.ShaderMaterial({
+   724→      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+   725→      uniforms: { uTime: this.skyTime, uGlobalA: this.dn.ffA },
+   726→      vertexShader: `attribute float aPhase; attribute float aSpeed; attribute float aSize;
+   727→        uniform float uTime; uniform float uGlobalA; varying float vA;
+   728→        void main(){
+   729→          vec3 p = position;
+   730→          p.x += sin(uTime * aSpeed + aPhase) * 1.3;
+   731→          p.y += sin(uTime * aSpeed * 0.7 + aPhase * 2.0) * 0.55;
+   732→          p.z += cos(uTime * aSpeed * 0.85 + aPhase) * 1.3;
+   733→          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+   734→          gl_PointSize = clamp(aSize * (150.0 / max(0.1, -mv.z)), 1.0, 26.0);
+   735→          float nearFade = smoothstep(2.2, 6.0, -mv.z);
+   736→          vA = (pow(0.5 + 0.5 * sin(uTime * 2.1 + aPhase * 3.0), 2.2) * 0.9 + 0.06) * nearFade * uGlobalA;
+   737→          gl_Position = projectionMatrix * mv; }`,
+   738→      fragmentShader: `varying float vA;
+   739→        void main(){ vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+   740→          float a = smoothstep(0.5, 0.06, d) * vA;
+   741→          if (a < 0.01) discard;
+   742→          gl_FragColor = vec4(vec3(0.82, 1.0, 0.55) * 1.6, a); }`,
+   743→    });
+   744→    const pts = new THREE.Points(geo, mat);
+   745→    pts.frustumCulled = false;
+   746→    pts.renderOrder = 6;
+   747→    this.scene.add(pts);
+   748→  }
+   749→
+   750→  /* ---------- Fuente Lunar (agua estilizada) ---------- */
+   751→
+   752→  private buildLunarBasin() {
+   753→    const x = WORLD.bonfire.x - 3.4, z = WORLD.bonfire.z - 3.6;
+   754→    const h = terrainHeight(x, z);
+   755→    const g = new THREE.Group();
+   756→    g.position.set(x, h, z);
+   757→
+   758→    // pie de piedra
+   759→    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.45, 0.5, 10), stoneMat());
+   760→    pedestal.position.y = 0.25;
+   761→    pedestal.castShadow = pedestal.receiveShadow = true;
+   762→    g.add(pedestal);
+   763→    // brocal
+   764→    const rim = new THREE.Mesh(new THREE.TorusGeometry(1.32, 0.17, 8, 18), stoneMat());
+   765→    rim.rotation.x = Math.PI / 2;
+   766→    rim.position.y = 0.52;
+   767→    rim.castShadow = true;
+   768→    g.add(rim);
+   769→
+   770→    // agua
+   771→    const waterMat = new THREE.ShaderMaterial({
+   772→      transparent: true,
+   773→      uniforms: {
+   774→        uTime: this.waterTime,
+   775→        uNormals: { value: waterNormal() },
+   776→        uMoonDir: { value: this.moonDir },
+   777→        uDeep: { value: new THREE.Color(0x0a1626) },
+   778→        uSky: { value: new THREE.Color(0x27405e) },
+   779→      },
+   780→      vertexShader: `varying vec2 vUv; varying vec3 vW;
+   781→        void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz;
+   782→          gl_Position = projectionMatrix * viewMatrix * w; }`,
+   783→      fragmentShader: `varying vec2 vUv; varying vec3 vW;
+   784→        uniform float uTime; uniform sampler2D uNormals; uniform vec3 uMoonDir; uniform vec3 uDeep; uniform vec3 uSky;
+   785→        void main(){
+   786→          vec3 n1 = texture2D(uNormals, vUv * 2.2 + vec2(uTime * 0.016, uTime * 0.012)).xyz * 2.0 - 1.0;
+   787→          vec3 n2 = texture2D(uNormals, vUv * 3.4 - vec2(uTime * 0.02, -uTime * 0.009)).xyz * 2.0 - 1.0;
+   788→          vec3 n = normalize(vec3((n1.x + n2.x) * 0.5, 7.0, (n1.y + n2.y) * 0.5));
+   789→          vec3 V = normalize(cameraPosition - vW);
+   790→          float fres = pow(1.0 - max(dot(V, vec3(0.0, 1.0, 0.0)), 0.0), 3.0);
+   791→          vec3 col = mix(uDeep, uSky, fres * 0.8);
+   792→          vec3 L = normalize(uMoonDir);
+   793→          vec3 H = normalize(L + V);
+   794→          float spec = pow(max(dot(n, H), 0.0), 90.0);
+   795→          col += vec3(0.85, 0.92, 1.0) * spec * 2.2;
+   796→          // ondas concéntricas suaves
+   797→          float r = length(vUv - 0.5) * 2.0;
+   798→          col += vec3(0.3, 0.55, 0.6) * sin(r * 22.0 - uTime * 2.0) * 0.02 * (1.0 - r);
+   799→          gl_FragColor = vec4(col, 0.93);
+   800→        }`,
+   801→    });
+   802→    const water = new THREE.Mesh(new THREE.CircleGeometry(1.3, 26), waterMat);
+   803→    water.rotation.x = -Math.PI / 2;
+   804→    water.position.y = 0.44;
+   805→    g.add(water);
+   806→    this.waterMat = waterMat;
+   807→
+   808→    this.scene.add(g);
+   809→    this.colliders.push({ x, z, r: 1.55 });
+   810→  }
+   811→
+   812→  /* ---------- Hoguera ---------- */
+   813→
+   814→  private torches: { group: THREE.Group; light: THREE.PointLight; flame: THREE.Mesh; pos: THREE.Vector3 }[] = [];
+   815→
+   816→  private buildBonfire() {
+   817→    const { group, light, logs } = buildBonfire();
+   818→    const h = terrainHeight(WORLD.bonfire.x, WORLD.bonfire.z);
+   819→    group.position.set(WORLD.bonfire.x, h, WORLD.bonfire.z);
+   820→    this.scene.add(group);
+   821→    this.bonfireLight = light;
+   822→    this.bonfireFlame = (group.getObjectByName('flame') as THREE.Mesh) ?? null;
+   823→    this.colliders.push({ x: WORLD.bonfire.x, z: WORLD.bonfire.z, r: 1.1 });
+   824→    const rng = mulberry32(99);
+   825→    for (let i = 0; i < 4; i++) {
+   826→      const a = (i / 4) * Math.PI * 2 + 0.5;
+   827→      const x = WORLD.bonfire.x + Math.cos(a) * 2.4;
+   828→      const z = WORLD.bonfire.z + Math.sin(a) * 2.4;
+   829→      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.45, 0), stoneMat());
+   830→      rock.position.set(x, terrainHeight(x, z) + 0.2, z);
+   831→      rock.scale.y = 0.7;
+   832→      rock.rotation.y = rng() * Math.PI;
+   833→      rock.castShadow = rock.receiveShadow = true;
+   834→      this.scene.add(rock);
+   835→    }
+   836→    void logs;
+   837→  }
+   838→
+   839→  private addTorchRing(cx: number, cz: number, radius: number, count: number, rng: () => number, soul: boolean) {
+   840→    for (let i = 0; i < count; i++) {
+   841→      const a = (i / count) * Math.PI * 2 + rng() * 0.4;
+   842→      const x = cx + Math.cos(a) * radius;
+   843→      const z = cz + Math.sin(a) * radius;
+   844→      this.addTorch(x, z, terrainHeight(x, z), soul);
+   845→    }
+   846→  }
+   847→
+   848→  private addTorch(x: number, z: number, h: number, soul: boolean) {
+   849→    const { group, light, flame } = buildTorch(soul);
+   850→    group.position.set(x, h, z);
+   851→    if (soul) group.scale.setScalar(1.35);
+   852→    this.scene.add(group);
+   853→    this.colliders.push({ x, z, r: 0.3 });
+   854→    this.torches.push({ group, light, flame, pos: new THREE.Vector3(x, h + (soul ? 3.8 : 2.9), z) });
+   855→  }
+   856→
+   857→  /* ---------- Santuarios ---------- */
+   858→
+   859→  private buildShrines() {
+   860→    WORLD.shrines.forEach((s, idx) => {
+   861→      const { group, crystal, runes, shards } = buildObelisk(false);
+   862→      const h = terrainHeight(s.x, s.z);
+   863→      group.position.set(s.x, h, s.z);
+   864→      this.scene.add(group);
+   865→      this.colliders.push({ x: s.x, z: s.z, r: 1.35 });
+   866→      const crystalMat = crystal.material as THREE.MeshStandardMaterial;
+   867→      const runeMats = runes.map(r => r.material as THREE.MeshStandardMaterial);
+   868→      const light = new THREE.PointLight(0xd8323c, 5, 17, 1.8);
+   869→      light.position.set(s.x, h + 4.1, s.z);
+   870→      this.scene.add(light);
+   871→
+   872→      // losa circular de piedra
+   873→      const slab = new THREE.Mesh(new THREE.CylinderGeometry(5.2, 5.8, 0.28, 22), stoneMat());
+   874→      slab.position.set(s.x, h + 0.1, s.z);
+   875→      slab.receiveShadow = true;
+   876→      this.scene.add(slab);
+   877→      // anillo rúnico
+   878→      const runeRing = new THREE.Mesh(new THREE.TorusGeometry(3.6, 0.06, 6, 40), emisMat(0xb02832, 0.55));
+   879→      runeRing.rotation.x = Math.PI / 2;
+   880→      runeRing.position.set(s.x, h + 0.26, s.z);
+   881→      this.scene.add(runeRing);
+   882→
+   883→      // aura corrupta pulsante
+   884→      const auraMat = new THREE.MeshBasicMaterial({
+   885→        color: 0x9a1826, transparent: true, opacity: 0.13,
+   886→        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+   887→      });
+   888→      const auraGeo = new THREE.RingGeometry(3.0, 5.0, 40);
+   889→      auraGeo.rotateX(-Math.PI / 2);
+   890→      const aura = new THREE.Mesh(auraGeo, auraMat);
+   891→      aura.position.set(s.x, h + 0.3, s.z);
+   892→      aura.renderOrder = 3;
+   893→      this.scene.add(aura);
+   894→
+   895→      // haz de purificación (visible al limpiar)
+   896→      const beamMat = new THREE.ShaderMaterial({
+   897→        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+   898→        uniforms: { uOpacity: { value: 0 }, uTime: this.waterTime },
+   899→        vertexShader: `varying vec2 vUv; void main(){ vUv = uv;
+   900→          gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+   901→        fragmentShader: `varying vec2 vUv; uniform float uOpacity; uniform float uTime;
+   902→          void main(){
+   903→            float fade = pow(1.0 - vUv.y, 1.6) * smoothstep(0.0, 0.08, vUv.y);
+   904→            float pulse = 0.8 + 0.2 * sin(uTime * 3.0 + vUv.y * 8.0);
+   905→            gl_FragColor = vec4(vec3(0.35, 1.0, 0.9) * fade * pulse, fade * uOpacity * 0.5);
+   906→          }`,
+   907→      });
+   908→      const beamGeo = new THREE.CylinderGeometry(0.5, 0.95, 36, 14, 1, true);
+   909→      beamGeo.translate(0, 18, 0);
+   910→      const beam = new THREE.Mesh(beamGeo, beamMat);
+   911→      beam.position.set(s.x, h + 0.4, s.z);
+   912→      beam.visible = false;
+   913→      beam.renderOrder = 5;
+   914→      this.scene.add(beam);
+   915→
+   916→      // pilares en círculo
+   917→      for (let i = 0; i < 5; i++) {
+   918→        const a = (i / 5) * Math.PI * 2;
+   919→        const px = s.x + Math.cos(a) * 8.2;
+   920→        const pz = s.z + Math.sin(a) * 8.2;
+   921→        const p = buildRuinedPillar(2.2 + (i % 2) * 0.8);
+   922→        p.position.set(px, terrainHeight(px, pz), pz);
+   923→        p.rotation.y = a;
+   924→        this.scene.add(p);
+   925→        this.colliders.push({ x: px, z: pz, r: 0.55 });
+   926→      }
+   927→
+   928→      this.shrines.push({
+   929→        idx, name: s.name, pos: new THREE.Vector3(s.x, h, s.z),
+   930→        cleansed: false, group, crystal, runes, crystalMat, runeMats, light,
+   931→        shards, aura, runeRing, beam, beamMat, beamTarget: 0,
+   932→      });
+   933→    });
+   934→  }
+   935→
+   936→  cleanseShrine(idx: number) {
+   937→    const sh = this.shrines[idx];
+   938→    if (!sh || sh.cleansed) return;
+   939→    sh.cleansed = true;
+   940→    sh.crystalMat.color.set(0x37d8c8);
+   941→    sh.crystalMat.emissive.set(0x37d8c8);
+   942→    sh.crystalMat.emissiveIntensity = 2.6;
+   943→    for (const rm of sh.runeMats) { rm.color.set(0x37d8c8); rm.emissive.set(0x37d8c8); }
+   944→    sh.light.color.set(0x37d8c8);
+   945→    sh.light.intensity = 8;
+   946→    sh.aura.visible = false;
+   947→    sh.beam.visible = true;
+   948→    sh.beamTarget = 1;
+   949→    const rrMat = sh.runeRing.material as THREE.MeshStandardMaterial;
+   950→    rrMat.color.set(0x37d8c8);
+   951→    rrMat.emissive.set(0x37d8c8);
+   952→    const shardMat = sh.shards[0]?.material as THREE.MeshStandardMaterial | undefined;
+   953→    if (shardMat) { shardMat.color.set(0x37d8c8); shardMat.emissive.set(0x37d8c8); }
+   954→    for (let i = 0; i < 30; i++) {
+   955→      this.fx.spawn({
+   956→        x: sh.pos.x + (Math.random() - 0.5) * 3, y: sh.pos.y + 0.3, z: sh.pos.z + (Math.random() - 0.5) * 3,
+   957→        vy: 3 + Math.random() * 4, color: 0x37d8c8, size: 0.22, life: 1.8, glow: 2.2, drag: 0.4,
+   958→      });
+   959→    }
+   960→  }
+   961→
+   962→  /* ---------- Arena del jefe ---------- */
+   963→
+   964→  arenaRage = false;
+   965→
+   966→  private buildArena() {
+   967→    const A = WORLD.arena;
+   968→    const h = terrainHeight(A.x, A.z);
+   969→    // suelo con textura rúnica
+   970→    const floor = new THREE.Mesh(
+   971→      new THREE.CircleGeometry(A.r - 0.3, 44),
+   972→      new THREE.MeshStandardMaterial({
+   973→        map: arenaFloorTexture(), roughness: 0.92, metalness: 0.04,
+   974→        normalMap: stoneMat().normalMap, envMapIntensity: 0.4,
+   975→      }),
+   976→    );
+   977→    floor.rotation.x = -Math.PI / 2;
+   978→    floor.position.set(A.x, h + 0.32, A.z);
+   979→    floor.receiveShadow = true;
+   980→    this.scene.add(floor);
+   981→    // murete perimetral
+   982→    const wall = new THREE.Mesh(new THREE.CylinderGeometry(A.r, A.r + 1.3, 0.62, 40, 1, true), stoneMat());
+   983→    wall.position.set(A.x, h + 0.3, A.z);
+   984→    wall.receiveShadow = true;
+   985→    this.scene.add(wall);
+   986→    // pilares perimetrales
+   987→    for (let i = 0; i < 10; i++) {
+   988→      const a = (i / 10) * Math.PI * 2;
+   989→      const px = A.x + Math.cos(a) * (A.r - 1.5);
+   990→      const pz = A.z + Math.sin(a) * (A.r - 1.5);
+   991→      const p = buildRuinedPillar(3.4 + (i % 3));
+   992→      p.position.set(px, h + 0.3, pz);
+   993→      p.rotation.y = a;
+   994→      this.scene.add(p);
+   995→      this.colliders.push({ x: px, z: pz, r: 0.6 });
+   996→    }
+   997→    // estandartes raídos
+   998→    const bannerMat = new THREE.MeshStandardMaterial({
+   999→      map: bannerTexture(), transparent: true, alphaTest: 0.3,
+  1000→      side: THREE.DoubleSide, roughness: 0.95,
+  1001→    });
+  1002→    registerWind(bannerMat, 0.09, 'bottom');
+  1003→    for (let i = 0; i < 6; i++) {
+  1004→      const a = (i / 6) * Math.PI * 2 + 0.26;
+  1005→      const px = A.x + Math.cos(a) * (A.r - 4.2);
+  1006→      const pz = A.z + Math.sin(a) * (A.r - 4.2);
+  1007→      const py = terrainHeight(px, pz);
+  1008→      const g = new THREE.Group();
+  1009→      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 4.4, 7), woodMat());
+  1010→      pole.position.y = 2.2;
+  1011→      pole.castShadow = true;
+  1012→      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 6), woodMat());
+  1013→      arm.rotation.z = Math.PI / 2;
+  1014→      arm.position.y = 4.2;
+  1015→      const cloth = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 2.5), bannerMat);
+  1016→      cloth.position.set(0.42, 3.0, 0);
+  1017→      cloth.castShadow = true;
+  1018→      g.add(pole, arm, cloth);
+  1019→      g.position.set(px, py, pz);
+  1020→      g.rotation.y = -a + Math.PI / 2;
+  1021→      this.scene.add(g);
+  1022→      this.colliders.push({ x: px, z: pz, r: 0.35 });
+  1023→    }
+  1024→    // arcos de entrada (sur)
+  1025→    const arch = buildBrokenArch();
+  1026→    arch.position.set(A.x, h + 0.3, A.z - A.r + 0.5);
+  1027→    arch.scale.setScalar(1.4);
+  1028→    this.scene.add(arch);
+  1029→    // sigilo de invocación (inactivo hasta victoria)
+  1030→    const sg = buildSigil();
+  1031→    sg.group.position.set(A.x, h + 0.25, A.z);
+  1032→    sg.group.visible = false;
+  1033→    this.scene.add(sg.group);
+  1034→    this.sigil = { group: sg.group, ring: sg.ring, ringMat: sg.ring.material as THREE.MeshStandardMaterial };
+  1035→  }
+  1036→
+  1037→  setArenaRage(on: boolean) { this.arenaRage = on; }
+  1038→
+  1039→  activateSigil() {
+  1040→    if (this.sigil) {
+  1041→      this.sigil.group.visible = true;
+  1042→      this.sigil.ringMat.color.set(0xd8323c);
+  1043→      this.sigil.ringMat.emissive.set(0xd8323c);
+  1044→      this.sigil.ringMat.emissiveIntensity = 1.8;
+  1045→    }
+  1046→  }
+  1047→  sigilReady() {
+  1048→    if (this.sigil) {
+  1049→      this.sigil.ringMat.color.set(0x37d8c8);
+  1050→      this.sigil.ringMat.emissive.set(0x37d8c8);
+  1051→    }
+  1052→  }
+  1053→
+  1054→  /* ---------- Environment map para reflejos PBR ---------- */
+  1055→
+  1056→  private buildEnvironmentMap(renderer: THREE.WebGLRenderer) {
+  1057→    try {
+  1058→      const env = new THREE.Scene();
+  1059→      const dome = new THREE.Mesh(
+  1060→        new THREE.SphereGeometry(100, 16, 12),
+  1061→        new THREE.ShaderMaterial({
+  1062→          side: THREE.BackSide,
+  1063→          uniforms: {
+  1064→            top: { value: new THREE.Color(0x0a1326) },
+  1065→            mid: { value: new THREE.Color(0x16264a) },
+  1066→            bottom: { value: new THREE.Color(0x1e2c40) },
+  1067→          },
+  1068→          vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  1069→          fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
+  1070→            void main(){ float h = normalize(vP).y;
+  1071→              vec3 c = h > 0.0 ? mix(mid, top, pow(h, 0.55)) : mix(mid, bottom, pow(-h, 0.5));
+  1072→              gl_FragColor = vec4(c, 1.0); }`,
+  1073→        }),
+  1074→      );
+  1075→      env.add(dome);
+  1076→      const moonBall = new THREE.Mesh(
+  1077→        new THREE.SphereGeometry(7, 12, 10),
+  1078→        new THREE.MeshBasicMaterial({ color: 0xcfe0ff }),
+  1079→      );
+  1080→      moonBall.position.copy(this.moonDir).multiplyScalar(60);
+  1081→      env.add(moonBall);
+  1082→      const pmrem = new THREE.PMREMGenerator(renderer);
+  1083→      const rt = pmrem.fromScene(env, 0.04, 1, 200);
+  1084→      this.scene.environment = rt.texture;
+  1085→      (this.scene as THREE.Scene & { environmentIntensity?: number }).environmentIntensity = 0.5;
+  1086→      pmrem.dispose();
+  1087→    } catch {
+  1088→      /* environment map opcional */
+  1089→    }
+  1090→  }
+  1091→
+  1092→  /* ---------- Actualización por frame ---------- */
+  1093→
+  1094→  update(dt: number, camera: THREE.Camera, spawnEmber: (x: number, y: number, z: number) => void) {
+  1095→    this.time += dt;
+  1096→    this.skyTime.value = this.time;
+  1097→    this.waterTime.value = this.time;
+  1098→    updateWindAndFlames(this.time);
+  1099→
+  1100→    // la luz activa (sol de día / luna de noche) sigue al jugador
+  1101→    if (camera instanceof THREE.PerspectiveCamera) {
+  1102→      const t = camera.position;
+  1103→      const dir = this.dn.sunDir.value;
+  1104→      this.moonLight.position.set(t.x + dir.x * 75, dir.y * 75 + 12, t.z + dir.z * 75);
+  1105→      this.moonLight.target.position.set(t.x, 0, t.z);
+  1106→    }
+  1107→
+  1108→    // parpadeo de la hoguera + humo (realzadas de noche)
+  1109→    const torchK = this.nightK;
+  1110→    if (this.bonfireLight) {
+  1111→      this.bonfireLight.intensity = (15 + Math.sin(this.time * 9) * 1.8 + Math.sin(this.time * 23.7) * 1.0) * (0.55 + 0.45 * torchK);
+  1112→    }
+  1113→    if (this.bonfireFlame) {
+  1114→      const s = 1 + Math.sin(this.time * 11) * 0.12;
+  1115→      this.bonfireFlame.scale.set(s, 1 + Math.sin(this.time * 17) * 0.18, s);
+  1116→    }
+  1117→    if (Math.random() < dt * 7) {
+  1118→      this.smoke.spawn({
+  1119→        x: WORLD.bonfire.x + (Math.random() - 0.5) * 0.5,
+  1120→        y: terrainHeight(WORLD.bonfire.x, WORLD.bonfire.z) + 1.6,
+  1121→        z: WORLD.bonfire.z + (Math.random() - 0.5) * 0.5,
+  1122→        vy: 0.8 + Math.random() * 0.7, vx: (Math.random() - 0.5) * 0.3, vz: (Math.random() - 0.5) * 0.3,
+  1123→        color: 0x1c2026, size: 0.5, life: 3.2, grow: 2.6, spin: 0.6,
+  1124→        glow: 0.55, fadePow: 1.6,
+  1125→      });
+  1126→    }
+  1127→
+  1128→    // antorchas: parpadeo + brasas (realzadas de noche)
+  1129→    for (const t of this.torches) {
+  1130→      t.light.intensity = (5.6 + Math.sin(this.time * 8 + t.pos.x) * 1.0 + Math.sin(this.time * 19 + t.pos.z) * 0.55) * (0.5 + 0.5 * torchK);
+  1131→      const fs = 1 + Math.sin(this.time * 13 + t.pos.z) * 0.16;
+  1132→      t.flame.scale.set(fs, 1 + Math.sin(this.time * 15 + t.pos.x) * 0.2, fs);
+  1133→      if (Math.random() < 0.12) {
+  1134→        spawnEmber(t.pos.x + (Math.random() - 0.5) * 0.2, t.pos.y, t.pos.z + (Math.random() - 0.5) * 0.2);
+  1135→      }
+  1136→    }
+  1137→
+  1138→    // santuarios: cristal, fragmentos, wisps y haz
+  1139→    for (const sh of this.shrines) {
+  1140→      sh.crystal.rotation.y += dt * (sh.cleansed ? 0.8 : 0.5);
+  1141→      sh.crystal.position.y = 4.15 + Math.sin(this.time * 1.6 + sh.idx) * 0.12;
+  1142→      sh.light.intensity = (sh.cleansed ? 8 : 5) + Math.sin(this.time * 5 + sh.idx * 2) * 0.9;
+  1143→      sh.shards.forEach((sd, i) => {
+  1144→        const a = this.time * 0.9 + i * 2.09 + sh.idx;
+  1145→        sd.position.set(
+  1146→          sh.pos.x + Math.cos(a) * 0.85,
+  1147→          sh.pos.y + 4.15 + Math.sin(this.time * 1.3 + i) * 0.22,
+  1148→          sh.pos.z + Math.sin(a) * 0.85,
+  1149→        );
+  1150→        sd.rotation.x += dt * 2; sd.rotation.y += dt * 2.6;
+  1151→      });
+  1152→      if (!sh.cleansed) {
+  1153→        this.shrineWispT -= dt;
+  1154→        if (this.shrineWispT <= 0) {
+  1155→          this.shrineWispT = 0.6;
+  1156→          for (const s2 of this.shrines) {
+  1157→            if (s2.cleansed) continue;
+  1158→            this.smoke.spawn({
+  1159→              x: s2.pos.x + (Math.random() - 0.5) * 0.7, y: s2.pos.y + 4.3, z: s2.pos.z + (Math.random() - 0.5) * 0.7,
+  1160→              vy: 1.0 + Math.random() * 0.8, color: 0x30101c, size: 0.4, life: 2.4, grow: 2.2, glow: 0.5,
+  1161→            });
+  1162→          }
+  1163→        }
+  1164→        const am = sh.aura.material as THREE.MeshBasicMaterial;
+  1165→        am.opacity = 0.10 + Math.sin(this.time * 2.3 + sh.idx) * 0.045;
+  1166→      }
+  1167→      if (sh.beam.visible) {
+  1168→        const cur = sh.beamMat.uniforms.uOpacity.value as number;
+  1169→        sh.beamMat.uniforms.uOpacity.value = cur + (sh.beamTarget - cur) * Math.min(1, dt * 2.4);
+  1170→      }
+  1171→    }
+  1172→
+  1173→    // niebla rasante: deriva y pulso (más densa al alba y de noche)
+  1174→    for (const m of this.mist) {
+  1175→      m.mesh.rotation.y += m.spin * dt;
+  1176→      m.mat.opacity = Math.min(0.9, m.baseO * this.mistMul * (0.8 + 0.2 * Math.sin(this.time * 0.35 + m.mesh.position.x)));
+  1177→    }
+  1178→
+  1179→    // meteorito fugaz ocasional
+  1180→    this.meteorT -= dt;
+  1181→    if (this.meteorT <= 0) {
+  1182→      this.meteorT = 11 + Math.random() * 16;
+  1183→      const a = Math.random() * Math.PI * 2;
+  1184→      const sy = 150 + Math.random() * 80;
+  1185→      const sx = Math.cos(a) * 260, sz = Math.sin(a) * 260;
+  1186→      const dir = new THREE.Vector3(-Math.cos(a) * 0.5 - 0.4, -0.32, -Math.sin(a) * 0.5).normalize();
+  1187→      for (let i = 0; i < 12; i++) {
+  1188→        this.fx.spawn({
+  1189→          x: sx - dir.x * i * 3.2, y: sy - dir.y * i * 3.2, z: sz - dir.z * i * 3.2,
+  1190→          vx: dir.x * 26, vy: dir.y * 26, vz: dir.z * 26,
+  1191→          color: 0xcfe4ff, size: 2.6, life: 0.85, glow: 3.2, drag: 0.12, spin: 0,
+  1192→        });
+  1193→      }
+  1194→    }
+  1195→
+  1196→    // sistemas de partículas propios del mundo
+  1197→    this.smoke.update(dt, camera.position);
+  1198→    this.fx.update(dt, camera.position);
+  1199→
+  1200→    // sigilo
+  1201→    if (this.sigil && this.sigil.group.visible) {
+  1202→      this.sigil.ring.rotation.z += dt * 0.8;
+  1203→    }
+  1204→  }
+  1205→}
+  1206→

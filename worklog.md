@@ -51,3 +51,23 @@ Work Log:
 
 Stage Summary:
 - AETHERIA ahora usa arte y sonido reales gratuitos (ambientCG/Kenney/LittleRobot/Cleyton — CC0/CC-BY/OFL, acreditados en el menú) y un ciclo día/noche completo que empieza de día (08:09), con sol y luna, cielo dinámico, noche peligrosa (+12% velocidad enemiga) y UI de fantasía con Cinzel/Grenze Gotisch.
+
+---
+Task ID: 3
+Agent: main (Super Z)
+Task: Estilo anime para todos los personajes y el mundo ("dale estilo anime a todos los personajes y al mundo")
+
+Work Log:
+- SISTEMA TOON (models.ts/textures.ts): rampas de cel shading (toonRamp3/4 como DataTexture NearestFilter), fábrica toonMat(); TODOS los materiales del juego migrados de MeshStandardMaterial a MeshToonMaterial (stdMat/metalMat/emisMat/bark/stone/wood/forged/hierba/copas/terreno/estandartes). addRim adaptado a toon.
+- CONTORNOS DE TINTA (inverted hull): expandGeometry() + addOutlines() en models.ts; se aplica a los 5 personajes, obeliscos, pilares y arcos; contornos INSTANCIADOS para 135 pinos (copa+tronco) y 95 rocas copiando instanceMatrix. Material compartido BackSide #191322. Los planos (capa) se excluyen (userData.noOutline) porque el truco falla sin volumen.
+- PERSONAJES ANIME: ojos grandes estilo anime (esclerótica blanca + iris de color + pupila + brillo, MeshBasicMaterial), boca pequeña, pelo puntiagudo (8 conos, hero navy/goblin verde/orco oscuro), orejas largas (goblin/orco), colmillos, héroe bigHead chibi con diadema abierta + penacho (cara visible), capa carmesí 0xc23050, colores saturados en los 5 creadores. Fix: pelo estaba DENTRO de la esfera de la cabeza → reposicionado; flequillo acortado.
+- MUNDO ANIME: 11 nubes cumulus Ghibli (esferas fusionadas, toon, fog:false, tinte por hora del día con cloudTint, deriva lenta); terreno MeshToonMaterial con splat repintado (praderas verde vivo, senderos ocre claro, roca lavanda, sin fotos PBR); tintes de copa pastel; setas/neblina/agua más claras; arena y estandartes toon.
+- daynight.ts: 10 keyframes reescritos con paleta anime (día azul vivo #2a72d4 con nubes blancas, amanecer rosa-naranja, atardecer púrpura-rosa #c06a92/#ff9a5e, noche azul-violeta #1a2456 con nubes 0x39456e); campo cloudTint en sample/stops; sigue empezando de día (08:09).
+- game.ts: ACES → NeutralToneMapping (conserva saturación), exposición 1.0, grading anime (sat 1.18, grano 0.016, CA 0.0006, viñeta 0.30), bloom 0.38/thr 0.9 (evita quemar copas), GTAO scale 0.85, números de daño con fuente redondeada y borde grueso.
+- entities.ts: collectMats acepta MeshToonMaterial (flash de golpe funciona con toon). enemies.ts: fadeMats incluiye contornos (mueren fundiéndose sin contornos fantasma).
+- UI ANIME: fuentes redondeadas Baloo 2 + Nunito descargadas de fontsource/jsDelivr (woff2, OFL) a public/fonts; @theme swap en globals.css; velo de carga actualizado.
+- DEPURACIÓN VISUAL (agent-browser, 10 capturas en download/anime_*.png): pelo oculto en la cabeza → fijado; losa negra del hull invertido en la capa → excluida; bloom quemando copas al mediodía → threshold 0.9; nube pegada a cámara → radio 165-315 y altura 72-102.
+- VERIFICACIÓN: tsc limpio en src/, ESLint limpio, consola sin errores, 265-512 FPS en calidad alta; capturas: anime_final/anime_menu (menú), anime_face2/anime_goblin2 (personajes), anime_sky2 (mediodía con nubes), anime_sunset, anime_night, anime_combat2/3 (combate).
+
+Stage Summary:
+- AETHERIA es ahora 100% anime: cel shading por bandas + contornos de tinta en personajes/árboles/rocas/ruinas, protagonistas chibi con ojos grandes, pelo puntiagudo, orejas y colmillos, nubes Ghibli tintadas por el ciclo día/noche (que sigue empezando de día a las 08:09), paletas saturadas y tipografía redondeada. Sin dependencias nuevas.

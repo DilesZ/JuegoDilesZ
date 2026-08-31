@@ -2,14 +2,27 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
   barkMaps, metalMaps, stoneMaps, woodMaps, grassBladeTexture,
-  terrainDetailNormal,
+  toonRamp3, toonRamp4,
 } from './textures';
 
 /* ============================================================
-   MODELOS PROCEDURALES + MATERIALES PBR
-   Estilo "fantasía estilizada": geometría simple con texturas
-   procedurales, normales, entorno reflectante y rim light.
+   MODELOS PROCEDURALES — ESTILO ANIME
+   - Materiales TOON (cel shading por rampa de bandas).
+   - Contornos de tinta (inverted hull) para personajes y props.
+   - Humanoides con rasgos anime: ojos grandes, pelo, orejas, colmillos.
    ============================================================ */
+
+export type ToonMat = THREE.MeshToonMaterial;
+export type CharMat = THREE.MeshStandardMaterial | THREE.MeshToonMaterial;
+
+/** Material toon con rampa compartida */
+export function toonMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}): THREE.MeshToonMaterial {
+  return new THREE.MeshToonMaterial({
+    color,
+    gradientMap: toonRamp3(),
+    ...opts,
+  });
+}
 
 /* ---------- Registro de viento y llamas (animados por World) ---------- */
 
@@ -97,64 +110,102 @@ export function flameGeometry(w: number, h: number): THREE.BufferGeometry {
 
 /* ---------- Materiales compartidos texturizados ---------- */
 
-export function noiseNormal(repeat: number): THREE.CanvasTexture {
-  const t = terrainDetailNormal().clone() as THREE.CanvasTexture;
-  t.repeat.set(repeat, repeat);
-  t.needsUpdate = true;
-  return t;
-}
-
-let _bark: THREE.MeshStandardMaterial | null = null;
-export function barkMat(): THREE.MeshStandardMaterial {
+let _bark: THREE.MeshToonMaterial | null = null;
+export function barkMat(): THREE.MeshToonMaterial {
   if (!_bark) {
-    const { map, normalMap } = barkMaps();
-    _bark = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.92, metalness: 0 });
+    const { map } = barkMaps();
+    _bark = toonMat(0xffffff, { map });
   }
   return _bark;
 }
 
-let _stone: THREE.MeshStandardMaterial | null = null;
-export function stoneMat(): THREE.MeshStandardMaterial {
+let _stone: THREE.MeshToonMaterial | null = null;
+export function stoneMat(): THREE.MeshToonMaterial {
   if (!_stone) {
-    const { map, normalMap } = stoneMaps();
-    _stone = new THREE.MeshStandardMaterial({ map, normalMap, color: 0xc8c8d2, roughness: 0.9, metalness: 0.02 });
+    const { map } = stoneMaps();
+    _stone = toonMat(0xffffff, { map });
   }
   return _stone;
 }
 
-let _wood: THREE.MeshStandardMaterial | null = null;
-export function woodMat(): THREE.MeshStandardMaterial {
+let _wood: THREE.MeshToonMaterial | null = null;
+export function woodMat(): THREE.MeshToonMaterial {
   if (!_wood) {
-    const { map, normalMap } = woodMaps();
-    _wood = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.85 });
+    const { map } = woodMaps();
+    _wood = toonMat(0xffffff, { map });
   }
   return _wood;
 }
 
-export function forgedMat(color = 0xbfc6d2): THREE.MeshStandardMaterial {
-  const { map, normalMap, roughnessMap } = metalMaps();
-  return new THREE.MeshStandardMaterial({
-    map, normalMap, roughnessMap, color,
-    metalness: 0.85, roughness: 0.5, envMapIntensity: 1.1,
-  });
+export function forgedMat(color = 0xdfe8f4): THREE.MeshToonMaterial {
+  const { map } = metalMaps();
+  return toonMat(color, { map });
 }
 
 /* ---------- Materiales básicos (compat API) ---------- */
 
-export function stdMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
-  return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.05, ...opts });
+export function stdMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}) {
+  return toonMat(color, opts);
 }
 export function metalMat(color: number) {
-  return new THREE.MeshStandardMaterial({ color, roughness: 0.38, metalness: 0.82, envMapIntensity: 1.0 });
+  return toonMat(color);
 }
 export function emisMat(color: number, intensity = 1.6) {
-  return new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: intensity, roughness: 0.55, metalness: 0,
+  return new THREE.MeshToonMaterial({
+    color, emissive: color, emissiveIntensity: intensity, gradientMap: toonRamp3(),
   });
 }
 
-/** Añade rim light (fresnel) a un material estándar */
-export function addRim(mat: THREE.MeshStandardMaterial, color: number, strength = 0.35, power = 3.2) {
+/* ---------- Contornos de tinta (inverted hull) ---------- */
+
+let _outlineMat: THREE.MeshBasicMaterial | null = null;
+function outlineMat(): THREE.MeshBasicMaterial {
+  if (!_outlineMat) {
+    _outlineMat = new THREE.MeshBasicMaterial({ color: 0x191322, side: THREE.BackSide });
+  }
+  return _outlineMat;
+}
+
+/** Clona una geometría desplazando cada vértice a lo largo de su normal */
+function expandGeometry(geo: THREE.BufferGeometry, t: number): THREE.BufferGeometry {
+  const g = geo.clone();
+  const pos = g.getAttribute('position') as THREE.BufferAttribute;
+  const nor = g.getAttribute('normal') as THREE.BufferAttribute | null;
+  for (let i = 0; i < pos.count; i++) {
+    const nx = nor ? nor.getX(i) : 0, ny = nor ? nor.getY(i) : 1, nz = nor ? nor.getZ(i) : 0;
+    pos.setXYZ(i, pos.getX(i) + nx * t, pos.getY(i) + ny * t, pos.getZ(i) + nz * t);
+  }
+  g.computeBoundingSphere();
+  return g;
+}
+
+/**
+ * Añade contornos de tinta estilo anime a todos los meshes de un grupo.
+ * Omite materiales transparentes, aditivos, basic (ojos/glow) y emisivos.
+ */
+export function addOutlines(root: THREE.Object3D, thickness = 0.025) {
+  const targets: THREE.Mesh[] = [];
+  root.traverse(o => {
+    if (!(o instanceof THREE.Mesh)) return;
+    const m = o.material as THREE.Material & { transparent?: boolean; emissiveIntensity?: number };
+    if (!m || Array.isArray(m)) return;
+    if ((m as THREE.MeshBasicMaterial).isMeshBasicMaterial) return;
+    if (m.transparent) return;
+    if (typeof m.emissiveIntensity === 'number' && m.emissiveIntensity > 0.01) return;
+    if (o.userData.noOutline) return;
+    targets.push(o);
+  });
+  for (const mesh of targets) {
+    const out = new THREE.Mesh(expandGeometry(mesh.geometry, thickness), outlineMat());
+    out.castShadow = false;
+    out.receiveShadow = false;
+    out.renderOrder = mesh.renderOrder;
+    mesh.add(out); // hereda transformación (sigue animaciones)
+  }
+}
+
+/** Añade rim light (fresnel) a un material toon/estándar */
+export function addRim(mat: THREE.MeshStandardMaterial | THREE.MeshToonMaterial, color: number, strength = 0.35, power = 3.2) {
   const c = new THREE.Color(color);
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uRimColor = { value: c };
@@ -275,10 +326,10 @@ export function buildBow(): THREE.Group {
 
 export function buildShield(): THREE.Group {
   const g = new THREE.Group();
-  const face = mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.045, 14), forgedMat(0x5a6a82), 0, 0, 0);
+  const face = mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.045, 14), forgedMat(0xaeb9c9), 0, 0, 0);
   face.rotation.x = Math.PI / 2;
-  const rim = mesh(new THREE.TorusGeometry(0.3, 0.028, 6, 16), forgedMat(0x8a6a2f), 0, 0, 0);
-  const boss0 = mesh(new THREE.SphereGeometry(0.075, 8, 6), forgedMat(0xc7a24a), 0, 0, 0.035);
+  const rim = mesh(new THREE.TorusGeometry(0.3, 0.028, 6, 16), forgedMat(0xd8b34a), 0, 0, 0);
+  const boss0 = mesh(new THREE.SphereGeometry(0.075, 8, 6), forgedMat(0xd8b34a), 0, 0, 0.035);
   const sigil = mesh(new THREE.TorusGeometry(0.14, 0.014, 5, 12), emisMat(0x54e0ff, 0.9), 0, 0, 0.03, false);
   g.add(face, rim, boss0, sigil);
   return g;
@@ -302,7 +353,9 @@ export interface HumanoidOpts {
   torso: number;
   legs: number;
   arms?: number;
+  /** color del iris; con eyeStyle 'anime' pinta ojo blanco + iris + brillo */
   eyes?: number | null;
+  eyeStyle?: 'glow' | 'anime';
   eyeIntensity?: number;
   weapon?: 'sword' | 'greatsword' | 'club' | 'axe' | 'bow' | 'none';
   shield?: boolean;
@@ -315,6 +368,14 @@ export interface HumanoidOpts {
   rim?: { color: number; strength: number };
   bigHead?: boolean;
   hunched?: boolean;
+  /** color del pelo puntiagudo (anime); null = sin pelo */
+  hair?: number | null;
+  /** orejas largas laterales (goblin/orco) */
+  ears?: boolean;
+  /** colmillos pequeños hacia arriba */
+  tusks?: boolean;
+  /** grosor del contorno de tinta; 0/udefinido = sin contorno */
+  outline?: number;
 }
 
 export interface HumanoidRig {
@@ -329,7 +390,7 @@ export interface HumanoidRig {
   handR: THREE.Group;
   handL: THREE.Group;
   weapon: THREE.Group | null;
-  weaponMat: THREE.MeshStandardMaterial | null;
+  weaponMat: CharMat | null;
   height: number;
 }
 
@@ -337,15 +398,15 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   const s = o.scale ?? 1;
   const root = new THREE.Group();
 
-  const mkBody = (color: number, rough: number) => {
-    const m = stdMat(color, { roughness: rough });
+  const mkBody = (color: number) => {
+    const m = toonMat(color, { gradientMap: toonRamp4() });
     if (o.rim) addRim(m, o.rim.color, o.rim.strength);
     return m;
   };
-  const skin = mkBody(o.skin, 0.68);
-  const torsoMat = mkBody(o.torso, 0.82);
-  const legMat = mkBody(o.legs, 0.82);
-  const armMat = mkBody(o.arms ?? o.skin, 0.72);
+  const skin = mkBody(o.skin);
+  const torsoMat = mkBody(o.torso);
+  const legMat = mkBody(o.legs);
+  const armMat = mkBody(o.arms ?? o.skin);
 
   const legLen = 0.52, torsoH = 0.55, headR = o.bigHead ? 0.21 : 0.155;
 
@@ -383,10 +444,11 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
       }
       geo.computeVertexNormals();
     }
-    const capeMat = stdMat(o.cape, { roughness: 0.95, side: THREE.DoubleSide });
+    const capeMat = stdMat(o.cape, { side: THREE.DoubleSide });
     registerWind(capeMat, 0.05);
     const cape = new THREE.Mesh(geo, capeMat);
     cape.castShadow = true;
+    cape.userData.noOutline = true; // plano sin volumen: el hull invertido fallaría
     capeGroup.add(cape);
     torso.add(capeGroup);
   }
@@ -395,33 +457,104 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   const head = new THREE.Group();
   head.position.y = torsoH + 0.06;
   torso.add(head);
-  head.add(mesh(new THREE.SphereGeometry(headR, 12, 10), skin, 0, headR * 0.8, 0));
-  if (o.eyes !== null && o.eyes !== undefined) {
+  head.add(mesh(new THREE.SphereGeometry(headR, 14, 12), skin, 0, headR * 0.8, 0));
+
+  // --- RASGOS ANIME (ojos grandes, boca, orejas, colmillos, pelo) ---
+  const faceMat = (c: number) => new THREE.MeshBasicMaterial({ color: c });
+  if (o.eyes !== null && o.eyes !== undefined && (o.eyeStyle ?? 'glow') === 'anime') {
+    // esclerótica blanca aplastada + iris de color + brillo blanco
+    const scleraR = headR * 0.24;
+    const irisR = headR * 0.13;
+    for (const side of [-1, 1]) {
+      const s = mesh(new THREE.SphereGeometry(scleraR, 10, 8), faceMat(0xffffff),
+        side * headR * 0.44, headR * 0.86, headR * 0.72, false);
+      s.scale.set(0.85, 1.25, 0.5);
+      head.add(s);
+      const iris = mesh(new THREE.SphereGeometry(irisR, 10, 8), faceMat(o.eyes),
+        side * headR * 0.46, headR * 0.86, headR * 0.86, false);
+      iris.scale.set(0.9, 1.25, 0.5);
+      head.add(iris);
+      const pupil = mesh(new THREE.SphereGeometry(irisR * 0.5, 8, 6), faceMat(0x241a2e),
+        side * headR * 0.47, headR * 0.84, headR * 0.95, false);
+      pupil.scale.set(1, 1.3, 0.5);
+      head.add(pupil);
+      const glint = mesh(new THREE.SphereGeometry(irisR * 0.34, 6, 5), faceMat(0xffffff),
+        side * headR * 0.5, headR * 0.97, headR * 0.98, false);
+      head.add(glint);
+    }
+    // boca pequeña
+    const mouth = mesh(new THREE.SphereGeometry(headR * 0.1, 8, 6), faceMat(0x8a4a44),
+      0, headR * 0.42, headR * 0.92, false);
+    mouth.scale.set(1.25, 0.55, 0.4);
+    head.add(mouth);
+  } else if (o.eyes !== null && o.eyes !== undefined) {
     const eyeMat = emisMat(o.eyes, o.eyeIntensity ?? 2.2);
     const eL = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, -0.06, headR * 0.85, headR * 0.78, false);
     const eR = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, 0.06, headR * 0.85, headR * 0.78, false);
     head.add(eL, eR);
   }
+  // orejas largas laterales (elfo/goblin)
+  if (o.ears) {
+    const earGeo = new THREE.ConeGeometry(headR * 0.17, headR * 0.72, 5);
+    for (const side of [-1, 1]) {
+      const e = mesh(earGeo, skin, side * headR * 0.92, headR * 0.95, -0.01);
+      e.rotation.z = side * -Math.PI * 0.46;
+      e.rotation.x = -0.15;
+      head.add(e);
+    }
+  }
+  // colmillos
+  if (o.tusks) {
+    const tuskGeo = new THREE.ConeGeometry(headR * 0.09, headR * 0.34, 5);
+    const tuskMat = faceMat(0xfff6e2);
+    for (const side of [-1, 1]) {
+      const t = mesh(tuskGeo, tuskMat, side * headR * 0.3, headR * 0.42, headR * 0.82, false);
+      t.rotation.z = side * 0.22;
+      head.add(t);
+    }
+  }
+  // pelo puntiagudo anime (las puntas sobresalen claramente del cráneo)
+  if (o.hair) {
+    const hairMat = toonMat(o.hair, { gradientMap: toonRamp4() });
+    const spikes: [number, number, number, number, number][] = [
+      // [x, y, z, tiltZ, tiltX]
+      [0, headR * 1.62, -0.02, 0, 0.05],
+      [-headR * 0.62, headR * 1.48, 0.02, 0.5, 0.08],
+      [headR * 0.62, headR * 1.48, 0.02, -0.5, 0.08],
+      [-headR * 1.02, headR * 1.18, -0.06, 1.0, 0.05],
+      [headR * 1.02, headR * 1.18, -0.06, -1.0, 0.05],
+      [-headR * 0.34, headR * 1.5, -headR * 0.5, 0.2, -0.7],
+      [headR * 0.34, headR * 1.5, -headR * 0.5, -0.2, -0.7],
+      [0, headR * 1.42, headR * 0.62, 0, -0.95],
+    ];
+    for (const [x, y, z, tz, tx] of spikes) {
+      const spike = mesh(new THREE.ConeGeometry(headR * 0.32, headR * 1.15, 5), hairMat, x, y, z);
+      spike.rotation.z = tz;
+      spike.rotation.x = tx;
+      head.add(spike);
+    }
+  }
   if (o.helmet === 'knight') {
-    const hm = forgedMat(o.helmetColor ?? 0x9aa2ad);
-    head.add(mesh(new THREE.SphereGeometry(headR + 0.035, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.62), hm, 0, headR * 0.82, 0));
-    head.add(mesh(new THREE.BoxGeometry(headR * 1.7, 0.05, 0.03), hm, 0, headR * 0.72, headR * 0.82));
-    // penacho
-    const plumeMat = emisMat(0xb8443a, 0.5);
-    const plume = mesh(new THREE.ConeGeometry(0.035, 0.2, 6), plumeMat, 0, headR * 1.5, -0.02, false);
-    plume.rotation.x = -0.5;
+    const hm = forgedMat(o.helmetColor ?? 0xaeb9c9);
+    // diadema abierta (cara visible estilo anime) + penacho
+    const band = mesh(new THREE.TorusGeometry(headR * 0.98, headR * 0.1, 6, 14), hm, 0, headR * 0.82, 0);
+    band.rotation.x = Math.PI / 2;
+    head.add(band);
+    const plumeMat = toonMat(0xd8564a);
+    const plume = mesh(new THREE.ConeGeometry(headR * 0.22, headR * 1.2, 6), plumeMat, 0, headR * 1.75, -0.02, false);
+    plume.rotation.x = -0.55;
     head.add(plume);
   } else if (o.helmet === 'horns') {
-    const hm = forgedMat(o.helmetColor ?? 0x22222a);
+    const hm = forgedMat(o.helmetColor ?? 0x2e2e3c);
     head.add(mesh(new THREE.SphereGeometry(headR + 0.03, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.6), hm, 0, headR * 0.84, 0));
     const hornGeo = new THREE.ConeGeometry(0.05, 0.3, 6);
-    const h1 = mesh(hornGeo, stdMat(0x6b5a4a), -0.16, headR * 1.25, -0.02);
+    const h1 = mesh(hornGeo, stdMat(0xcbb69a), -0.16, headR * 1.25, -0.02);
     h1.rotation.z = 0.7;
-    const h2 = mesh(hornGeo, stdMat(0x6b5a4a), 0.16, headR * 1.25, -0.02);
+    const h2 = mesh(hornGeo, stdMat(0xcbb69a), 0.16, headR * 1.25, -0.02);
     h2.rotation.z = -0.7;
     head.add(h1, h2);
   } else if (o.helmet === 'hood') {
-    const hm = stdMat(o.helmetColor ?? 0x2d2a33, { roughness: 0.95 });
+    const hm = stdMat(o.helmetColor ?? 0x2d2a33);
     const hood = mesh(new THREE.ConeGeometry(headR + 0.06, 0.3, 7), hm, 0, headR * 1.0, -0.02);
     hood.rotation.x = 0.22;
     head.add(hood);
@@ -459,7 +592,7 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
 
   // Arma en mano derecha
   let weapon: THREE.Group | null = null;
-  let weaponMat: THREE.MeshStandardMaterial | null = null;
+  let weaponMat: CharMat | null = null;
   if (o.weapon && o.weapon !== 'none') {
     weapon = new THREE.Group();
     weapon.position.y = -0.06;
@@ -492,6 +625,7 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   }
 
   root.scale.setScalar(s);
+  if (o.outline) addOutlines(root, o.outline);
   return {
     root, body, torso, head,
     armL: aL.arm, armR: aR.arm, legL, legR,
@@ -500,43 +634,57 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   };
 }
 
-/* ---------- Creadores de personajes ---------- */
+/* ---------- Creadores de personajes (ESTILO ANIME) ---------- */
 
 export function buildPlayerRig(): HumanoidRig {
   return buildHumanoid({
-    skin: 0xd9b08c, torso: 0x46506b, legs: 0x333c4e, arms: 0x46506b,
-    eyes: null, weapon: 'sword', shield: true,
-    helmet: 'knight', helmetColor: 0x9aa2ad,
-    chest: 0x8a93a1, shoulder: 0x8a93a1,
-    cape: 0x611b26,
-    rim: { color: 0x9fc4ff, strength: 0.22 },
+    skin: 0xffdcb8, torso: 0x3d6ec4, legs: 0x2c3f66, arms: 0x3d6ec4,
+    eyes: 0x38b6d8, eyeStyle: 'anime',
+    weapon: 'sword', shield: true,
+    helmet: 'knight', helmetColor: 0xcdd8e8,
+    hair: 0x2c3e6e,
+    chest: 0xd8e2f2, shoulder: 0xd8b34a,
+    cape: 0xc23050,
+    bigHead: true,
+    rim: { color: 0x9fd8ff, strength: 0.3 },
+    outline: 0.022,
   });
 }
 export function buildGoblinRig(): HumanoidRig {
   return buildHumanoid({
-    scale: 0.72, skin: 0x7ba33e, torso: 0x5d4022, legs: 0x4a331c,
-    eyes: 0xffd23e, weapon: 'club', bigHead: true, hunched: true,
+    scale: 0.72, skin: 0x6fc23c, torso: 0x9a6a30, legs: 0x6a4a24,
+    eyes: 0xffd23e, eyeStyle: 'anime', weapon: 'club',
+    bigHead: true, hunched: true,
+    ears: true, tusks: true,
+    hair: 0x2e5a1c,
+    outline: 0.032,
   });
 }
 export function buildArcherRig(): HumanoidRig {
   return buildHumanoid({
-    scale: 0.95, skin: 0xd8d3c0, torso: 0x37332e, legs: 0x2e2a26,
-    eyes: 0x9df2ff, weapon: 'bow', helmet: 'hood', helmetColor: 0x37332e,
+    scale: 0.95, skin: 0xe8d4b8, torso: 0x4a4438, legs: 0x37322a,
+    eyes: 0x9df2ff, weapon: 'bow', helmet: 'hood', helmetColor: 0x4a4438,
+    outline: 0.024,
   });
 }
 export function buildOrcRig(): HumanoidRig {
   return buildHumanoid({
-    scale: 1.42, skin: 0x9a5641, torso: 0x4a3a30, legs: 0x3a2d24,
-    eyes: 0xff7a2a, weapon: 'axe', shoulder: 0x6b6b70, hunched: true,
+    scale: 1.42, skin: 0x62a03c, torso: 0x6a4426, legs: 0x4a3220,
+    eyes: 0xff9a2a, eyeStyle: 'anime', weapon: 'axe',
+    shoulder: 0x8a8a96, hunched: true,
+    ears: true, tusks: true,
+    hair: 0x243018,
+    outline: 0.034,
   });
 }
 export function buildBossRig(): HumanoidRig {
   return buildHumanoid({
-    scale: 1.95, skin: 0x3a3a46, torso: 0x2a2a35, legs: 0x22222c,
-    eyes: 0xff2211, eyeIntensity: 3, weapon: 'greatsword',
-    helmet: 'horns', helmetColor: 0x1c1c26, chest: 0x1c1c26, shoulder: 0x1c1c26,
-    cape: 0x160b10, capeTattered: true,
-    rim: { color: 0xff3a24, strength: 0.4 },
+    scale: 1.95, skin: 0x4a4a64, torso: 0x302e48, legs: 0x26243a,
+    eyes: 0xff2a1e, eyeIntensity: 3, weapon: 'greatsword',
+    helmet: 'horns', helmetColor: 0x26263a, chest: 0x26263a, shoulder: 0x26263a,
+    cape: 0x1c0e18, capeTattered: true,
+    rim: { color: 0xff4a30, strength: 0.5 },
+    outline: 0.05,
   });
 }
 
@@ -571,6 +719,7 @@ export function buildObelisk(cleansed: boolean): {
     g.add(sh);
     shards.push(sh);
   }
+  addOutlines(g, 0.045);
   return { group: g, crystal, runes, shards };
 }
 
@@ -635,6 +784,7 @@ export function buildRuinedPillar(h = 2.4): THREE.Group {
   const cap = mesh(new THREE.BoxGeometry(0.78, 0.22, 0.78), st, 0.08, h + 0.3, 0.05);
   cap.rotation.set(0.1, 0.4, -0.12);
   g.add(cap);
+  addOutlines(g, 0.035);
   return g;
 }
 
@@ -647,6 +797,7 @@ export function buildBrokenArch(): THREE.Group {
   const top = mesh(new THREE.BoxGeometry(3.8, 0.5, 0.6), st, -0.2, 3.55, 0);
   top.rotation.z = -0.1;
   g.add(l, r, top);
+  addOutlines(g, 0.04);
   return g;
 }
 
@@ -694,25 +845,21 @@ export function grassGeometry(): THREE.BufferGeometry {
   return merged;
 }
 
-export function grassMaterial(): THREE.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({
+export function grassMaterial(): THREE.MeshToonMaterial {
+  const mat = new THREE.MeshToonMaterial({
     map: grassBladeTexture(),
     alphaTest: 0.42,
     side: THREE.DoubleSide,
-    roughness: 0.9, metalness: 0,
-    color: 0xa8c07a,
+    color: 0xffffff,
+    gradientMap: toonRamp3(),
   });
   registerWind(mat, 0.09);
   return mat;
 }
 
-/** Material de copa de pino (dos tonos) con viento */
-export function canopyMat(color: number): THREE.MeshStandardMaterial {
-  const m = new THREE.MeshStandardMaterial({
-    color, roughness: 0.9, metalness: 0, flatShading: true,
-    normalMap: noiseNormal(3),
-    normalScale: new THREE.Vector2(0.6, 0.6),
-  });
+/** Material de copa de pino (dos tonos) con viento — anime saturado */
+export function canopyMat(color: number): THREE.MeshToonMaterial {
+  const m = toonMat(color);
   registerWind(m, 0.06);
   return m;
 }

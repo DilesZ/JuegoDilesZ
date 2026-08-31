@@ -89,6 +89,8 @@ export class Enemy extends Entity {
   bar: THREE.Group;
   private barFill: THREE.Mesh;
   private barBg: THREE.Mesh;
+  /** todos los materiales del rig (para fundir también los contornos) */
+  private fadeMats: THREE.Material[] = [];
   scale = 1;
   hpBarWidth = 1.0;
   phase = 1;
@@ -117,6 +119,15 @@ export class Enemy extends Entity {
     this.root.position.copy(this.pos);
     this.applier = new PoseApplier(this.rig, 12);
     this.collectMats();
+    // materiales para el fundido de muerte (incluye contornos de tinta)
+    const fm = new Set<THREE.Material>();
+    this.rig.root.traverse(o => {
+      if (o instanceof THREE.Mesh) {
+        const m = o.material as THREE.Material;
+        if (m && !Array.isArray(m)) fm.add(m);
+      }
+    });
+    this.fadeMats = [...fm];
     // barra de vida sobre la cabeza
     this.bar = new THREE.Group();
     const w = this.isBoss ? 0 : this.cfg.radius * 2 + 0.6;
@@ -245,7 +256,10 @@ export class Enemy extends Entity {
         if (k >= 1) {
           // hundirse y desaparecer
           this.root.position.y -= dt * 0.5;
-          for (const m of this.mats) { m.transparent = true; m.opacity = Math.max(0, m.opacity - dt * 0.8); }
+          for (const m of this.fadeMats) {
+            m.transparent = true;
+            m.opacity = Math.max(0, m.opacity - dt * 0.8);
+          }
           if (this.stateT > clip.dur + 2.2) this.removable = true;
         }
         return;
