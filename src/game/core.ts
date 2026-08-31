@@ -1,0 +1,142 @@
+import * as THREE from 'three';
+
+/* ============================================================
+   NÚCLEO: utilidades, ruido procedural, terreno y layout del mundo
+   ============================================================ */
+
+export function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+export function smoothstep(t: number) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+export function damp(cur: number, target: number, lambda: number, dt: number) {
+  return THREE.MathUtils.damp(cur, target, lambda, dt);
+}
+/** Interpolación angular por el camino corto */
+export function dampAngle(cur: number, target: number, lambda: number, dt: number) {
+  let d = target - cur;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return cur + d * (1 - Math.exp(-lambda * dt));
+}
+export const rand = (a: number, b: number) => a + Math.random() * (b - a);
+export const randInt = (a: number, b: number) => Math.floor(rand(a, b + 1));
+export function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
+
+/* ---------- Ruido de valor determinista ---------- */
+
+function hash2(x: number, y: number): number {
+  let h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return h - Math.floor(h);
+}
+
+function valueNoise(x: number, y: number): number {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return lerp(lerp(a, b, u), lerp(c, d, u), v) * 2 - 1; // [-1, 1]
+}
+
+export function fbm(x: number, y: number, octaves = 4): number {
+  let amp = 0.5, freq = 1, sum = 0, norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += valueNoise(x * freq, y * freq) * amp;
+    norm += amp;
+    amp *= 0.5; freq *= 2.03;
+  }
+  return sum / norm;
+}
+
+/* ---------- Layout del mundo ---------- */
+
+export const WORLD = {
+  size: 200,
+  radius: 92,            // radio jugable
+  bonfire: { x: 0, z: 6 },
+  arena: { x: 0, z: 76, r: 21 },
+  shrines: [
+    { x: 58, z: 20, name: 'Santuario del Alba', r: 12 },
+    { x: -54, z: 40, name: 'Santuario del Crepúsculo', r: 12 },
+    { x: -6, z: -64, name: 'Santuario de las Sombras', r: 12 },
+  ],
+} as const;
+
+// Alturas base de las zonas planas (calculadas una vez, sin aplanado)
+function rawHeight(x: number, z: number): number {
+  let h = fbm(x * 0.016, z * 0.016, 4) * 7.0;
+  h += fbm(x * 0.055 + 9.2, z * 0.055 + 3.1, 2) * 1.2;
+  return h;
+}
+const CAMP_FLATS: { x: number; z: number; r: number; h: number }[] = [
+  { x: WORLD.bonfire.x, z: WORLD.bonfire.z, r: 10, h: rawHeight(WORLD.bonfire.x, WORLD.bonfire.z) },
+  ...WORLD.shrines.map(s => ({ x: s.x, z: s.z, r: s.r + 3, h: rawHeight(s.x, s.z) })),
+  { x: WORLD.arena.x, z: WORLD.arena.z, r: WORLD.arena.r + 4, h: rawHeight(WORLD.arena.x, WORLD.arena.z) },
+];
+
+export function terrainHeight(x: number, z: number): number {
+  let h = rawHeight(x, z);
+  for (const f of CAMP_FLATS) {
+    const d = Math.hypot(x - f.x, z - f.z);
+    if (d < f.r) {
+      const t = smoothstep(1 - d / f.r);
+      h = lerp(h, f.h, t);
+    }
+  }
+  // Borde del mundo: muralla natural
+  const r = Math.hypot(x, z);
+  if (r > WORLD.radius - 10) h += ((r - (WORLD.radius - 10)) / 10) * 14;
+  return h;
+}
+
+export function terrainNormalY(x: number, z: number): number {
+  const e = 0.6;
+  const hL = terrainHeight(x - e, z), hR = terrainHeight(x + e, z);
+  const hD = terrainHeight(x, z - e), hU = terrainHeight(x, z + e);
+  const nx = hL - hR, nz = hD - hU, ny = 2 * e;
+  const len = Math.hypot(nx, ny, nz);
+  return ny / len; // componente Y de la normal (pendiente)
+}
+
+/* ---------- Tipos compartidos ---------- */
+
+export type GamePhase = 'menu' | 'loading' | 'playing' | 'paused' | 'dead' | 'victory';
+
+export interface HudState {
+  phase: GamePhase;
+  hp: number; maxHp: number;
+  stamina: number; maxStamina: number;
+  xp: number; xpNext: number; level: number;
+  gold: number; potions: number; maxPotions: number;
+  shrinesCleansed: number; shrinesTotal: number;
+  objective: string;
+  enemiesAlive: number;
+  bossActive: boolean; bossName: string; bossHp: number; bossMaxHp: number; bossPhase: number;
+  kills: number; time: number;
+  lockOn: boolean;
+  prompt: string;        // texto de interacción o ''
+  fps: number;
+  endless: boolean;
+}
+
+export interface GameRefs {
+  container: HTMLElement;
+  minimap: HTMLCanvasElement;
+  vignette: HTMLDivElement;
+}
+
+export const ENEMY_NAMES: Record<string, string> = {
+  goblin: 'Goblin Saqueador',
+  archer: 'Arquero Esquelético',
+  orc: 'Orco Brutal',
+  boss: "Bel'Zaroth, el Caballero Caído",
+};
