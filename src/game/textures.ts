@@ -2,13 +2,33 @@ import * as THREE from 'three';
 import { fbm, mulberry32, WORLD } from './core';
 
 /* ============================================================
-   TEXTURAS PROCEDURALES PBR (canvas)
-   Todas se generan una vez y se cachean. Color en sRGB,
-   normales en lineal. Dan el salto visual de "flat low-poly"
-   a "estilizado AAA" sin descargar ningún asset externo.
+   TEXTURAS — CC0 fotográficas (ambientCG) + procedurales (canvas)
+   - PBR fotográfico real: césped, tierra, roca y corteza escaneados
+     (ambientCG.com, licencia CC0) cargados de /public/textures.
+   - Procedurales: splat del terreno, sprites, luna, agua, arena,
+     estandartes (canvas). Color en sRGB, normales en lineal.
    ============================================================ */
 
 const cache = new Map<string, THREE.CanvasTexture>();
+const photoCache = new Map<string, THREE.Texture>();
+const texLoader = new THREE.TextureLoader();
+texLoader.setCrossOrigin('anonymous');
+
+/** Carga una textura fotográfica CC0 de /public/textures (con cache). */
+export function pbrTex(file: string, opts: { srgb?: boolean; repeat?: number } = {}): THREE.Texture {
+  const key = `${file}|${opts.srgb ? 1 : 0}|${opts.repeat ?? 1}`;
+  if (photoCache.has(key)) return photoCache.get(key)!;
+  const t = texLoader.load(`/textures/${file}`, undefined, undefined, () => {
+    /* si falla la descarga, los materiales conservan su fallback procedural */
+  });
+  t.colorSpace = opts.srgb === false ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+  t.wrapS = THREE.RepeatWrapping;
+  t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  if (opts.repeat && opts.repeat !== 1) t.repeat.set(opts.repeat, opts.repeat);
+  photoCache.set(key, t);
+  return t;
+}
 
 function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const c = document.createElement('canvas');
@@ -54,49 +74,91 @@ function normalFromHeight(height: Float32Array, size: number, strength = 2): THR
 export const WORLD_TEX_SIZE = 200;
 
 /**
- * Textura grande de color para el terreno: césped pictórico, parches de
- * tierra, roca en altura y senderos de grava que conectan hoguera,
- * santuarios y arena.
+ * Textura grande de color para el terreno: base fotográfica CC0 de césped
+ * (ambientCG Grass001) sobre la que se pintan parches de tierra, roca en
+ * altura y senderos de grava que conectan hoguera, santuarios y arena.
+ * Si la foto aún no ha cargado, pinta una base pictórica equivalente y
+ * REDIBUJA el mismo canvas cuando la imagen llega (needsUpdate).
  */
 export function terrainSplat(): THREE.CanvasTexture {
   if (cache.has('splat')) return cache.get('splat')!;
   const S = 1024;
   const [c, ctx] = makeCanvas(S, S);
-  const px = S / WORLD_TEX_SIZE; // píxeles por unidad de mundo
-  const rng = mulberry32(4242);
 
-  const grassA = [46, 62, 34], grassB = [66, 88, 44], grassDry = [92, 96, 48];
-  const dirt = [74, 58, 38], dirtDark = [56, 44, 30];
-  const rock = [86, 88, 98], rockDark = [64, 66, 76];
+  const paint = (grassImg: HTMLImageElement | null) => {
+    const px = S / WORLD_TEX_SIZE; // píxeles por unidad de mundo
+    const rng = mulberry32(4242);
 
-  // 1) base pictórica por celdas con ruido
-  const cell = 7;
-  for (let cy = 0; cy < S; cy += cell) {
-    for (let cx = 0; cx < S; cx += cell) {
-      const wx = (cx / S) * WORLD_TEX_SIZE - 100;
-      const wz = (cy / S) * WORLD_TEX_SIZE - 100;
-      const n = fbm(wx * 0.06, wz * 0.06, 3) * 0.5 + 0.5;
-      const n2 = fbm(wx * 0.21 + 40, wz * 0.21 - 17, 2) * 0.5 + 0.5;
-      let r: number, g: number, b: number;
-      const mix01 = (a: number[], bb: number[], t: number) => [a[0] + (bb[0] - a[0]) * t, a[1] + (bb[1] - a[1]) * t, a[2] + (bb[2] - a[2]) * t];
-      let col = mix01(grassA, grassB, n);
-      if (n > 0.62) col = mix01(col, grassDry, (n - 0.62) * 2.2);
-      const jitter = (rng() - 0.5) * 14;
-      r = col[0] + jitter; g = col[1] + jitter * 1.2; b = col[2] + jitter * 0.7;
-      // altura del mundo → roca en el borde montañoso
-      const rr = Math.hypot(wx, wz);
-      if (rr > 78) {
-        const t = Math.min(1, (rr - 78) / 16);
-        const rc = n2 > 0.5 ? rock : rockDark;
-        r = r + (rc[0] - r) * t; g = g + (rc[1] - g) * t; b = b + (rc[2] - b) * t;
+    const grassA = [46, 62, 34], grassB = [66, 88, 44], grassDry = [92, 96, 48];
+    const dirt = [74, 58, 38], dirtDark = [56, 44, 30];
+    const rock = [86, 88, 98], rockDark = [64, 66, 76];
+
+    // 1) base: foto CC0 de césped en mosaico + variación pictórica
+    ctx.clearRect(0, 0, S, S);
+    if (grassImg) {
+      const tiles = 9;
+      const tile = S / tiles;
+      for (let ty = 0; ty < tiles; ty++) {
+        for (let tx = 0; tx < tiles; tx++) {
+          ctx.drawImage(grassImg, tx * tile, ty * tile, tile + 1, tile + 1);
+        }
       }
-      ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
-      ctx.fillRect(cx, cy, cell, cell);
+      // integración tonal: verde hacia abajo, ocre seco arriba
+      const grad = ctx.createLinearGradient(0, S, 0, 0);
+      grad.addColorStop(0, 'rgba(38,58,28,0.34)');
+      grad.addColorStop(0.5, 'rgba(30,44,24,0.16)');
+      grad.addColorStop(1, 'rgba(96,92,52,0.30)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, S, S);
+    } else {
+      const cell = 7;
+      for (let cy = 0; cy < S; cy += cell) {
+        for (let cx = 0; cx < S; cx += cell) {
+          const wx = (cx / S) * WORLD_TEX_SIZE - 100;
+          const wz = (cy / S) * WORLD_TEX_SIZE - 100;
+          const n = fbm(wx * 0.06, wz * 0.06, 3) * 0.5 + 0.5;
+          const n2 = fbm(wx * 0.21 + 40, wz * 0.21 - 17, 2) * 0.5 + 0.5;
+          let r: number, g: number, b: number;
+          const mix01 = (a: number[], bb: number[], t: number) => [a[0] + (bb[0] - a[0]) * t, a[1] + (bb[1] - a[1]) * t, a[2] + (bb[2] - a[2]) * t];
+          let col = mix01(grassA, grassB, n);
+          if (n > 0.62) col = mix01(col, grassDry, (n - 0.62) * 2.2);
+          const jitter = (rng() - 0.5) * 14;
+          r = col[0] + jitter; g = col[1] + jitter * 1.2; b = col[2] + jitter * 0.7;
+          const rr = Math.hypot(wx, wz);
+          if (rr > 78) {
+            const t = Math.min(1, (rr - 78) / 16);
+            const rc = n2 > 0.5 ? rock : rockDark;
+            r = r + (rc[0] - r) * t; g = g + (rc[1] - g) * t; b = b + (rc[2] - b) * t;
+          }
+          ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+          ctx.fillRect(cx, cy, cell, cell);
+        }
+      }
     }
-  }
 
-  // 2) parches de tierra irregulares
-  for (let i = 0; i < 130; i++) {
+    // variación de matiz por celdas (une la foto con el estilo del mundo)
+    const cell2 = 26;
+    for (let cy = 0; cy < S; cy += cell2) {
+      for (let cx = 0; cx < S; cx += cell2) {
+        const wx = (cx / S) * WORLD_TEX_SIZE - 100;
+        const wz = (cy / S) * WORLD_TEX_SIZE - 100;
+        const n = fbm(wx * 0.06, wz * 0.06, 3) * 0.5 + 0.5;
+        const rr = Math.hypot(wx, wz);
+        const a = 0.05 + n * 0.07;
+        if (rr > 78) {
+          const t = Math.min(1, (rr - 78) / 16);
+          ctx.fillStyle = `rgba(${rock[0]},${rock[1]},${rock[2]},${0.5 * t})`;
+        } else if (n > 0.6) {
+          ctx.fillStyle = `rgba(${grassDry[0]},${grassDry[1]},${grassDry[2]},${a})`;
+        } else {
+          ctx.fillStyle = `rgba(${grassA[0] - 10},${grassA[1]},${grassA[2] - 6},${a})`;
+        }
+        ctx.fillRect(cx, cy, cell2, cell2);
+      }
+    }
+
+    // 2) parches de tierra irregulares
+    for (let i = 0; i < 130; i++) {
     const a = rng() * Math.PI * 2;
     const rad = 6 + rng() * (72 - 6);
     const wx = Math.cos(a) * rad, wz = Math.sin(a) * rad;
@@ -146,19 +208,29 @@ export function terrainSplat(): THREE.CanvasTexture {
   for (const s of W.shrines) drawPath(W.bonfire.x, W.bonfire.z, s.x, s.z, 2.1);
   drawPath(W.bonfire.x, W.bonfire.z, W.arena.x, W.arena.z - W.arena.r, 2.6);
 
-  // 4) desgaste alrededor de hoguera y santuarios
-  for (const p of [W.bonfire, ...W.shrines, { x: W.arena.x, z: W.arena.z }]) {
-    const x = (p.x + 100) * px, y = (p.z + 100) * px;
-    const R = 26;
-    const g = ctx.createRadialGradient(x, y, 4, x, y, R);
-    g.addColorStop(0, 'rgba(70,56,38,0.5)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
-  }
+    // 4) desgaste alrededor de hoguera y santuarios
+    for (const p of [W.bonfire, ...W.shrines, { x: W.arena.x, z: W.arena.z }]) {
+      const x = (p.x + 100) * px, y = (p.z + 100) * px;
+      const R = 26;
+      const g = ctx.createRadialGradient(x, y, 4, x, y, R);
+      g.addColorStop(0, 'rgba(70,56,38,0.5)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+    }
+  };
 
+  paint(null);
   const t = toTexture(c, true, false);
   cache.set('splat', t);
+
+  // Mejora asíncrona: cuando llega la foto CC0 de césped, repinta el canvas
+  const img = new Image();
+  img.onload = () => {
+    paint(img);
+    t.needsUpdate = true;
+  };
+  img.src = '/textures/grass_color.jpg';
   return t;
 }
 
@@ -181,41 +253,12 @@ export function terrainDetailNormal(): THREE.CanvasTexture {
 
 /* ---------- Materiales de props ---------- */
 
-/** Corteza de pino: vetas verticales + normal */
-export function barkMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture } {
-  const key = 'bark';
-  if (cache.has(key)) return { map: cache.get(key)!, normalMap: cache.get(key + 'N')! };
-  const W = 128, H = 256;
-  const [c, ctx] = makeCanvas(W, H);
-  ctx.fillStyle = '#4a3520';
-  ctx.fillRect(0, 0, W, H);
-  const rng = mulberry32(313);
-  for (let i = 0; i < 90; i++) {
-    const x = rng() * W;
-    const w = 2 + rng() * 7;
-    const shade = 30 + rng() * 50;
-    ctx.fillStyle = `rgba(${shade + 30},${shade + 16},${shade},${0.25 + rng() * 0.3})`;
-    ctx.fillRect(x, 0, w, H);
-  }
-  // nudos
-  for (let i = 0; i < 7; i++) {
-    const x = rng() * W, y = rng() * H, r = 3 + rng() * 6;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, 'rgba(30,20,12,0.8)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  // altura para normal
-  const h = new Float32Array(W * H);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const u = x / W * 10, v = y / H * 20;
-    h[y * W + x] = fbm(u, v, 3) * 0.6 + fbm(u * 6, v * 6, 2) * 0.3;
-  }
-  const map = toTexture(c, true);
-  const nT = normalFromHeight(h, W, 2.2);
-  cache.set(key, map); cache.set(key + 'N', nT);
-  return { map, normalMap: nT };
+/** Corteza de pino: foto PBR CC0 (ambientCG Bark004) con fallback pictórico */
+export function barkMaps(): { map: THREE.Texture; normalMap: THREE.Texture } {
+  return {
+    map: pbrTex('bark_color.jpg'),
+    normalMap: pbrTex('bark_normal.jpg', { srgb: false }),
+  };
 }
 
 /** Metal forjado: base gris con arañazos + mapa de rugosidad + normal */
@@ -290,53 +333,12 @@ export function metalMaps(): { map: THREE.CanvasTexture; normalMap: THREE.Canvas
   return { map, normalMap, roughnessMap };
 }
 
-/** Piedra tallada para ruinas: blotches + grietas + normal */
-export function stoneMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture } {
-  const key = 'stone';
-  if (cache.has(key)) return { map: cache.get(key)!, normalMap: cache.get(key + 'N')! };
-  const S = 256;
-  const [c, ctx] = makeCanvas(S, S);
-  ctx.fillStyle = '#6a6a74';
-  ctx.fillRect(0, 0, S, S);
-  const rng = mulberry32(909);
-  for (let i = 0; i < 900; i++) {
-    const x = rng() * S, y = rng() * S, r = 2 + rng() * 16;
-    const v = (86 + rng() * 60) | 0;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(${v},${v},${v + 8},${0.10 + rng() * 0.16})`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  // grietas (caminatas aleatorias oscuras)
-  for (let i = 0; i < 14; i++) {
-    let x = rng() * S, y = rng() * S;
-    ctx.strokeStyle = 'rgba(28,28,34,0.5)';
-    ctx.lineWidth = 0.8 + rng() * 1.2;
-    ctx.beginPath(); ctx.moveTo(x, y);
-    for (let k = 0; k < 26; k++) {
-      x += (rng() - 0.5) * 22; y += (rng() - 0.5) * 22;
-      ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-  }
-  // musgo tenue
-  for (let i = 0; i < 60; i++) {
-    const x = rng() * S, y = rng() * S, r = 3 + rng() * 10;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(70,96,52,${0.10 + rng() * 0.16})`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  const h = new Float32Array(S * S);
-  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    h[y * S + x] = fbm(x / S * 9, y / S * 9, 4) * 0.7 + fbm(x / S * 22 + 5, y / S * 22, 2) * 0.3;
-  }
-  const map = toTexture(c, true);
-  const normalMap = normalFromHeight(h, S, 2.4);
-  cache.set(key, map); cache.set(key + 'N', normalMap);
-  return { map, normalMap };
+/** Piedra: foto PBR CC0 (ambientCG Rock012) con fallback pictórico */
+export function stoneMaps(): { map: THREE.Texture; normalMap: THREE.Texture } {
+  return {
+    map: pbrTex('rock_color.jpg', { repeat: 1.4 }),
+    normalMap: pbrTex('rock_normal.jpg', { srgb: false, repeat: 1.4 }),
+  };
 }
 
 /** Madera con vetas para mangos/troncos de hoguera */

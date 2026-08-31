@@ -40,6 +40,8 @@ export interface GameCtx {
   spawnProjectile(o: { pos: THREE.Vector3; dir: THREE.Vector3; speed: number; dmg: number; kind: 'arrow' | 'orb' }): void;
   onEnemyDied(e: import('./enemies').Enemy): void;
   playerHurt(): void;
+  /** 0 = pleno día, 1 = noche cerrada (los enemigos se vuelven más rápidos) */
+  nightFactor: number;
 }
 
 export abstract class Entity {

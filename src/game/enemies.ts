@@ -260,7 +260,11 @@ export class Enemy extends Entity {
       case 'wander': {
         // deambular cerca de casa
         this.cd -= dt;
-        if (dist < cfg.aggro) this.aggroed = true;
+        if (dist < cfg.aggro && !this.aggroed) {
+          this.aggroed = true;
+          // gruñido de alerta al detectar al héroe
+          if (this.type === 'goblin') ctx.audio.goblinVox();
+        }
         if (this.aggroed && dist < cfg.aggro * 2.2) {
           this.state = cfg.strafe ? 'strafe' : 'chase';
           this.stateT = 0;
@@ -305,7 +309,8 @@ export class Enemy extends Entity {
         const dir = toPlayer.clone().normalize();
         const stopDist = cfg.attacks[0].range * 0.85;
         if (dist > stopDist) {
-          this.pos.addScaledVector(dir, cfg.speed * (this.phase === 3 ? 1.2 : 1) * dt);
+          const nightBoost = 1 + 0.12 * ctx.nightFactor; // de noche los enemigos aceleran
+          this.pos.addScaledVector(dir, cfg.speed * nightBoost * (this.phase === 3 ? 1.2 : 1) * dt);
           this.runPhase += dt * (cfg.speed / 5);
           this.applier.apply(runPose(this.runPhase, 1), dt);
           this.moving = true;

@@ -1,7 +1,36 @@
 /* ============================================================
-   MOTOR DE AUDIO PROCEDURAL (Web Audio API)
-   Efectos sintetizados + música ambient generativa dark-fantasy.
+   MOTOR DE AUDIO (Web Audio API)
+   Capa 1: samples reales CC0 (Kenney RPG Audio, Little Robot Sound
+   Factory, Cleyton Kauffman) en /public/audio.
+   Capa 2: síntesis procedural como refuerzo y fallback.
+   Música: tema de exploración en bucle + capa generativa de combate.
    ============================================================ */
+
+const SFX_SAMPLES: Record<string, string> = {
+  swing1: '/audio/swing1.ogg',
+  swing2: '/audio/swing2.ogg',
+  swing3: '/audio/swing3.ogg',
+  swingHeavy: '/audio/swing_heavy.ogg',
+  hitFlesh: '/audio/hit_flesh.ogg',
+  hitFlesh2: '/audio/hit_flesh2.ogg',
+  cloth: '/audio/cloth.ogg',
+  step1: '/audio/step_grass1.ogg',
+  step2: '/audio/step_grass2.ogg',
+  step3: '/audio/step_grass3.ogg',
+  gold: '/audio/gold.mp3',
+  coins: '/audio/coins1.ogg',
+  goblin1: '/audio/goblin1.mp3',
+  goblin2: '/audio/goblin2.mp3',
+  dragon: '/audio/dragon.mp3',
+  spell1: '/audio/spell1.mp3',
+  spell2: '/audio/spell2.mp3',
+  levelUp: '/audio/levelup.mp3',
+  victory: '/audio/victory.mp3',
+  defeat: '/audio/defeat.mp3',
+  uiSelect: '/audio/ui_select.mp3',
+  uiOpen: '/audio/ui_open.mp3',
+  musicTheme: '/audio/music_theme.ogg',
+};
 
 export class AudioEngine {
   ctx: AudioContext | null = null;
@@ -14,6 +43,9 @@ export class AudioEngine {
   private step = 0;
   private intensity = 0; // 0 = exploración, 1 = combate
   private started = false;
+  private samples = new Map<string, AudioBuffer>();
+  private themeSrc: AudioBufferSourceNode | null = null;
+  private themeGain: GainNode | null = null;
   muted = false;
 
   unlock() {
@@ -35,7 +67,34 @@ export class AudioEngine {
     this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+
+    // precarga asíncrona de samples CC0
+    for (const [name, url] of Object.entries(SFX_SAMPLES)) {
+      fetch(url)
+        .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
+        .then((ab) => this.ctx!.decodeAudioData(ab))
+        .then((buf) => { this.samples.set(name, buf); })
+        .catch(() => { /* sin red o códec ausente: cae a síntesis */ });
+    }
   }
+
+  /** Reproduce un sample precargado (ignora si aún no está listo). */
+  private sample(name: string, opts: { gain?: number; rate?: number; rateJitter?: number; bus?: GainNode | null } = {}) {
+    if (!this.ctx || !this.sfxBus) return;
+    const buf = this.samples.get(name);
+    if (!buf) return;
+    const t = this.now();
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const jitter = opts.rateJitter ?? 0.06;
+    src.playbackRate.value = (opts.rate ?? 1) * (1 - jitter + Math.random() * jitter * 2);
+    const g = this.ctx.createGain();
+    g.gain.value = opts.gain ?? 0.8;
+    src.connect(g).connect(opts.bus ?? this.sfxBus);
+    src.start(t);
+  }
+
+  private sampleReady(name: string) { return this.samples.has(name); }
 
   setMuted(m: boolean) {
     this.muted = m;
@@ -89,38 +148,67 @@ export class AudioEngine {
     osc.stop(t + dur + 0.05);
   }
 
-  /* ---------- SFX ---------- */
+  /* ---------- SFX (sample real + refuerzo sintético) ---------- */
 
   swing(pitch = 1) {
-    this.noise(0.16, { freq: 2400 * pitch, q: 2.2, gain: 0.28, sweep: 0.25 });
-    this.tone(300 * pitch, 0.1, { type: 'triangle', gain: 0.06, slideTo: 140 * pitch });
+    const names = ['swing1', 'swing2', 'swing3'];
+    const n = names[Math.floor(Math.random() * names.length)];
+    if (this.sampleReady(n)) {
+      this.sample(n, { gain: 0.55, rate: pitch * 0.95 });
+    } else {
+      this.noise(0.16, { freq: 2400 * pitch, q: 2.2, gain: 0.28, sweep: 0.25 });
+    }
+    this.tone(300 * pitch, 0.1, { type: 'triangle', gain: 0.05, slideTo: 140 * pitch });
   }
   hitFlesh() {
-    this.noise(0.14, { freq: 420, q: 0.8, gain: 0.5, sweep: 0.3 });
-    this.tone(130, 0.13, { type: 'triangle', gain: 0.32, slideTo: 60 });
+    this.sample(Math.random() < 0.5 ? 'hitFlesh' : 'hitFlesh2', { gain: 0.75 });
+    this.noise(0.14, { freq: 420, q: 0.8, gain: 0.32, sweep: 0.3 });
+    this.tone(130, 0.13, { type: 'triangle', gain: 0.24, slideTo: 60 });
   }
   hitMetal() {
+    this.sample('hitFlesh2', { gain: 0.35, rate: 1.4 });
     this.noise(0.12, { freq: 3400, q: 6, gain: 0.3, sweep: 0.5 });
     this.tone(820, 0.16, { type: 'square', gain: 0.1, slideTo: 400 });
     this.tone(1240, 0.2, { type: 'sine', gain: 0.12, slideTo: 900 });
   }
   heavyHit() {
-    this.noise(0.25, { freq: 300, q: 0.7, gain: 0.6, sweep: 0.2 });
-    this.tone(90, 0.3, { type: 'sine', gain: 0.5, slideTo: 38 });
+    this.sample('swingHeavy', { gain: 0.5, rate: 0.8 });
+    this.sample('hitFlesh', { gain: 0.6, rate: 0.85 });
+    this.noise(0.25, { freq: 300, q: 0.7, gain: 0.45, sweep: 0.2 });
+    this.tone(90, 0.3, { type: 'sine', gain: 0.45, slideTo: 38 });
   }
   roll() {
-    this.noise(0.22, { freq: 700, q: 0.6, gain: 0.16, sweep: 0.4, type: 'lowpass' });
+    this.sample('cloth', { gain: 0.5 });
+    this.noise(0.22, { freq: 700, q: 0.6, gain: 0.12, sweep: 0.4, type: 'lowpass' });
+  }
+  /** Pasos del jugador sobre hierba/tierra */
+  footstep() {
+    const n = ['step1', 'step2', 'step3'][Math.floor(Math.random() * 3)];
+    this.sample(n, { gain: 0.32, rateJitter: 0.12 });
+  }
+  coin() {
+    this.sample('gold', { gain: 0.7 });
+    this.sample('coins', { gain: 0.3, rate: 1.2 });
+  }
+  goblinVox() {
+    this.sample(Math.random() < 0.5 ? 'goblin1' : 'goblin2', { gain: 0.6, rateJitter: 0.1 });
   }
   hurt() {
-    this.noise(0.2, { freq: 500, q: 1, gain: 0.45, sweep: 0.3 });
+    this.sample('cloth', { gain: 0.4, rate: 1.3 });
+    this.noise(0.2, { freq: 500, q: 1, gain: 0.4, sweep: 0.3 });
     this.tone(200, 0.18, { type: 'sawtooth', gain: 0.12, slideTo: 90 });
   }
   die() {
+    this.sample('cloth', { gain: 0.5, rate: 0.8 });
     this.tone(180, 0.5, { type: 'sawtooth', gain: 0.16, slideTo: 50 });
     this.noise(0.4, { freq: 350, q: 0.6, gain: 0.3, sweep: 0.15 });
   }
   arrow() {
-    this.noise(0.3, { freq: 1800, q: 3, gain: 0.2, sweep: 2.2 });
+    this.sample('spell2', { gain: 0.4, rate: 1.3, rateJitter: 0.1 });
+    this.noise(0.3, { freq: 1800, q: 3, gain: 0.16, sweep: 2.2 });
+  }
+  castSpell() {
+    this.sample(Math.random() < 0.5 ? 'spell1' : 'spell2', { gain: 0.55, rateJitter: 0.08 });
   }
   potion() {
     const t0 = this.now();
@@ -129,41 +217,74 @@ export class AudioEngine {
     });
   }
   levelUp() {
-    const notes = [440, 554, 659, 880, 1108];
-    notes.forEach((f, i) => {
-      setTimeout(() => this.tone(f, 0.5, { type: 'triangle', gain: 0.16 }), i * 90);
-    });
-    setTimeout(() => this.noise(0.8, { freq: 5000, q: 1, gain: 0.08, sweep: 0.2, attack: 0.3 }), 200);
+    this.sample('levelUp', { gain: 0.85 });
+    if (!this.sampleReady('levelUp')) {
+      const notes = [440, 554, 659, 880, 1108];
+      notes.forEach((f, i) => {
+        setTimeout(() => this.tone(f, 0.5, { type: 'triangle', gain: 0.16 }), i * 90);
+      });
+    }
   }
   cleanse() {
+    this.sample('spell1', { gain: 0.5, rate: 0.9 });
     const notes = [392, 523, 659, 784, 1046];
     notes.forEach((f, i) => setTimeout(() => this.tone(f, 0.7, { type: 'sine', gain: 0.15 }), i * 110));
     this.noise(1.2, { freq: 3000, q: 0.8, gain: 0.1, sweep: 0.15, attack: 0.4 });
   }
   bossRoar() {
-    this.tone(70, 1.4, { type: 'sawtooth', gain: 0.4, slideTo: 45 });
-    this.tone(110, 1.2, { type: 'square', gain: 0.14, slideTo: 70 });
-    this.noise(1.3, { freq: 250, q: 0.5, gain: 0.5, sweep: 0.3, attack: 0.05 });
+    this.sample('dragon', { gain: 0.95, rateJitter: 0.03 });
+    this.tone(70, 1.4, { type: 'sawtooth', gain: 0.35, slideTo: 45 });
+    this.noise(1.3, { freq: 250, q: 0.5, gain: 0.4, sweep: 0.3, attack: 0.05 });
   }
   slam() {
+    this.sample('swingHeavy', { gain: 0.7, rate: 0.6 });
     this.tone(60, 0.5, { type: 'sine', gain: 0.6, slideTo: 30 });
     this.noise(0.4, { freq: 200, q: 0.5, gain: 0.5, sweep: 0.2 });
   }
-  uiClick() { this.tone(660, 0.07, { type: 'triangle', gain: 0.12 }); }
+  uiClick() {
+    this.sample('uiSelect', { gain: 0.6 });
+    if (!this.sampleReady('uiSelect')) this.tone(660, 0.07, { type: 'triangle', gain: 0.12 });
+  }
+  uiOpen() {
+    this.sample('uiOpen', { gain: 0.6 });
+  }
+  victory() { this.sample('victory', { gain: 0.9 }); }
+  defeat() { this.sample('defeat', { gain: 0.9 }); }
   bonfireRest() {
     const notes = [523, 659, 784, 1046];
     notes.forEach((f, i) => setTimeout(() => this.tone(f, 0.6, { type: 'sine', gain: 0.12 }), i * 130));
   }
 
-  /* ---------- Música generativa ---------- */
+  /* ---------- Música: tema CC0 en bucle + capa generativa ---------- */
 
   startMusic() {
     if (this.started || !this.ctx || !this.musicBus) return;
     this.started = true;
     this.nextNoteTime = this.now() + 0.1;
-    // Colchón de drone continuo
+    // Tema de exploración (Cleyton Kauffman, CC0) en bucle suave
+    const theme = this.samples.get('musicTheme');
+    if (theme) {
+      this.themeSrc = this.ctx.createBufferSource();
+      this.themeSrc.buffer = theme;
+      this.themeSrc.loop = true;
+      this.themeGain = this.ctx.createGain();
+      this.themeGain.gain.setValueAtTime(0.0001, this.now());
+      this.themeGain.gain.linearRampToValueAtTime(0.4, this.now() + 3);
+      this.themeSrc.connect(this.themeGain).connect(this.musicBus);
+      this.themeSrc.start(this.now() + 0.15);
+    }
+    // Colchón de drone continuo (textura generativa bajo el tema)
     this.startDrone();
     this.musicTimer = setInterval(() => this.scheduler(), 120);
+  }
+
+  /** Atenua o restituye el tema (menú pausa, victoria...) */
+  duckTheme(v: number, time = 0.8) {
+    if (!this.ctx || !this.themeGain) return;
+    const g = this.themeGain.gain;
+    g.cancelScheduledValues(this.now());
+    g.setValueAtTime(g.value, this.now());
+    g.linearRampToValueAtTime(0.4 * v, this.now() + time);
   }
 
   private droneOscs: OscillatorNode[] = [];
@@ -289,6 +410,7 @@ export class AudioEngine {
   dispose() {
     if (this.musicTimer) clearInterval(this.musicTimer);
     this.droneOscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
+    try { this.themeSrc?.stop(); } catch { /* noop */ }
     if (this.ctx) this.ctx.close();
     this.ctx = null;
     this.started = false;

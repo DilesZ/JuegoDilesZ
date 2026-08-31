@@ -10,8 +10,9 @@ import {
 import { Particles } from './particles';
 import {
   terrainSplat, terrainDetailNormal, glowSprite, mistTexture, moonTexture,
-  waterNormal, arenaFloorTexture, bannerTexture,
+  waterNormal, arenaFloorTexture, bannerTexture, pbrTex,
 } from './textures';
+import type { DayNightSample } from './daynight';
 
 /* ============================================================
    MUNDO: cielo con aurora, terreno con senderos, vegetación con
@@ -42,7 +43,7 @@ export interface ShrineState {
 
 const AURORA_FRAG = /* glsl */`
 varying vec2 vUv;
-uniform float uTime; uniform float uPhase; uniform vec3 uColA; uniform vec3 uColB;
+uniform float uTime; uniform float uPhase; uniform float uGlobalA; uniform vec3 uColA; uniform vec3 uColB;
 void main(){
   float x = vUv.x * 6.28318;
   float band = sin(x*2.0 + uTime*0.11 + uPhase) * 0.5
@@ -53,7 +54,7 @@ void main(){
   float rays = 0.5 + 0.5 * sin(x*26.0 + band*4.0 + uTime*0.4 + uPhase*3.0);
   float i = curtain * (0.35 + 0.65 * rays);
   vec3 col = mix(uColA, uColB, clamp(y * 1.5, 0.0, 1.0));
-  gl_FragColor = vec4(col * i * 0.9, i);
+  gl_FragColor = vec4(col * i * 0.9 * uGlobalA, i * uGlobalA);
 }`;
 
 const AURORA_VERT = `varying vec2 vUv;
@@ -79,6 +80,30 @@ export class World {
   private meteorT = 9;
   private auroraMats: THREE.ShaderMaterial[] = [];
   private moonDir = new THREE.Vector3();
+
+  /* ---- referencias para el ciclo día/noche ---- */
+  private dn = {
+    sunDir: { value: new THREE.Vector3(0, 1, 0) },
+    sunTint: { value: new THREE.Color(0xffe8c0) },
+    sunGlow: { value: 0.5 },
+    starsA: { value: 1 },
+    auroraA: { value: 1 },
+    ffA: { value: 1 },
+  };
+  private skyMat!: THREE.ShaderMaterial;
+  private hemi!: THREE.HemisphereLight;
+  private fill!: THREE.DirectionalLight;
+  private moonGroup: THREE.Group | null = null;
+  private moonHaloMats: THREE.SpriteMaterial[] = [];
+  private moonMat: THREE.MeshBasicMaterial | null = null;
+  private sunSprites: THREE.Sprite[] = [];
+  private sunMat: THREE.SpriteMaterial | null = null;
+  private sunGlowMat: THREE.SpriteMaterial | null = null;
+  private waterMat: THREE.ShaderMaterial | null = null;
+  private envIntensityTarget = 0.5;
+  private nightK = 1; // factor de oscuridad actual (para antorchas etc.)
+  private mistMul = 1.2; // multiplicador de niebla rasante
+  private terrainMat: THREE.MeshStandardMaterial | null = null;
 
   constructor(scene: THREE.Scene, renderer?: THREE.WebGLRenderer) {
     this.scene = scene;
@@ -120,6 +145,7 @@ export class World {
       uniforms: {
         uTime: this.skyTime,
         uPhase: { value: phase },
+        uGlobalA: this.dn.auroraA,
         uColA: { value: new THREE.Color(colA) },
         uColB: { value: new THREE.Color(colB) },
       },
@@ -131,25 +157,34 @@ export class World {
   }
 
   private buildSky() {
-    // cúpula con degradado nocturno profundo
+    // cúpula con degradado dinámico + dispersión atmosférica hacia el sol
     const skyGeo = new THREE.SphereGeometry(420, 24, 16);
     const skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide, depthWrite: false, fog: false,
       uniforms: {
-        top: { value: new THREE.Color(0x020308) },
-        mid: { value: new THREE.Color(0x0c1428) },
-        bottom: { value: new THREE.Color(0x16202f) },
+        top: { value: new THREE.Color(0x040711) },
+        mid: { value: new THREE.Color(0x0a1322) },
+        bottom: { value: new THREE.Color(0x101a28) },
+        uSunDir: this.dn.sunDir,
+        uSunTint: this.dn.sunTint,
+        uSunGlow: this.dn.sunGlow,
       },
       vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
       fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
+        uniform vec3 uSunDir; uniform vec3 uSunTint; uniform float uSunGlow;
         void main(){
-          float h = normalize(vP).y;
+          vec3 n = normalize(vP);
+          float h = n.y;
           vec3 c = h > 0.0 ? mix(mid, top, pow(h, 0.55)) : mix(mid, bottom, pow(-h, 0.5));
-          // leve banda de horizonte fría
+          // banda de horizonte
           c += vec3(0.02, 0.05, 0.06) * exp(-abs(h) * 9.0);
+          // dispersión atmosférica: resplandor alrededor del sol
+          float sd = max(dot(n, normalize(uSunDir)), 0.0);
+          c += uSunTint * (pow(sd, 5.0) * 0.32 + pow(sd, 42.0) * 0.55) * uSunGlow;
           gl_FragColor = vec4(c, 1.0);
         }`,
     });
+    this.skyMat = skyMat;
     const sky = new THREE.Mesh(skyGeo, skyMat);
     sky.renderOrder = -10;
     this.scene.add(sky);
@@ -182,11 +217,11 @@ export class World {
     starGeo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
     const starMat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
-      uniforms: { uTime: this.skyTime },
+      uniforms: { uTime: this.skyTime, uGlobalA: this.dn.starsA },
       vertexShader: `attribute float aSize; attribute float aPhase; attribute vec3 aColor;
-        uniform float uTime; varying float vA; varying vec3 vC;
+        uniform float uTime; uniform float uGlobalA; varying float vA; varying vec3 vC;
         void main(){ vC = aColor;
-          vA = 0.55 + 0.45 * sin(uTime * 1.9 + aPhase);
+          vA = (0.55 + 0.45 * sin(uTime * 1.9 + aPhase)) * uGlobalA;
           vec4 mv = modelViewMatrix * vec4(position,1.0);
           gl_PointSize = clamp(aSize * (620.0 / -mv.z), 1.0, 7.0);
           gl_Position = projectionMatrix * mv; }`,
@@ -216,42 +251,65 @@ export class World {
       this.scene.add(m);
     }
 
-    // luna con textura + halos
-    const moonMat = new THREE.MeshBasicMaterial({ map: moonTexture(), fog: false });
+    // luna con textura + halos (grupo para el ciclo día/noche)
+    const moonGroup = new THREE.Group();
+    const moonMat = new THREE.MeshBasicMaterial({ map: moonTexture(), fog: false, transparent: true });
     const moon = new THREE.Mesh(new THREE.SphereGeometry(15, 24, 18), moonMat);
     moon.position.set(-185, 168, -150);
     moon.renderOrder = -8;
-    this.scene.add(moon);
+    moonGroup.add(moon);
+    this.moonMat = moonMat;
     this.moonDir.copy(moon.position).normalize();
 
     const mkHalo = (scale: number, opacity: number, color: number) => {
       const sm = new THREE.SpriteMaterial({
-        map: glowSprite(), color, transparent: true, opacity,
+        map: glowSprite(), color, opacity,
+        transparent: true,
         blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
       });
       const s = new THREE.Sprite(sm);
       s.position.copy(moon.position);
       s.scale.setScalar(scale);
       s.renderOrder = -8;
-      this.scene.add(s);
+      moonGroup.add(s);
+      this.moonHaloMats.push(sm);
       return s;
     };
     mkHalo(58, 0.5, 0x9fb4e8);
     mkHalo(150, 0.16, 0x6d84c8);
+    this.moonGroup = moonGroup;
+    this.scene.add(moonGroup);
+
+    // SOL: disco cálido + glorias aditivas (visible de día)
+    const mkSunSprite = (scale: number, opacity: number, color: number) => {
+      const sm = new THREE.SpriteMaterial({
+        map: glowSprite(), color, opacity,
+        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      });
+      const s = new THREE.Sprite(sm);
+      s.scale.setScalar(scale);
+      s.renderOrder = -8;
+      this.scene.add(s);
+      this.sunSprites.push(s);
+      return sm;
+    };
+    this.sunGlowMat = mkSunSprite(210, 0.34, 0xffd9a0);
+    this.sunMat = mkSunSprite(64, 0.8, 0xfff3d0);
   }
 
   /* ---------- Luces ---------- */
 
   private buildLights() {
-    const hemi = new THREE.HemisphereLight(0x2e4070, 0x1a1512, 0.5);
-    this.scene.add(hemi);
+    this.hemi = new THREE.HemisphereLight(0x2e4070, 0x1a1512, 0.5);
+    this.scene.add(this.hemi);
 
+    // luz con sombras compartida: SOL de día, LUNA de noche
     this.moonLight = new THREE.DirectionalLight(0xaec6ff, 1.22);
     this.moonLight.position.set(-40, 55, -30);
     this.moonLight.castShadow = true;
     this.moonLight.shadow.mapSize.set(2048, 2048);
     this.moonLight.shadow.camera.near = 5;
-    this.moonLight.shadow.camera.far = 170;
+    this.moonLight.shadow.camera.far = 200;
     const S = 44;
     this.moonLight.shadow.camera.left = -S;
     this.moonLight.shadow.camera.right = S;
@@ -263,9 +321,72 @@ export class World {
     this.scene.add(this.moonLight.target);
 
     // relleno frío suave desde el lado opuesto (levanta negros)
-    const fill = new THREE.DirectionalLight(0x36426a, 0.3);
-    fill.position.set(34, 40, 28);
-    this.scene.add(fill);
+    this.fill = new THREE.DirectionalLight(0x36426a, 0.3);
+    this.fill.position.set(34, 40, 28);
+    this.scene.add(this.fill);
+  }
+
+  /**
+   * Aplica el estado del ciclo día/noche a cielo, luces, niebla,
+   * sol/luna, estrellas, aurora, luciérnagas y ambiente nocturno.
+   */
+  applyDayNight(s: DayNightSample, renderer: THREE.WebGLRenderer) {
+    this.nightK = s.night;
+    this.mistMul = s.mistMul;
+
+    // cielo
+    const su = this.skyMat.uniforms;
+    (su.top.value as THREE.Color).copy(s.skyTop);
+    (su.mid.value as THREE.Color).copy(s.skyMid);
+    (su.bottom.value as THREE.Color).copy(s.skyBottom);
+    this.dn.sunDir.value.copy(s.lightDir);
+    this.dn.sunTint.value.copy(s.sunTint);
+    this.dn.sunGlow.value = s.sunGlow;
+
+    // estrellas, aurora, luciérnagas
+    this.dn.starsA.value = s.stars;
+    this.dn.auroraA.value = s.aurora;
+    this.dn.ffA.value = s.fireflies;
+
+    // sol y luna visibles
+    this.sunSprites.forEach((sp) => { sp.position.copy(s.lightDir).multiplyScalar(385); });
+    if (this.sunMat) this.sunMat.opacity = 0.85 * s.sunA;
+    if (this.sunGlowMat) this.sunGlowMat.opacity = 0.34 * s.sunA;
+    if (this.moonGroup) {
+      this.moonGroup.visible = s.moonA > 0.02;
+      this.moonGroup.position.set(0, 0, 0);
+    }
+    if (this.moonMat) this.moonMat.opacity = s.moonA;
+    this.moonHaloMats.forEach((m, i) => { m.opacity = (i === 0 ? 0.5 : 0.16) * s.moonA; });
+
+    // luz direccional con sombras (sol de día / luna de noche)
+    this.moonLight.color.copy(s.lightColor);
+    this.moonLight.intensity = s.lightIntensity;
+
+    // hemisférica + relleno
+    this.hemi.color.copy(s.hemiSky);
+    this.hemi.groundColor.copy(s.hemiGround);
+    this.hemi.intensity = s.hemiIntensity;
+    this.fill.color.copy(s.fillColor);
+    this.fill.intensity = s.fillIntensity;
+
+    // niebla volumétrica global
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.copy(s.fogColor);
+      this.scene.fog.density = s.fogDensity;
+    }
+
+    // agua de la Fuente Lunar
+    if (this.waterMat) {
+      (this.waterMat.uniforms.uSky.value as THREE.Color).copy(s.waterTint);
+      (this.waterMat.uniforms.uMoonDir.value as THREE.Vector3).copy(s.lightDir);
+    }
+
+    // exposición y reflejos de entorno
+    renderer.toneMappingExposure = s.exposure;
+    this.envIntensityTarget = s.envIntensity;
+    const sc = this.scene as THREE.Scene & { environmentIntensity?: number };
+    if (sc.environmentIntensity !== undefined) sc.environmentIntensity = s.envIntensity;
   }
 
   /* ---------- Terreno con splat y senderos ---------- */
@@ -292,12 +413,16 @@ export class World {
     geo.computeVertexNormals();
     const mat = new THREE.MeshStandardMaterial({
       map: terrainSplat(),
-      normalMap: terrainDetailNormal(),
-      normalScale: new THREE.Vector2(0.9, 0.9),
+      normalMap: pbrTex('grass_normal.jpg', { srgb: false, repeat: 46 }),
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      bumpMap: terrainDetailNormal(),
+      bumpScale: 0.06,
+      roughnessMap: pbrTex('grass_rough.jpg', { srgb: false, repeat: 46 }),
       vertexColors: true,
-      roughness: 0.96, metalness: 0,
+      roughness: 1.0, metalness: 0,
       envMapIntensity: 0.35,
     });
+    this.terrainMat = mat;
     const terrain = new THREE.Mesh(geo, mat);
     terrain.receiveShadow = true;
     terrain.name = 'terrain';
@@ -380,9 +505,9 @@ export class World {
       trunks.setMatrixAt(placed, dummy.matrix);
       canopies.setMatrixAt(placed, dummy.matrix);
       const tone = 0.8 + rng() * 0.5;
-      tint.setRGB(tone * 0.20, tone * 0.33, tone * 0.24);
+      tint.setRGB(tone * 0.30, tone * 0.55, tone * 0.31);
       canopies.setColorAt(placed, tint);
-      tint.setRGB(tone * 0.55, tone * 0.50, tone * 0.46);
+      tint.setRGB(tone * 0.72, tone * 0.62, tone * 0.55);
       trunks.setColorAt(placed, tint);
       this.colliders.push({ x, z, r: 0.55 * s });
       // algunos árboles muertos acompañando
@@ -597,18 +722,18 @@ export class World {
     geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-      uniforms: { uTime: this.skyTime },
+      uniforms: { uTime: this.skyTime, uGlobalA: this.dn.ffA },
       vertexShader: `attribute float aPhase; attribute float aSpeed; attribute float aSize;
-        uniform float uTime; varying float vA;
+        uniform float uTime; uniform float uGlobalA; varying float vA;
         void main(){
           vec3 p = position;
           p.x += sin(uTime * aSpeed + aPhase) * 1.3;
           p.y += sin(uTime * aSpeed * 0.7 + aPhase * 2.0) * 0.55;
           p.z += cos(uTime * aSpeed * 0.85 + aPhase) * 1.3;
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          gl_PointSize = clamp(aSize * (150.0 / max(0.1, -mv.z)), 1.0, 40.0);
+          gl_PointSize = clamp(aSize * (150.0 / max(0.1, -mv.z)), 1.0, 26.0);
           float nearFade = smoothstep(2.2, 6.0, -mv.z);
-          vA = (pow(0.5 + 0.5 * sin(uTime * 2.1 + aPhase * 3.0), 2.2) * 0.9 + 0.06) * nearFade;
+          vA = (pow(0.5 + 0.5 * sin(uTime * 2.1 + aPhase * 3.0), 2.2) * 0.9 + 0.06) * nearFade * uGlobalA;
           gl_Position = projectionMatrix * mv; }`,
       fragmentShader: `varying float vA;
         void main(){ vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
@@ -678,6 +803,7 @@ export class World {
     water.rotation.x = -Math.PI / 2;
     water.position.y = 0.44;
     g.add(water);
+    this.waterMat = waterMat;
 
     this.scene.add(g);
     this.colliders.push({ x, z, r: 1.55 });
@@ -971,16 +1097,18 @@ export class World {
     this.waterTime.value = this.time;
     updateWindAndFlames(this.time);
 
-    // la luz lunar sigue al jugador para mantener sombras nítidas
+    // la luz activa (sol de día / luna de noche) sigue al jugador
     if (camera instanceof THREE.PerspectiveCamera) {
       const t = camera.position;
-      this.moonLight.position.set(t.x - 40, 55, t.z - 30);
+      const dir = this.dn.sunDir.value;
+      this.moonLight.position.set(t.x + dir.x * 75, dir.y * 75 + 12, t.z + dir.z * 75);
       this.moonLight.target.position.set(t.x, 0, t.z);
     }
 
-    // parpadeo de la hoguera + humo
+    // parpadeo de la hoguera + humo (realzadas de noche)
+    const torchK = this.nightK;
     if (this.bonfireLight) {
-      this.bonfireLight.intensity = 15 + Math.sin(this.time * 9) * 1.8 + Math.sin(this.time * 23.7) * 1.0;
+      this.bonfireLight.intensity = (15 + Math.sin(this.time * 9) * 1.8 + Math.sin(this.time * 23.7) * 1.0) * (0.55 + 0.45 * torchK);
     }
     if (this.bonfireFlame) {
       const s = 1 + Math.sin(this.time * 11) * 0.12;
@@ -997,9 +1125,9 @@ export class World {
       });
     }
 
-    // antorchas: parpadeo + brasas
+    // antorchas: parpadeo + brasas (realzadas de noche)
     for (const t of this.torches) {
-      t.light.intensity = 5.6 + Math.sin(this.time * 8 + t.pos.x) * 1.0 + Math.sin(this.time * 19 + t.pos.z) * 0.55;
+      t.light.intensity = (5.6 + Math.sin(this.time * 8 + t.pos.x) * 1.0 + Math.sin(this.time * 19 + t.pos.z) * 0.55) * (0.5 + 0.5 * torchK);
       const fs = 1 + Math.sin(this.time * 13 + t.pos.z) * 0.16;
       t.flame.scale.set(fs, 1 + Math.sin(this.time * 15 + t.pos.x) * 0.2, fs);
       if (Math.random() < 0.12) {
@@ -1042,10 +1170,10 @@ export class World {
       }
     }
 
-    // niebla rasante: deriva y pulso
+    // niebla rasante: deriva y pulso (más densa al alba y de noche)
     for (const m of this.mist) {
       m.mesh.rotation.y += m.spin * dt;
-      m.mat.opacity = m.baseO * (0.8 + 0.2 * Math.sin(this.time * 0.35 + m.mesh.position.x));
+      m.mat.opacity = Math.min(0.9, m.baseO * this.mistMul * (0.8 + 0.2 * Math.sin(this.time * 0.35 + m.mesh.position.x)));
     }
 
     // meteorito fugaz ocasional

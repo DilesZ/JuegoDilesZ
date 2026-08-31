@@ -1,0 +1,1068 @@
+     1→import * as THREE from 'three';
+     2→import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+     3→import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+     4→import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+     5→import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+     6→import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+     7→import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+     8→import { clamp, dampAngle, damp, rand, randInt, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, ENEMY_NAMES } from './core';
+     9→import { idlePose } from './animations';
+    10→import { Particles } from './particles';
+    11→import { AudioEngine } from './audio';
+    12→import { World } from './world';
+    13→import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
+    14→import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
+    15→import { drawMinimap } from './minimap';
+    16→
+    17→export type QualityTier = 'bajo' | 'medio' | 'alto';
+    18→
+    19→/* Grading final: viñeta, grano fílmico, aberración cromática y color */
+    20→const GradeShader = {
+    21→  uniforms: {
+    22→    tDiffuse: { value: null as THREE.Texture | null },
+    23→    uTime: { value: 0 },
+    24→    uVignette: { value: 0.44 },
+    25→    uGrain: { value: 0.038 },
+    26→    uCA: { value: 0.0015 },
+    27→    uSat: { value: 1.08 },
+    28→    uCon: { value: 1.04 },
+    29→  },
+    30→  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    31→  fragmentShader: `
+    32→    uniform sampler2D tDiffuse; uniform float uTime; uniform float uVignette;
+    33→    uniform float uGrain; uniform float uCA; uniform float uSat; uniform float uCon;
+    34→    varying vec2 vUv;
+    35→    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+    36→    void main(){
+    37→      vec2 uv = vUv;
+    38→      vec2 d = uv - 0.5;
+    39→      float r2 = dot(d, d);
+    40→      vec2 off = d * r2 * uCA * 8.0;
+    41→      vec3 col;
+    42→      col.r = texture2D(tDiffuse, uv + off).r;
+    43→      col.g = texture2D(tDiffuse, uv).g;
+    44→      col.b = texture2D(tDiffuse, uv - off).b;
+    45→      float l = dot(col, vec3(0.299, 0.587, 0.114));
+    46→      col = mix(vec3(l), col, uSat);
+    47→      col = (col - 0.5) * uCon + 0.5;
+    48→      col *= 1.0 - uVignette * smoothstep(0.12, 0.72, r2);
+    49→      col += (hash(uv * vec2(1287.0, 731.0) + fract(uTime) * 43.7) - 0.5) * uGrain;
+    50→      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    51→    }`,
+    52→};
+    53→
+    54→/* ============================================================
+    55→   GAME: orquestador principal (render, input, cámara, combate, fases)
+    56→   ============================================================ */
+    57→
+    58→interface DamageNumber {
+    59→  el: HTMLDivElement;
+    60→  worldPos: THREE.Vector3;
+    61→  life: number;
+    62→  vy: number;
+    63→  active: boolean;
+    64→}
+    65→
+    66→const ROAMER_TARGET = 8;
+    67→
+    68→export class Game {
+    69→  private renderer: THREE.WebGLRenderer;
+    70→  private scene = new THREE.Scene();
+    71→  private camera: THREE.PerspectiveCamera;
+    72→  private composer: EffectComposer;
+    73→  private container: HTMLElement;
+    74→  private refs: GameRefs;
+    75→  private raf = 0;
+    76→  private lastT = 0;
+    77→  private running = false;
+    78→
+    79→  // sistemas
+    80→  audio = new AudioEngine();
+    81→  world: World;
+    82→  particles: Particles;
+    83→  player: Player;
+    84→  private trail: SwordTrail;
+    85→  enemies: Enemy[] = [];
+    86→  private projectiles: Projectile[] = [];
+    87→  private pickups: Pickup[] = [];
+    88→
+    89→  // input
+    90→  private keys = new Set<string>();
+    91→  private queued = { attack: false, heavy: false, roll: false, potion: false };
+    92→  private inputState: InputState;
+    93→  private mouseDX = 0; private mouseDY = 0;
+    94→  private locked = false;
+    95→
+    96→  // cámara
+    97→  private camYaw = 0; private camPitch = 0.34;
+    98→  private camDist = 6.4;
+    99→  private camPos = new THREE.Vector3();
+   100→  private shakeAmt = 0;
+   101→  private hitStopT = 0;
+   102→  private timeScale = 1;
+   103→  private slowmoT = 0;
+   104→  private baseFov = 55;
+   105→
+   106→  // estado de juego
+   107→  phase: GamePhase = 'playing';
+   108→  private shrinesCleansed = 0;
+   109→  private boss: Enemy | null = null;
+   110→  bossActive = false;
+   111→  private bossDefeated = false;
+   112→  private endless = false;
+   113→  private awakenTimer = -1;
+   114→  private roamerTimer = 3;
+   115→  private elapsed = 0;
+   116→  private hurtFlash = 0;
+   117→  private fps = 60;
+   118→  private hudTimer = 0;
+   119→  private minimapTimer = 0;
+   120→  private lockEnemy: Enemy | null = null;
+   121→  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil'; idx?: number } | null = null;
+   122→  private victoryDelay = -1;
+   123→
+   124→  // números de daño (DOM pool)
+   125→  private dmgPool: DamageNumber[] = [];
+   126→  private dmgLayer: HTMLDivElement;
+   127→
+   128→  private onHud: (s: HudState) => void;
+   129→  private ctx: GameCtx;
+   130→
+   131→  // calidad y menú cinemático
+   132→  quality: QualityTier = 'alto';
+   133→  private gtao: GTAOPass | null = null;
+   134→  private grade: ShaderPass | null = null;
+   135→  private menuT = 0;
+   136→  private qualityTimer = 2.5;
+   137→  private started = false;
+   138→
+   139→  constructor(refs: GameRefs, onHud: (s: HudState) => void) {
+   140→    this.refs = refs;
+   141→    this.container = refs.container;
+   142→    this.onHud = onHud;
+   143→
+   144→    // renderer
+   145→    this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+   146→    this.renderer.setPixelRatio(this.pixelRatioFor('alto'));
+   147→    this.renderer.setSize(window.innerWidth, window.innerHeight);
+   148→    this.renderer.shadowMap.enabled = true;
+   149→    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+   150→    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+   151→    this.renderer.toneMappingExposure = 1.14;
+   152→    this.renderer.domElement.style.display = 'block';
+   153→    this.container.appendChild(this.renderer.domElement);
+   154→
+   155→    // escena
+   156→    this.scene.fog = new THREE.FogExp2(0x0d1322, 0.0105);
+   157→    this.camera = new THREE.PerspectiveCamera(this.baseFov, window.innerWidth / window.innerHeight, 0.1, 500);
+   158→
+   159→    // mundo y sistemas
+   160→    this.world = new World(this.scene, this.renderer);
+   161→    this.particles = new Particles(this.scene);
+   162→    this.player = new Player();
+   163→    this.scene.add(this.player.root);
+   164→    this.trail = new SwordTrail(this.scene);
+   165→
+   166→    // jugador frente a la hoguera
+   167→    const bx = WORLD.bonfire.x, bz = WORLD.bonfire.z + 3.4;
+   168→    this.player.pos.set(bx, terrainHeight(bx, bz), bz);
+   169→    this.player.yaw = Math.atan2(WORLD.bonfire.x - bx, WORLD.bonfire.z - bz) + Math.PI;
+   170→    this.camYaw = this.player.yaw + Math.PI;
+   171→
+   172→    // post-procesado: MSAA + GTAO + bloom + tono + grading
+   173→    const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+   174→      type: THREE.HalfFloatType,
+   175→      samples: 4,
+   176→    });
+   177→    this.composer = new EffectComposer(this.renderer, rt);
+   178→    this.composer.addPass(new RenderPass(this.scene, this.camera));
+   179→    try {
+   180→      const gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
+   181→      if (typeof gtao.updateGtaoMaterial === 'function') {
+   182→        gtao.updateGtaoMaterial({
+   183→          radius: 0.45, distanceExponent: 1.2, thickness: 1.4,
+   184→          scale: 1.3, samples: 12, screenSpaceRadius: false,
+   185→          distanceFallOff: 1,
+   186→        });
+   187→      }
+   188→      gtao.output = GTAOPass.OUTPUT.Default;
+   189→      this.composer.addPass(gtao);
+   190→      this.gtao = gtao;
+   191→    } catch { this.gtao = null; }
+   192→    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.85, 0.75);
+   193→    this.composer.addPass(bloom);
+   194→    this.composer.addPass(new OutputPass());
+   195→    this.grade = new ShaderPass(GradeShader);
+   196→    this.composer.addPass(this.grade);
+   197→
+   198→    // capa de números de daño
+   199→    this.dmgLayer = document.createElement('div');
+   200→    this.dmgLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:5;';
+   201→    this.container.appendChild(this.dmgLayer);
+   202→
+   203→    this.inputState = {
+   204→      fwd: false, back: false, left: false, right: false, sprint: false,
+   205→      consumeAttack: () => { const v = this.queued.attack; this.queued.attack = false; return v; },
+   206→      consumeHeavy: () => { const v = this.queued.heavy; this.queued.heavy = false; return v; },
+   207→      consumeRoll: () => { const v = this.queued.roll; this.queued.roll = false; return v; },
+   208→      consumePotion: () => { const v = this.queued.potion; this.queued.potion = false; return v; },
+   209→    };
+   210→
+   211→    // contexto para entidades
+   212→    this.ctx = {
+   213→      scene: this.scene,
+   214→      particles: this.particles,
+   215→      audio: this.audio,
+   216→      world: this.world,
+   217→      player: this.player,
+   218→      enemies: this.enemies,
+   219→      camera: this.camera,
+   220→      input: this.inputState,
+   221→      camYaw: 0,
+   222→      addDamageNumber: (pos, text, color, big) => this.addDamageNumber(pos, text, color, big),
+   223→      shake: (a) => { this.shakeAmt = Math.min(1.2, this.shakeAmt + a); },
+   224→      hitStop: (d) => { this.hitStopT = Math.max(this.hitStopT, d); },
+   225→      spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
+   226→      onEnemyDied: (e) => this.handleEnemyDied(e),
+   227→      playerHurt: () => { this.hurtFlash = 1; },
+   228→    };
+   229→
+   230→    this.phase = 'menu';
+   231→
+   232→    this.bindEvents();
+   233→    this.emitHud();
+   234→  }
+   235→
+   236→  /* ---------- Calidad ---------- */
+   237→
+   238→  private pixelRatioFor(q: QualityTier): number {
+   239→    if (q === 'bajo') return 0.85;
+   240→    if (q === 'medio') return 1.2;
+   241→    return Math.min(window.devicePixelRatio, 1.75);
+   242→  }
+   243→
+   244→  setQuality(q: QualityTier) {
+   245→    this.quality = q;
+   246→    const pr = this.pixelRatioFor(q);
+   247→    this.renderer.setPixelRatio(pr);
+   248→    this.composer.setPixelRatio(pr);
+   249→    this.composer.setSize(window.innerWidth, window.innerHeight);
+   250→    if (this.gtao) this.gtao.enabled = q !== 'bajo';
+   251→    this.emitHud();
+   252→  }
+   253→
+   254→  private autoQuality(dt: number) {
+   255→    this.qualityTimer -= dt;
+   256→    if (this.qualityTimer > 0) return;
+   257→    this.qualityTimer = 2.5;
+   258→    if (this.fps < 42) {
+   259→      if (this.quality === 'alto') this.setQuality('medio');
+   260→      else if (this.quality === 'medio') this.setQuality('bajo');
+   261→    }
+   262→  }
+   263→
+   264→  /* ---------- Inicio de aventura (desde el menú) ---------- */
+   265→
+   266→  beginAdventure() {
+   267→    if (this.started) return;
+   268→    this.started = true;
+   269→    this.spawnGuardians();
+   270→    for (let i = 0; i < 6; i++) this.spawnRoamer(true);
+   271→    this.audio.unlock();
+   272→    this.audio.startMusic();
+   273→    this.setPhase('playing');
+   274→    this.requestLock();
+   275→  }
+   276→
+   277→  /* ---------- Spawns ---------- */
+   278→
+   279→  private scaling() {
+   280→    const lv = this.player.level;
+   281→    const eMul = this.endless ? 1.35 : 1;
+   282→    return {
+   283→      hp: (1 + 0.08 * (lv - 1)) * eMul,
+   284→      dmg: (1 + 0.05 * (lv - 1)) * eMul,
+   285→    };
+   286→  }
+   287→
+   288→  private spawnEnemy(type: EnemyType, x: number, z: number, guardianOf = -1): Enemy {
+   289→    const s = this.scaling();
+   290→    const e = new Enemy(type, new THREE.Vector3(x, 0, z), guardianOf, s.hp, s.dmg);
+   291→    this.enemies.push(e);
+   292→    this.scene.add(e.root);
+   293→    return e;
+   294→  }
+   295→
+   296→  private spawnGuardians() {
+   297→    const compositions: EnemyType[][] = [
+   298→      ['goblin', 'goblin', 'goblin', 'archer'],
+   299→      ['goblin', 'goblin', 'archer', 'archer'],
+   300→      ['orc', 'goblin', 'goblin', 'archer'],
+   301→    ];
+   302→    compositions.forEach((comp, idx) => {
+   303→      const s = WORLD.shrines[idx];
+   304→      comp.forEach((type, i) => {
+   305→        const a = (i / comp.length) * Math.PI * 2 + rand(0, 1);
+   306→        const r = rand(4.5, 7.5);
+   307→        this.spawnEnemy(type, s.x + Math.cos(a) * r, s.z + Math.sin(a) * r, idx);
+   308→      });
+   309→    });
+   310→  }
+   311→
+   312→  private spawnRoamer(initial = false) {
+   313→    if (this.enemies.filter(e => e.alive && e.guardianOf === -1 && !e.isBoss).length >= ROAMER_TARGET + 4) return;
+   314→    for (let tries = 0; tries < 20; tries++) {
+   315→      const a = rand(0, Math.PI * 2);
+   316→      const r = rand(24, WORLD.radius - 12);
+   317→      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+   318→      const dPlayer = Math.hypot(x - this.player.pos.x, z - this.player.pos.z);
+   319→      const dBonfire = Math.hypot(x - WORLD.bonfire.x, z - WORLD.bonfire.z);
+   320→      const nearShrine = WORLD.shrines.some((s, i) => !this.world.shrines[i].cleansed && Math.hypot(x - s.x, z - s.z) < 16);
+   321→      if (dPlayer > (initial ? 20 : 26) && dBonfire > 16 && !nearShrine) {
+   322→        // tipos según nivel
+   323→        const roll = Math.random();
+   324→        let type: EnemyType = 'goblin';
+   325→        if (roll > 0.82 - Math.min(0.15, this.player.level * 0.01)) type = 'orc';
+   326→        else if (roll > 0.5) type = 'archer';
+   327→        this.spawnEnemy(type, x, z);
+   328→        return;
+   329→      }
+   330→    }
+   331→  }
+   332→
+   333→  private spawnBoss(mul = 1) {
+   334→    if (this.boss && this.boss.alive) return;
+   335→    const s = this.scaling();
+   336→    const A = WORLD.arena;
+   337→    const e = this.spawnEnemy('boss', A.x, A.z - 6);
+   338→    e.maxHp = Math.round(e.maxHp * mul); e.hp = e.maxHp;
+   339→    void s;
+   340→    this.boss = e;
+   341→    this.bossActive = true;
+   342→    this.awakenTimer = -1;
+   343→    this.audio.bossRoar();
+   344→    this.audio.setIntensity(1);
+   345→    this.ctx.shake(1);
+   346→    // pilar de luz rojo dramático
+   347→    for (let i = 0; i < 60; i++) {
+   348→      setTimeout(() => {
+   349→        if (!this.running) return;
+   350→        this.particles.spawn({
+   351→          x: e.pos.x + rand(-1.5, 1.5), y: e.pos.y + rand(0, 1), z: e.pos.z + rand(-1.5, 1.5),
+   352→          vy: rand(8, 16), color: 0xff2211, size: rand(0.3, 0.6), life: 1.4, drag: 0.4, glow: 2.6, gravity: -2,
+   353→        });
+   354→      }, i * 22);
+   355→    }
+   356→    this.emitHud();
+   357→  }
+   358→
+   359→  /* ---------- Muertes y recompensas ---------- */
+   360→
+   361→  private handleEnemyDied(e: Enemy) {
+   362→    this.player.kills++;
+   363→    const cfg = ENEMY_CFG[e.type];
+   364→    const gold = randInt(cfg.gold[0], cfg.gold[1]);
+   365→    this.player.gold += gold;
+   366→    this.player.gainXp(cfg.xp, this.ctx);
+   367→    // orbes de alma
+   368→    for (let i = 0; i < 10; i++) {
+   369→      this.particles.spawn({
+   370→        x: e.pos.x + rand(-0.6, 0.6), y: e.pos.y + 0.6, z: e.pos.z + rand(-0.6, 0.6),
+   371→        color: 0x6ae8ff, size: 0.26, life: 2.2, glow: 2.2, shrink: false,
+   372→        seek: { getPos: () => this.player.pos, speed: 6 },
+   373→      });
+   374→    }
+   375→    // drop de poción
+   376→    if (Math.random() < cfg.potionChance) {
+   377→      this.pickups.push(new Pickup(e.pos.clone(), 'potion'));
+   378→      this.scene.add(this.pickups[this.pickups.length - 1].root);
+   379→    }
+   380→    // guardianes → santuario purificable
+   381→    if (e.guardianOf >= 0) {
+   382→      const alive = this.enemies.filter(o => o.guardianOf === e.guardianOf && o.alive && o !== e).length;
+   383→      if (alive === 0) {
+   384→        // todos los guardias muertos
+   385→        void e.guardianOf;
+   386→      }
+   387→    }
+   388→    if (e.isBoss) {
+   389→      this.bossActive = false;
+   390→      this.bossDefeated = true;
+   391→      this.endless = true;
+   392→      this.world.activateSigil();
+   393→      this.world.sigilReady();
+   394→      this.slowmoT = 2.2;
+   395→      this.timeScale = 0.3;
+   396→      this.victoryDelay = 2.0;
+   397→      this.audio.setIntensity(0.2);
+   398→      this.audio.cleanse();
+   399→      this.ctx.shake(1);
+   400→      this.particles.burst({
+   401→        x: e.pos.x, y: e.pos.y + 2, z: e.pos.z,
+   402→        count: 90, speed: 10, color: 0xffc84a, size: 0.5, life: 2, gravity: -1, drag: 0.8, glow: 2.6,
+   403→      });
+   404→    }
+   405→  }
+   406→
+   407→  /* ---------- Interacción ---------- */
+   408→
+   409→  private updateInteract() {
+   410→    this.interactTarget = null;
+   411→    const p = this.player.pos;
+   412→    const dB = Math.hypot(p.x - WORLD.bonfire.x, p.z - WORLD.bonfire.z);
+   413→    if (dB < 3.4) {
+   414→      this.interactTarget = { kind: 'bonfire' };
+   415→      return;
+   416→    }
+   417→    for (const sh of this.world.shrines) {
+   418→      if (sh.cleansed) continue;
+   419→      const guardians = this.enemies.filter(e => e.guardianOf === sh.idx && e.alive);
+   420→      const d = Math.hypot(p.x - sh.pos.x, p.z - sh.pos.z);
+   421→      if (d < 5 && guardians.length === 0) {
+   422→        this.interactTarget = { kind: 'shrine', idx: sh.idx };
+   423→        return;
+   424→      }
+   425→    }
+   426→    if (this.world.sigil && this.world.sigil.group.visible && this.bossDefeated) {
+   427→      const A = WORLD.arena;
+   428→      const d = Math.hypot(p.x - A.x, p.z - A.z);
+   429→      if (d < 4.5) this.interactTarget = { kind: 'sigil' };
+   430→    }
+   431→  }
+   432→
+   433→  private doInteract() {
+   434→    const t = this.interactTarget;
+   435→    if (!t) return;
+   436→    if (t.kind === 'bonfire') {
+   437→      const p = this.player;
+   438→      p.hp = p.maxHp; p.stamina = p.maxStamina; p.potions = p.maxPotions;
+   439→      this.audio.bonfireRest();
+   440→      this.particles.burst({
+   441→        x: p.pos.x, y: p.pos.y + 0.6, z: p.pos.z,
+   442→        count: 26, speed: 2.6, color: 0xffb347, size: 0.3, life: 1.1, gravity: -1.5, drag: 1.5, glow: 2,
+   443→      });
+   444→      this.addDamageNumber(new THREE.Vector3(p.pos.x, p.pos.y + 2.3, p.pos.z), 'REPOSO', '#ffb347');
+   445→    } else if (t.kind === 'shrine' && t.idx !== undefined) {
+   446→      const sh = this.world.shrines[t.idx];
+   447→      this.world.cleanseShrine(t.idx);
+   448→      this.shrinesCleansed++;
+   449→      this.audio.cleanse();
+   450→      this.player.gainXp(60, this.ctx);
+   451→      this.player.gold += 40;
+   452→      this.particles.burst({
+   453→        x: sh.pos.x, y: sh.pos.y + 4, z: sh.pos.z,
+   454→        count: 70, speed: 7, color: 0x37d8c8, size: 0.42, life: 1.8, gravity: -0.5, drag: 0.9, glow: 2.4,
+   455→      });
+   456→      this.ctx.shake(0.5);
+   457→      if (this.shrinesCleansed >= 3 && !this.bossDefeated && !this.bossActive) {
+   458→        this.awakenTimer = 2.5;
+   459→      }
+   460→      this.emitHud();
+   461→    } else if (t.kind === 'sigil') {
+   462→      this.world.sigilReady();
+   463→      this.spawnBoss(1.35 ** this.bossKills());
+   464→      this.addDamageNumber(new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.3, this.player.pos.z), 'EL JEFE DESPIERTA DE NUEVO', '#ff5a4e', true);
+   465→    }
+   466→  }
+   467→
+   468→  private bossKills(): number {
+   469→    return this.endless ? Math.max(1, Math.floor((this.player.level - 3) / 2)) : 1;
+   470→  }
+   471→
+   472→  /* ---------- Lock-on ---------- */
+   473→
+   474→  private toggleLockOn() {
+   475→    if (this.lockEnemy) { this.lockEnemy = null; this.player.lockTarget = null; return; }
+   476→    let best: Enemy | null = null, bestD = 34;
+   477→    for (const e of this.enemies) {
+   478→      if (!e.alive || e.state === 'spawn') continue;
+   479→      const d = e.pos.distanceTo(this.player.pos);
+   480→      if (d < bestD) { bestD = d; best = e; }
+   481→    }
+   482→    this.lockEnemy = best;
+   483→    this.player.lockTarget = best;
+   484→  }
+   485→
+   486→  /* ---------- Bucle principal ---------- */
+   487→
+   488→  start() {
+   489→    if (this.running) return;
+   490→    this.running = true;
+   491→    this.lastT = performance.now();
+   492→    this.loop(this.lastT);
+   493→  }
+   494→
+   495→  private loop = (t: number) => {
+   496→    if (!this.running) return;
+   497→    this.raf = requestAnimationFrame(this.loop);
+   498→    const dt = Math.min(0.05, (t - this.lastT) / 1000);
+   499→    this.lastT = t;
+   500→    this.fps = this.fps * 0.95 + (1 / Math.max(0.0001, dt)) * 0.05;
+   501→
+   502→    if (this.phase === 'menu') {
+   503→      this.menuT += dt;
+   504→      this.updateMenuScene(dt);
+   505→      this.composer.render();
+   506→      this.hudTimer -= dt;
+   507→      if (this.hudTimer <= 0) { this.hudTimer = 0.3; this.emitHud(); }
+   508→      return;
+   509→    }
+   510→
+   511→    if (this.phase === 'playing') {
+   512→      this.autoQuality(dt);
+   513→      // hit-stop y cámara lenta
+   514→      if (this.hitStopT > 0) {
+   515→        this.hitStopT -= dt;
+   516→        this.updateWorld(dt * 0.06);
+   517→      } else if (this.slowmoT > 0) {
+   518→        this.slowmoT -= dt;
+   519→        if (this.slowmoT <= 0) this.timeScale = 1;
+   520→        this.updateWorld(dt * this.timeScale);
+   521→      } else {
+   522→        this.updateWorld(dt);
+   523→      }
+   524→    } else if (this.phase === 'dead' || this.phase === 'victory') {
+   525→      // el mundo sigue con animaciones reducidas
+   526→      this.updateWorld(dt * 0.25, true);
+   527→    }
+   528→
+   529→    this.updateCamera(dt);
+   530→    this.updateEffects(dt);
+   531→    this.composer.render();
+   532→
+   533→    this.hudTimer -= dt;
+   534→    if (this.hudTimer <= 0) { this.hudTimer = 0.08; this.emitHud(); this.drawMinimap(); }
+   535→  };
+   536→
+   537→  /* ---------- Escena cinemática del menú ---------- */
+   538→
+   539→  private updateMenuScene(dt: number) {
+   540→    this.world.update(dt, this.camera, (x, y, z) => {
+   541→      this.particles.spawn({
+   542→        x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
+   543→        color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
+   544→      });
+   545→    });
+   546→    this.particles.update(dt, this.camera.position);
+   547→    // héroe contemplando la hoguera
+   548→    this.player.applier.apply(idlePose(this.menuT), dt, 6);
+   549→    this.player.root.position.copy(this.player.pos);
+   550→    this.player.root.rotation.y = this.player.yaw;
+   551→    if (this.grade) this.grade.uniforms.uTime.value = this.menuT;
+   552→
+   553→    // órbita lenta alrededor de la hoguera
+   554→    const a = this.menuT * 0.055 + 2.2;
+   555→    const r = 9.6 + Math.sin(this.menuT * 0.1) * 1.4;
+   556→    const bx = WORLD.bonfire.x, bz = WORLD.bonfire.z;
+   557→    const by = terrainHeight(bx, bz);
+   558→    const desired = new THREE.Vector3(
+   559→      bx + Math.cos(a) * r,
+   560→      by + 4.3 + Math.sin(this.menuT * 0.13) * 0.8,
+   561→      bz + Math.sin(a) * r,
+   562→    );
+   563→    const groundH = terrainHeight(desired.x, desired.z) + 0.5;
+   564→    if (desired.y < groundH) desired.y = groundH;
+   565→    this.camPos.lerp(desired, 1 - Math.exp(-2.2 * dt));
+   566→    this.camera.position.copy(this.camPos);
+   567→    this.camera.lookAt(bx, by + 1.9, bz);
+   568→    if (Math.abs(this.camera.fov - 52) > 0.05) {
+   569→      this.camera.fov = damp(this.camera.fov, 52, 3, dt);
+   570→      this.camera.updateProjectionMatrix();
+   571→    }
+   572→  }
+   573→
+   574→  private updateWorld(dt: number, frozen = false) {
+   575→    this.elapsed += frozen ? 0 : dt;
+   576→
+   577→    // input → estado
+   578→    const k = this.keys;
+   579→    this.inputState.fwd = k.has('KeyW') || k.has('ArrowUp');
+   580→    this.inputState.back = k.has('KeyS') || k.has('ArrowDown');
+   581→    this.inputState.left = k.has('KeyA') || k.has('ArrowLeft');
+   582→    this.inputState.right = k.has('KeyD') || k.has('ArrowRight');
+   583→    this.inputState.sprint = k.has('ShiftLeft') || k.has('ShiftRight');
+   584→
+   585→    // jugador
+   586→    this.ctx.input = frozen ? this.frozenInput : this.inputState;
+   587→    this.ctx.camYaw = this.camYaw;
+   588→    this.player.update(dt, this.ctx);
+   589→    this.world.resolve(this.player.pos, this.player.radius);
+   590→    this.worldClamp(this.player.pos, this.player.radius);
+   591→
+   592→    // resolver golpe pendiente del jugador
+   593→    if (this.player.pendingStrike) {
+   594→      this.resolvePlayerStrike(this.player.pendingStrike);
+   595→      this.player.pendingStrike = null;
+   596→    }
+   597→
+   598→    // lock-on: limpiar si muere o se aleja
+   599→    if (this.lockEnemy && (!this.lockEnemy.alive || this.lockEnemy.pos.distanceTo(this.player.pos) > 38)) {
+   600→      this.lockEnemy = null;
+   601→      this.player.lockTarget = null;
+   602→    }
+   603→
+   604→    // enemigos
+   605→    for (const e of this.enemies) {
+   606→      if (e.removable) continue;
+   607→      e.update(dt, this.ctx);
+   608→      if (e.alive) {
+   609→        this.world.resolve(e.pos, e.radius);
+   610→        this.worldClamp(e.pos, e.radius);
+   611→      }
+   612→    }
+   613→    // separación entre enemigos
+   614→    const live = this.enemies.filter(e => e.alive && e.state !== 'spawn');
+   615→    for (let i = 0; i < live.length; i++) {
+   616→      for (let j = i + 1; j < live.length; j++) {
+   617→        const a = live[i], b = live[j];
+   618→        const dx = b.pos.x - a.pos.x, dz = b.pos.z - a.pos.z;
+   619→        const minD = a.radius + b.radius;
+   620→        const d2 = dx * dx + dz * dz;
+   621→        if (d2 < minD * minD && d2 > 1e-5) {
+   622→          const d = Math.sqrt(d2);
+   623→          const push = (minD - d) / d * 0.5;
+   624→          a.pos.x -= dx * push; a.pos.z -= dz * push;
+   625→          b.pos.x += dx * push; b.pos.z += dz * push;
+   626→        }
+   627→      }
+   628→      // el jugador empuja y es empujado ligeramente
+   629→      const p = this.player;
+   630→      const dx = p.pos.x - live[i].pos.x, dz = p.pos.z - live[i].pos.z;
+   631→      const minD = live[i].radius + p.radius;
+   632→      const d2 = dx * dx + dz * dz;
+   633→      if (d2 < minD * minD && d2 > 1e-5) {
+   634→        const d = Math.sqrt(d2);
+   635→        const push = (minD - d) / d * 0.6;
+   636→        live[i].pos.x -= dx * push; live[i].pos.z -= dz * push;
+   637→        p.pos.x += dx * push * 0.3; p.pos.z += dz * push * 0.3;
+   638→      }
+   639→    }
+   640→    // limpiar cadáveres
+   641→    if (this.enemies.some(e => e.removable)) {
+   642→      for (const e of this.enemies) {
+   643→        if (e.removable) { this.scene.remove(e.root); }
+   644→      }
+   645→      this.enemies = this.enemies.filter(e => !e.removable);
+   646→    }
+   647→
+   648→    // proyectiles y drops
+   649→    for (const pr of this.projectiles) pr.update(dt, this.ctx);
+   650→    this.projectiles = this.projectiles.filter(pr => {
+   651→      if (pr.dead) { this.scene.remove(pr.root); return false; }
+   652→      return true;
+   653→    });
+   654→    for (const pk of this.pickups) {
+   655→      pk.update(dt, this.ctx);
+   656→      this.world.resolve(pk.pos, 0.3);
+   657→    }
+   658→    this.pickups = this.pickups.filter(pk => {
+   659→      if (pk.dead) { this.scene.remove(pk.root); return false; }
+   660→      return true;
+   661→    });
+   662→
+   663→    // mundo visual
+   664→    this.world.update(dt, this.camera, (x, y, z) => {
+   665→      this.particles.spawn({
+   666→        x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
+   667→        color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
+   668→      });
+   669→    });
+   670→
+   671→    if (frozen) return;
+   672→
+   673→    // estela de espada
+   674→    if (this.player.state === 'attack') {
+   675→      const b = new THREE.Vector3(), ti = new THREE.Vector3();
+   676→      this.player.swordPoints(b, ti);
+   677→      this.trail.emit(b, ti);
+   678→    }
+   679→    this.trail.update(dt, this.player.state === 'attack');
+   680→
+   681→    // despawn/respawn de errantes
+   682→    this.roamerTimer -= dt;
+   683→    if (this.roamerTimer <= 0) {
+   684→      this.roamerTimer = rand(3.5, 6);
+   685→      const aliveRoamers = this.enemies.filter(e => e.alive && e.guardianOf === -1 && !e.isBoss).length;
+   686→      if (aliveRoamers < ROAMER_TARGET) this.spawnRoamer();
+   687→    }
+   688→
+   689→    // despertar del jefe
+   690→    if (this.awakenTimer > 0) {
+   691→      this.awakenTimer -= dt;
+   692→      if (this.awakenTimer <= 0) this.spawnBoss();
+   693→    }
+   694→    // reaparición del jefe tras morir el jugador en plena lucha
+   695→    if (this.bossRespawnT > 0) {
+   696→      this.bossRespawnT -= dt;
+   697→      if (this.bossRespawnT <= 0 && this.shrinesCleansed >= 3) this.spawnBoss();
+   698→    }
+   699→
+   700→    // interacción
+   701→    this.updateInteract();
+   702→
+   703→    // música: intensidad
+   704→    if (this.elapsed % 1 < dt) {
+   705→      let intensity = 0.12;
+   706→      if (this.bossActive) intensity = 1;
+   707→      else {
+   708→        const near = this.enemies.some(e => e.alive && e.aggroed && e.pos.distanceTo(this.player.pos) < 30);
+   709→        intensity = near ? 0.75 : 0.12;
+   710→      }
+   711→      this.audio.setIntensity(intensity);
+   712→    }
+   713→
+   714→    // victoria
+   715→    if (this.victoryDelay > 0) {
+   716→      this.victoryDelay -= dt;
+   717→      if (this.victoryDelay <= 0) {
+   718→        this.setPhase('victory');
+   719→      }
+   720→    }
+   721→  }
+   722→
+   723→  private bossRespawnT = -1;
+   724→  private frozenInput: InputState = {
+   725→    fwd: false, back: false, left: false, right: false, sprint: false,
+   726→    consumeAttack: () => false, consumeHeavy: () => false,
+   727→    consumeRoll: () => false, consumePotion: () => false,
+   728→  };
+   729→
+   730→  private resolvePlayerStrike(def: AttackDef) {
+   731→    const p = this.player;
+   732→    const heavy = def === PLAYER_HEAVY;
+   733→    let hitAny = false;
+   734→    for (const e of this.enemies) {
+   735→      if (!e.alive || e.state === 'spawn') continue;
+   736→      const to = new THREE.Vector3().subVectors(e.pos, p.pos).setY(0);
+   737→      const d = to.length() - e.radius;
+   738→      if (d > def.range) continue;
+   739→      const ang = Math.atan2(to.x, to.z);
+   740→      let diff = Math.abs(((ang - p.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+   741→      if (diff <= def.arc / 2) {
+   742→        const dmg = def.dmg * p.dmgMul;
+   743→        e.takeDamage(dmg, p.pos, this.ctx, heavy);
+   744→        hitAny = true;
+   745→        this.particles.burst({
+   746→          x: e.pos.x - to.x * 0.3, y: e.pos.y + e.rig.height * 0.55, z: e.pos.z - to.z * 0.3,
+   747→          count: heavy ? 14 : 8, speed: 5, color: 0xffd9a0, size: 0.2, life: 0.35, drag: 2, glow: 2.4, gravity: 4,
+   748→        });
+   749→      }
+   750→    }
+   751→    if (hitAny) {
+   752→      this.hitStopT = Math.max(this.hitStopT, heavy ? 0.11 : 0.07);
+   753→      this.shakeAmt = Math.min(1.2, this.shakeAmt + (heavy ? 0.4 : 0.16));
+   754→      if (heavy) this.audio.heavyHit();
+   755→      else this.audio.hitMetal();
+   756→    }
+   757→  }
+   758→
+   759→  private worldClamp(pos: THREE.Vector3, radius: number) {
+   760→    const r = Math.hypot(pos.x, pos.z);
+   761→    const max = WORLD.radius - 2 - radius;
+   762→    if (r > max) {
+   763→      pos.x *= max / r;
+   764→      pos.z *= max / r;
+   765→    }
+   766→  }
+   767→
+   768→  /* ---------- Cámara ---------- */
+   769→
+   770→  private updateCamera(dt: number) {
+   771→    // ratón → rotación
+   772→    if (this.locked && this.phase === 'playing') {
+   773→      this.camYaw -= this.mouseDX * 0.0023;
+   774→      this.camPitch += this.mouseDY * 0.0018;
+   775→      this.camPitch = clamp(this.camPitch, -0.25, 1.15);
+   776→    }
+   777→    this.mouseDX = 0; this.mouseDY = 0;
+   778→
+   779→    const target = this.player.pos;
+   780→    const head = new THREE.Vector3(target.x, target.y + 1.55, target.z);
+   781→
+   782→    if (this.lockEnemy && this.lockEnemy.alive) {
+   783→      // cámara de objetivo fijado
+   784→      const desired = Math.atan2(target.x - this.lockEnemy.pos.x, target.z - this.lockEnemy.pos.z);
+   785→      this.camYaw = dampAngle(this.camYaw, desired, 3.2, dt);
+   786→      this.camPitch = damp(this.camPitch, 0.3, 3, dt);
+   787→    }
+   788→
+   789→    const dist = this.camDist;
+   790→    const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
+   791→    const off = new THREE.Vector3(Math.sin(this.camYaw) * cp, sp, Math.cos(this.camYaw) * cp);
+   792→    const desiredPos = head.clone().addScaledVector(off, dist);
+   793→    // hombro
+   794→    const right = new THREE.Vector3(-Math.cos(this.camYaw), 0, Math.sin(this.camYaw));
+   795→    desiredPos.addScaledVector(right, 0.55);
+   796→    // colisión con terreno
+   797→    const groundH = terrainHeight(desiredPos.x, desiredPos.z) + 0.5;
+   798→    if (desiredPos.y < groundH) desiredPos.y = groundH;
+   799→
+   800→    this.camPos.lerp(desiredPos, 1 - Math.exp(-(this.lockEnemy ? 9 : 12) * dt));
+   801→
+   802→    // sacudida
+   803→    const sh = this.shakeAmt;
+   804→    this.camera.position.copy(this.camPos);
+   805→    if (sh > 0.001) {
+   806→      this.camera.position.x += rand(-1, 1) * sh * 0.18;
+   807→      this.camera.position.y += rand(-1, 1) * sh * 0.18;
+   808→      this.camera.position.z += rand(-1, 1) * sh * 0.18;
+   809→      this.shakeAmt = Math.max(0, sh - dt * 2.4);
+   810→    }
+   811→    const lookAt = head.clone();
+   812→    if (this.lockEnemy && this.lockEnemy.alive) {
+   813→      lookAt.lerp(new THREE.Vector3(this.lockEnemy.pos.x, this.lockEnemy.pos.y + 1.2, this.lockEnemy.pos.z), 0.22);
+   814→    }
+   815→    this.camera.lookAt(lookAt);
+   816→
+   817→    // FOV dinámico al esprintar
+   818→    const targetFov = this.baseFov + (this.player.sprinting ? 5 : 0);
+   819→    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+   820→      this.camera.fov = damp(this.camera.fov, targetFov, 6, dt);
+   821→      this.camera.updateProjectionMatrix();
+   822→    }
+   823→  }
+   824→
+   825→  private updateEffects(dt: number) {
+   826→    this.particles.update(dt, this.camera.position);
+   827→    // números de daño
+   828→    const w = window.innerWidth, h = window.innerHeight;
+   829→    const v = new THREE.Vector3();
+   830→    for (const d of this.dmgPool) {
+   831→      if (!d.active) continue;
+   832→      d.life -= dt;
+   833→      if (d.life <= 0) { d.active = false; d.el.style.display = 'none'; continue; }
+   834→      d.worldPos.y += d.vy * dt;
+   835→      d.vy = Math.max(0.2, d.vy - dt * 1.4);
+   836→      v.copy(d.worldPos).project(this.camera);
+   837→      if (v.z > 1) { d.el.style.display = 'none'; continue; }
+   838→      d.el.style.display = 'block';
+   839→      d.el.style.left = `${(v.x * 0.5 + 0.5) * w}px`;
+   840→      d.el.style.top = `${(-v.y * 0.5 + 0.5) * h}px`;
+   841→      d.el.style.opacity = `${Math.min(1, d.life * 2.5)}`;
+   842→    }
+   843→    // viñeta de daño + grano/tiempo del grading
+   844→    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 2.2);
+   845→    const lowHp = this.player.hp / this.player.maxHp < 0.3 && this.player.alive;
+   846→    const pulse = lowHp ? 0.22 + Math.sin(this.elapsed * 5) * 0.08 : 0;
+   847→    this.refs.vignette.style.opacity = `${Math.min(1, this.hurtFlash * 0.9 + pulse)}`;
+   848→    if (this.grade) this.grade.uniforms.uTime.value = this.elapsed;
+   849→  }
+   850→
+   851→  private addDamageNumber(pos: THREE.Vector3, text: string, color: string, big = false) {
+   852→    let d = this.dmgPool.find(x => !x.active);
+   853→    if (!d) {
+   854→      if (this.dmgPool.length >= 34) return;
+   855→      const el = document.createElement('div');
+   856→      el.style.cssText = `position:absolute;transform:translate(-50%,-50%);font-weight:800;pointer-events:none;
+   857→        text-shadow:0 0 6px rgba(0,0,0,0.9), 0 2px 2px rgba(0,0,0,0.8);font-family:Georgia,serif;`;
+   858→      this.dmgLayer.appendChild(el);
+   859→      d = { el, worldPos: new THREE.Vector3(), life: 0, vy: 1.6, active: false };
+   860→      this.dmgPool.push(d);
+   861→    }
+   862→    d.worldPos.copy(pos);
+   863→    d.worldPos.x += rand(-0.3, 0.3);
+   864→    d.life = big ? 1.6 : 0.9;
+   865→    d.vy = 1.7;
+   866→    d.active = true;
+   867→    d.el.textContent = text;
+   868→    d.el.style.color = color;
+   869→    d.el.style.fontSize = big ? '26px' : '17px';
+   870→    d.el.style.display = 'block';
+   871→  }
+   872→
+   873→  private drawMinimap() {
+   874→    const entities = this.enemies
+   875→      .filter(e => e.alive && e.state !== 'spawn')
+   876→      .map(e => ({ x: e.pos.x, z: e.pos.z, kind: e.type as 'goblin' | 'archer' | 'orc' | 'boss' }));
+   877→    drawMinimap(
+   878→      this.refs.minimap,
+   879→      this.player.pos,
+   880→      this.player.yaw,
+   881→      entities,
+   882→      this.world.shrines.map(s => ({ x: s.pos.x, z: s.pos.z, cleansed: s.cleansed })),
+   883→      this.bossActive,
+   884→      this.bossDefeated,
+   885→    );
+   886→  }
+   887→
+   888→  /* ---------- HUD ---------- */
+   889→
+   890→  private objective(): string {
+   891→    if (this.bossDefeated) return 'Modo infinito — el sigilo de la arena invoca al jefe de nuevo';
+   892→    if (this.bossActive) return `Derrota a ${ENEMY_NAMES.boss}`;
+   893→    if (this.shrinesCleansed >= 3) return 'El aire vibra… algo despierta en la arena del norte';
+   894→    return `Purifica los santuarios corruptos (${this.shrinesCleansed}/3)`;
+   895→  }
+   896→
+   897→  private emitHud() {
+   898→    const boss = this.boss;
+   899→    this.onHud({
+   900→      phase: this.phase,
+   901→      hp: this.player.hp, maxHp: this.player.maxHp,
+   902→      stamina: this.player.stamina, maxStamina: this.player.maxStamina,
+   903→      xp: this.player.xp, xpNext: this.player.xpNext, level: this.player.level,
+   904→      gold: this.player.gold, potions: this.player.potions, maxPotions: this.player.maxPotions,
+   905→      shrinesCleansed: this.shrinesCleansed, shrinesTotal: 3,
+   906→      objective: this.objective(),
+   907→      enemiesAlive: this.enemies.filter(e => e.alive).length,
+   908→      bossActive: this.bossActive && !!boss?.alive,
+   909→      bossName: ENEMY_NAMES.boss,
+   910→      bossHp: boss?.hp ?? 0, bossMaxHp: boss?.maxHp ?? 1, bossPhase: boss?.phase ?? 1,
+   911→      kills: this.player.kills, time: this.elapsed,
+   912→      lockOn: !!this.lockEnemy,
+   913→      prompt: this.promptText(),
+   914→      fps: Math.round(this.fps),
+   915→      endless: this.endless,
+   916→      quality: this.quality,
+   917→    });
+   918→  }
+   919→
+   920→  private promptText(): string {
+   921→    if (!this.interactTarget || this.player.state === 'dead') return '';
+   922→    switch (this.interactTarget.kind) {
+   923→      case 'bonfire': return 'E · Descansar en la hoguera (cura y reabastece)';
+   924→      case 'shrine': return `E · Purificar ${WORLD.shrines[this.interactTarget.idx!].name}`;
+   925→      case 'sigil': return 'E · Despertar al jefe de nuevo';
+   926→    }
+   927→  }
+   928→
+   929→  private setPhase(p: GamePhase) {
+   930→    this.phase = p;
+   931→    this.emitHud();
+   932→  }
+   933→
+   934→  /* ---------- API pública (React) ---------- */
+   935→
+   936→  pause() {
+   937→    if (this.phase !== 'playing') return;
+   938→    this.setPhase('paused');
+   939→    if (document.pointerLockElement) document.exitPointerLock();
+   940→  }
+   941→
+   942→  resume() {
+   943→    if (this.phase !== 'paused') return;
+   944→    this.setPhase('playing');
+   945→    this.requestLock();
+   946→  }
+   947→
+   948→  requestLock() {
+   949→    const c = this.renderer.domElement;
+   950→    if (document.pointerLockElement !== c) {
+   951→      c.requestPointerLock?.();
+   952→    }
+   953→  }
+   954→
+   955→  respawn() {
+   956→    // limpiar enemigos vivos, proyectiles y drops
+   957→    for (const e of this.enemies) this.scene.remove(e.root);
+   958→    this.enemies = [];
+   959→    this.boss = null;
+   960→    this.bossActive = false;
+   961→    this.lockEnemy = null;
+   962→    this.player.lockTarget = null;
+   963→    for (const pr of this.projectiles) this.scene.remove(pr.root);
+   964→    this.projectiles = [];
+   965→    for (const pk of this.pickups) this.scene.remove(pk.root);
+   966→    this.pickups = [];
+   967→    // guardianes frescos en santuarios sin purificar
+   968→    this.spawnGuardians();
+   969→    for (let i = 0; i < 4; i++) this.spawnRoamer(true);
+   970→    // jugador
+   971→    const p = this.player;
+   972→    p.hp = p.maxHp; p.stamina = p.maxStamina; p.potions = Math.max(p.potions, p.maxPotions);
+   973→    p.state = 'idle'; p.stateT = 0; p.iFrames = 2;
+   974→    p.knock.set(0, 0, 0);
+   975→    p.pos.set(WORLD.bonfire.x, 0, WORLD.bonfire.z + 3.4);
+   976→    p.pos.y = terrainHeight(p.pos.x, p.pos.z);
+   977→    p.yaw = Math.atan2(WORLD.bonfire.x - p.pos.x, WORLD.bonfire.z - p.pos.z) + Math.PI;
+   978→    this.camYaw = p.yaw + Math.PI;
+   979→    if (this.shrinesCleansed >= 3 && !this.bossDefeated) this.bossRespawnT = 6;
+   980→    this.setPhase('playing');
+   981→    this.requestLock();
+   982→  }
+   983→
+   984→  continueEndless() {
+   985→    this.setPhase('playing');
+   986→    this.requestLock();
+   987→  }
+   988→
+   989→  restart() {
+   990→    window.location.reload();
+   991→  }
+   992→
+   993→  toggleLockOnAction() { this.toggleLockOn(); }
+   994→  interactAction() { this.doInteract(); }
+   995→
+   996→  /* ---------- Eventos ---------- */
+   997→
+   998→  private bindEvents() {
+   999→    window.addEventListener('resize', this.onResize);
+  1000→    window.addEventListener('keydown', this.onKeyDown);
+  1001→    window.addEventListener('keyup', this.onKeyUp);
+  1002→    document.addEventListener('mousemove', this.onMouseMove);
+  1003→    document.addEventListener('pointerlockchange', this.onLockChange);
+  1004→    const c = this.renderer.domElement;
+  1005→    c.addEventListener('mousedown', this.onMouseDown);
+  1006→    c.addEventListener('contextmenu', this.onContextMenu);
+  1007→  }
+  1008→
+  1009→  private onResize = () => {
+  1010→    this.camera.aspect = window.innerWidth / window.innerHeight;
+  1011→    this.camera.updateProjectionMatrix();
+  1012→    this.renderer.setSize(window.innerWidth, window.innerHeight);
+  1013→    this.composer.setSize(window.innerWidth, window.innerHeight);
+  1014→  };
+  1015→
+  1016→  private onKeyDown = (e: KeyboardEvent) => {
+  1017→    if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
+  1018→    if (this.phase !== 'playing') return;
+  1019→    this.keys.add(e.code);
+  1020→    switch (e.code) {
+  1021→      case 'Tab': this.toggleLockOn(); break;
+  1022→      case 'Space': this.queued.roll = true; break;
+  1023→      case 'KeyF': this.queued.potion = true; break;
+  1024→      case 'KeyE': this.doInteract(); break;
+  1025→    }
+  1026→  };
+  1027→
+  1028→  private onKeyUp = (e: KeyboardEvent) => {
+  1029→    this.keys.delete(e.code);
+  1030→  };
+  1031→
+  1032→  private onMouseMove = (e: MouseEvent) => {
+  1033→    if (!this.locked) return;
+  1034→    this.mouseDX += e.movementX;
+  1035→    this.mouseDY += e.movementY;
+  1036→  };
+  1037→
+  1038→  private onMouseDown = (e: MouseEvent) => {
+  1039→    if (this.phase !== 'playing') return;
+  1040→    if (!this.locked) { this.requestLock(); return; }
+  1041→    if (e.button === 0) this.queued.attack = true;
+  1042→    if (e.button === 2) this.queued.heavy = true;
+  1043→  };
+  1044→
+  1045→  private onContextMenu = (e: Event) => { e.preventDefault(); };
+  1046→
+  1047→  private onLockChange = () => {
+  1048→    this.locked = document.pointerLockElement === this.renderer.domElement;
+  1049→    if (!this.locked && this.phase === 'playing') this.pause();
+  1050→  };
+  1051→
+  1052→  /* ---------- Limpieza ---------- */
+  1053→
+  1054→  dispose() {
+  1055→    this.running = false;
+  1056→    cancelAnimationFrame(this.raf);
+  1057→    window.removeEventListener('resize', this.onResize);
+  1058→    window.removeEventListener('keydown', this.onKeyDown);
+  1059→    window.removeEventListener('keyup', this.onKeyUp);
+  1060→    document.removeEventListener('mousemove', this.onMouseMove);
+  1061→    document.removeEventListener('pointerlockchange', this.onLockChange);
+  1062→    this.audio.dispose();
+  1063→    this.renderer.dispose();
+  1064→    this.renderer.domElement.remove();
+  1065→    this.dmgLayer.remove();
+  1066→  }
+  1067→}
+  1068→

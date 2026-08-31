@@ -127,6 +127,10 @@ export interface HudState {
   fps: number;
   endless: boolean;
   quality: 'bajo' | 'medio' | 'alto';
+  clock: string;
+  dayNum: number;
+  night: boolean;
+  notice: string;
 }
 
 export interface GameRefs {

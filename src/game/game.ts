@@ -10,6 +10,7 @@ import { idlePose } from './animations';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
 import { World } from './world';
+import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { drawMinimap } from './minimap';
@@ -79,8 +80,15 @@ export class Game {
   // sistemas
   audio = new AudioEngine();
   world: World;
+  cycle!: DayNightCycle;
   particles: Particles;
   player: Player;
+
+  // ciclo día/noche + avisos + pasos
+  private notice = '';
+  private noticeT = 0;
+  private stepDist = 0;
+  private lastStepPos = new THREE.Vector3();
   private trail: SwordTrail;
   enemies: Enemy[] = [];
   private projectiles: Projectile[] = [];
@@ -158,6 +166,20 @@ export class Game {
 
     // mundo y sistemas
     this.world = new World(this.scene, this.renderer);
+    this.cycle = new DayNightCycle(this.world, this.scene, this.renderer);
+    // hora inicial opcional por query (?tod=0.5 → mediodía, 0.9 → noche)
+    const todParam = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('tod') : null;
+    if (todParam) {
+      const v = parseFloat(todParam);
+      if (!Number.isNaN(v)) this.cycle.setTime(clamp(v, 0, 0.999));
+    }
+    this.cycle.onPhaseChange = (kind) => {
+      this.notice = kind === 'night'
+        ? 'La noche cae sobre AETHERIA… los enemigos se vuelven más rápidos'
+        : 'Amanece sobre AETHERIA';
+      this.noticeT = 7;
+      if (kind === 'night') this.audio.goblinVox();
+    };
     this.particles = new Particles(this.scene);
     this.player = new Player();
     this.scene.add(this.player.root);
@@ -225,6 +247,7 @@ export class Game {
       spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
       onEnemyDied: (e) => this.handleEnemyDied(e),
       playerHurt: () => { this.hurtFlash = 1; },
+      nightFactor: 0,
     };
 
     this.phase = 'menu';
@@ -363,6 +386,7 @@ export class Game {
     const cfg = ENEMY_CFG[e.type];
     const gold = randInt(cfg.gold[0], cfg.gold[1]);
     this.player.gold += gold;
+    this.audio.coin();
     this.player.gainXp(cfg.xp, this.ctx);
     // orbes de alma
     for (let i = 0; i < 10; i++) {
@@ -501,6 +525,7 @@ export class Game {
 
     if (this.phase === 'menu') {
       this.menuT += dt;
+      this.cycle.update(dt); // el mundo vive detrás del menú (con ciclo día/noche)
       this.updateMenuScene(dt);
       this.composer.render();
       this.hudTimer -= dt;
@@ -510,6 +535,19 @@ export class Game {
 
     if (this.phase === 'playing') {
       this.autoQuality(dt);
+      // ciclo día/noche (los enemigos son más rápidos de noche)
+      this.cycle.update(dt);
+      this.ctx.nightFactor = this.cycle.nightFactor;
+      if (this.noticeT > 0) { this.noticeT -= dt; if (this.noticeT <= 0) this.notice = ''; }
+      // pasos del jugador sobre el terreno
+      const stepDx = this.player.pos.x - this.lastStepPos.x;
+      const stepDz = this.player.pos.z - this.lastStepPos.z;
+      this.stepDist += Math.hypot(stepDx, stepDz);
+      this.lastStepPos.copy(this.player.pos);
+      if (this.stepDist > 2.2 && this.player.state !== 'roll' && this.player.state !== 'dead') {
+        this.stepDist = 0;
+        this.audio.footstep();
+      }
       // hit-stop y cámara lenta
       if (this.hitStopT > 0) {
         this.hitStopT -= dt;
@@ -523,6 +561,7 @@ export class Game {
       }
     } else if (this.phase === 'dead' || this.phase === 'victory') {
       // el mundo sigue con animaciones reducidas
+      this.cycle.update(dt * 0.25);
       this.updateWorld(dt * 0.25, true);
     }
 
@@ -854,7 +893,7 @@ export class Game {
       if (this.dmgPool.length >= 34) return;
       const el = document.createElement('div');
       el.style.cssText = `position:absolute;transform:translate(-50%,-50%);font-weight:800;pointer-events:none;
-        text-shadow:0 0 6px rgba(0,0,0,0.9), 0 2px 2px rgba(0,0,0,0.8);font-family:Georgia,serif;`;
+        text-shadow:0 0 6px rgba(0,0,0,0.9), 0 2px 2px rgba(0,0,0,0.8);font-family:'Cinzel',Georgia,serif;letter-spacing:0.04em;`;
       this.dmgLayer.appendChild(el);
       d = { el, worldPos: new THREE.Vector3(), life: 0, vy: 1.6, active: false };
       this.dmgPool.push(d);
@@ -914,6 +953,10 @@ export class Game {
       fps: Math.round(this.fps),
       endless: this.endless,
       quality: this.quality,
+      clock: this.cycle.sampleClockText(),
+      dayNum: this.cycle.day,
+      night: this.cycle.nightFactor > 0.5,
+      notice: this.notice,
     });
   }
 
@@ -927,7 +970,13 @@ export class Game {
   }
 
   private setPhase(p: GamePhase) {
+    const prev = this.phase;
     this.phase = p;
+    if (p !== prev) {
+      if (p === 'victory') { this.audio.victory(); this.audio.duckTheme(0.2, 1.5); }
+      else if (p === 'dead') { this.audio.defeat(); this.audio.duckTheme(0.2, 1.5); }
+      else if (p === 'playing') { this.audio.duckTheme(1); }
+    }
     this.emitHud();
   }
 
@@ -948,7 +997,15 @@ export class Game {
   requestLock() {
     const c = this.renderer.domElement;
     if (document.pointerLockElement !== c) {
-      c.requestPointerLock?.();
+      try {
+        // Chrome moderno devuelve Promise; sin gesto válido rechaza (NotAllowedError)
+        const p = c.requestPointerLock?.() as unknown;
+        if (p && typeof (p as Promise<void>).catch === 'function') {
+          (p as Promise<void>).catch(() => {
+            /* el jugador puede hacer clic en el lienzo para recuperar el bloqueo */
+          });
+        }
+      } catch { /* navegadores antiguos: API síncrona, ignorar */ }
     }
   }
 

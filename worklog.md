@@ -30,3 +30,24 @@ Work Log:
 Stage Summary:
 - Salto gráfico completo: de low-poly plano a fantasía nocturna estilizada con PBR procedural, auroras, GTAO, grading cinematográfico, mundo vivo tras el menú y efectos (haces, agua, viento, niebla, llamas shader). Sin dependencias externas nuevas: todo generado por código (canvas/shaders).
 
+
+---
+Task ID: 2
+Agent: main (Super Z)
+Task: Recursos online gratuitos + arte/diseño + ciclo día/noche ("busca y usa recursos online gratuitos... añade los ciclos dia y noche y que el juego empiece de dia")
+
+Work Log:
+- BÚSQUEDA DE RECURSOS (web-search + curl): verificados ambientCG (CC0 PBR), Kenney vía OpenGameArt (CC0), Little Robot Sound Factory (CC-BY 3.0), Cleyton Kauffman exploration theme (libre), Google Fonts vía jsDelivr (OFL), swishes CC0. PolyHaven/Kenney directos bloqueados (404/403) → rutas alternativas usadas.
+- ASSETS DESCARGADOS e integrados en public/: 10 texturas PBR fotográficas 1K (Grass001 color/normal/rough/AO, Ground037, Rock012, Bark004), 25 audios (pasos Kenney, swishes→ogg vía ffmpeg, goblins/hechizos/jingles/oro/UI de Little Robot, dragón, tema de exploración 5.4 MB), 5 fuentes (Cinzel, Cinzel Decorative, Grenze Gotisch, Alegreya Sans ×2).
+- daynight.ts (NUEVO): ciclo día/noche completo con 10 keyframes interpolados (cielo top/mid/bottom, niebla, luz sol/luna compartida con sombras, hemisférica, relleno, estrellas, aurora, luciérnagas, niebla rasante, antorchas, exposición, entorno PMREM, tinte de agua). Sol/luna con trayectoria paramétrica; reloj "HH:MM" + contador de días; ciclo de 480 s; EMPIEZA A LAS 08:09 (t=0.34). ?tod=0..1 en URL para saltar de hora.
+- world.ts: shader de cielo con dispersión atmosférica hacia el sol (uSunDir/uSunTint/uSunGlow); sol como sprites aditivos; luna agrupada con opacidad; uGlobalA compartido en estrellas/aurora/luciérnagas; luz direccional sigue cámara con dirección del ciclo; terreno con normal fotográfica + bump procedural + roughnessMap; antorchas/hoguera realzadas de noche (×nightK); agua refleja la luz activa.
+- textures.ts: cargador pbrTex() con cache y fallback; terrainSplat() redibujado con foto CC0 de césped en mosaico + integración tonal al llegar la imagen (needsUpdate); barkMaps/stoneMaps ahora usan fotos PBR de ambientCG.
+- audio.ts: capa de samples reales (22 precargados) + síntesis de refuerzo; nuevos métodos footstep/coin/goblinVox/castSpell/victory/defeat/uiOpen; música: tema CC0 en bucle + capa generativa de combate + duckTheme().
+- game.ts: ciclo creado tras el mundo; aviso animado amanecer/anochecer; pasos del jugador por distancia; monedas al matar; jingles en victoria/derrota; nightFactor al ctx (enemigos +12% de noche); reloj/día/noche/aviso al HUD; requestLock() con catch (corrige NotAllowedError de pointer lock); fuente Cinzel en números de daño.
+- enemies.ts: gruñido goblin al aggro; nightBoost de velocidad.
+- page.tsx + globals.css: @font-face + tokens @theme (font-display/logo/gothic/body); logo AETHERIA en Cinzel Decorative con degradado dorado (.aetheria-logo); marco ornamental doble (.aetheria-frame); reloj con icono SVG sol/luna; barra de jefe en Grenze Gotisch; aviso día/noche animado; créditos CC0/CC-BY/OFL en menú y pausa; panel con scroll en 720p.
+- DEPURACIÓN: canopies ×0.20→×0.30/0.55/0.31 (antes negros de noche, luego sobreexpuestos de día); paleta diurna calibrada en 3 pasadas (sol 2.45/2.3, hemi 1.0/0.9, exp 1.05); luciérnagas clamp 26px; overlay "1 Issue" era rechazo de pointer lock por click sintético de prueba → catch añadido, click real verificado sin issues.
+- VERIFICACIÓN: tsc limpio, ESLint limpio, juego a 420-921 FPS en calidad alta; capturas download/final_menu.png (menú dorado), final_morning.png (día), final_noon.png (mediodía), final_sunset.png (hora dorada con cielo púrpura), final_night.png (noche estrellada con reloj 22:19 e icono luna), art_menu_day.png.
+
+Stage Summary:
+- AETHERIA ahora usa arte y sonido reales gratuitos (ambientCG/Kenney/LittleRobot/Cleyton — CC0/CC-BY/OFL, acreditados en el menú) y un ciclo día/noche completo que empieza de día (08:09), con sol y luna, cielo dinámico, noche peligrosa (+12% velocidad enemiga) y UI de fantasía con Cinzel/Grenze Gotisch.
