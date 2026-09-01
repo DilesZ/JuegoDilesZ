@@ -1,12 +1,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import type { HudState } from '@/game/core';
+import type { HudState, ItemView } from '@/game/core';
 import type { Game, QualityTier } from '@/game/game';
 
 /* ============================================================
    AETHERIA — Eco del Reino Caído · Action RPG 3D
-   Menú cinemático sobre el mundo en vivo + HUD de juego
+   Menú cinemático sobre el mundo en vivo + HUD + Inventario
    ============================================================ */
 
 const INITIAL_HUD: HudState = {
@@ -29,6 +29,14 @@ const INITIAL_HUD: HudState = {
   dayNum: 1,
   night: false,
   notice: '',
+  inv: {
+    open: false,
+    bag: [], bagSize: 24,
+    equip: { weapon: null, armor: null, helmet: null, acc1: null, acc2: null },
+    totals: { dmg: 0, hp: 0, def: 0, speed: 0, stam: 0, crit: 0 },
+    defRed: 0, dmgMul: 1, crit: 0,
+    perm: { hp: 0, dmg: 0, stam: 0 },
+  },
 };
 
 function fmtTime(t: number): string {
@@ -99,12 +107,14 @@ function Corners() {
 const CONTROLS: [string, string][] = [
   ['W A S D', 'Moverse'],
   ['Ratón', 'Cámara'],
+  ['Rueda', 'Zoom de cámara'],
   ['Clic izq.', 'Ataque ligero (combo ×3)'],
   ['Clic der.', 'Ataque cargado'],
   ['Espacio', 'Esquiva rodando (invulnerable)'],
   ['Tab', 'Fijar objetivo'],
   ['F', 'Beber poción'],
   ['E', 'Interactuar'],
+  ['I', 'Inventario y equipo'],
   ['Shift', 'Esprintar'],
   ['Esc', 'Pausa'],
 ];
@@ -114,6 +124,216 @@ const QUALITIES: { id: QualityTier; label: string }[] = [
   { id: 'medio', label: 'Medio' },
   { id: 'alto', label: 'Alto' },
 ];
+
+/* ============================================================
+   INVENTARIO / EQUIPO
+   ============================================================ */
+
+const RARITY_CSS: Record<string, string> = {
+  comun: '#a8b2c0', raro: '#54a8ff', epico: '#c07aff', legendario: '#ffb347',
+};
+const RARITY_LABEL: Record<string, string> = {
+  comun: 'Común', raro: 'Raro', epico: 'Épico', legendario: 'Legendario',
+};
+const KIND_LABEL: Record<string, string> = {
+  weapon: 'Arma', armor: 'Armadura', helmet: 'Yelmo', accessory: 'Accesorio', consumible: 'Consumible',
+};
+const SLOT_LABEL: Record<string, string> = {
+  weapon: 'Arma', armor: 'Armadura', helmet: 'Yelmo', acc1: 'Accesorio I', acc2: 'Accesorio II',
+};
+
+/** Líneas de estadísticas de un objeto, tipo "+26% Daño" */
+function ItemStatLines({ item }: { item: ItemView }) {
+  const s = item.stats;
+  const rows: string[] = [];
+  if (s.dmg) rows.push(`+${Math.round(s.dmg * 100)}% Daño`);
+  if (s.hp) rows.push(`+${s.hp} Vida`);
+  if (s.def) rows.push(`+${s.def} Defensa`);
+  if (s.speed) rows.push(`+${Math.round(s.speed * 100)}% Velocidad`);
+  if (s.stam) rows.push(`+${Math.round(s.stam * 100)}% Aguante`);
+  if (s.crit) rows.push(`+${Math.round(s.crit * 100)}% Crítico`);
+  if (!rows.length && item.useText) rows.push(item.useText);
+  if (!rows.length) return null;
+  return (
+    <ul className="space-y-0.5">
+      {rows.map(r => (
+        <li key={r} className="text-[12px] text-emerald-300/90 font-semibold">{r}</li>
+      ))}
+    </ul>
+  );
+}
+
+/** Hueco de equipo o de mochila */
+function ItemSlot({
+  item, label, onClick, onHover, size = 'w-16 h-16', iconSize = 'text-2xl',
+}: {
+  item: ItemView | null; label?: string; onClick?: () => void;
+  onHover?: (it: ItemView | null) => void; size?: string; iconSize?: string;
+}) {
+  const rc = item ? RARITY_CSS[item.rarity] : null;
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => onHover?.(item)}
+      onMouseLeave={() => onHover?.(null)}
+      disabled={!onClick}
+      className={`relative ${size} shrink-0 rounded-md border-2 bg-stone-950/85 transition-all duration-150 flex items-center justify-center
+        ${item && onClick ? 'cursor-pointer hover:scale-[1.06] hover:z-10' : ''} ${!item && onClick ? 'cursor-default' : ''}`}
+      style={rc ? { borderColor: rc, boxShadow: `0 0 10px ${rc}44, inset 0 0 8px ${rc}22` } : { borderColor: 'rgba(120,113,108,0.35)' }}
+      title={item ? item.name : (label ?? '')}
+    >
+      {item ? (
+        <span className={`${iconSize} leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]`}>{item.icon}</span>
+      ) : (
+        label && <span className="text-[9px] uppercase tracking-widest text-stone-600 px-1 text-center leading-tight">{label}</span>
+      )}
+      {item && item.count > 1 && (
+        <span className="absolute bottom-0.5 right-1 text-[10px] font-bold text-amber-100 drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">×{item.count}</span>
+      )}
+      {item && rc && (item.rarity === 'epico' || item.rarity === 'legendario') && (
+        <span className="absolute -top-1 -right-1 w-2 h-2 rotate-45" style={{ background: rc, boxShadow: `0 0 6px ${rc}` }} />
+      )}
+    </button>
+  );
+}
+
+function InventoryPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | null; onClose: () => void }) {
+  const [hover, setHover] = useState<ItemView | null>(null);
+  const inv = hud.inv;
+
+  const clickBag = (i: number, it: ItemView) => {
+    if (it.kind === 'consumible') g()?.useBagItem(i);
+    else g()?.equipFromBag(i);
+  };
+
+  const stats: [string, string][] = [
+    ['Nivel', `${hud.level}`],
+    ['Vida', `${Math.ceil(hud.hp)} / ${hud.maxHp}`],
+    ['Daño', `×${inv.dmgMul.toFixed(2)}`],
+    ['Reducción', `${Math.round(inv.defRed * 100)}%`],
+    ['Crítico', `${Math.round(inv.crit * 100)}%`],
+    ['Velocidad', `+${Math.round(inv.totals.speed * 100)}%`],
+    ['Aguante', `+${Math.round((inv.totals.stam + inv.perm.stam) * 100)}%`],
+    ['Bajas', `${hud.kills}`],
+  ];
+
+  const detail = hover ?? inv.equip.weapon ?? null;
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-[3px] pointer-events-auto">
+      <div className="relative aetheria-frame w-[min(1040px,95vw)] max-h-[92vh] bg-[#0d0b14]/95 border border-amber-900/50 shadow-[0_0_80px_rgba(0,0,0,0.7)] flex flex-col aetheria-pop">
+        <Corners />
+
+        {/* Cabecera */}
+        <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-amber-900/30">
+          <div className="flex items-baseline gap-4">
+            <h2 className="font-display text-2xl text-amber-200 tracking-[0.2em] uppercase">Mochila</h2>
+            <span className="text-[11px] text-stone-500 tracking-[0.25em] uppercase hidden sm:inline">Equipo del caballero</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-sm text-amber-300/90 font-semibold">◈ {hud.gold}</div>
+            <button
+              onClick={onClose}
+              className="w-9 h-9 rounded border border-stone-700/70 bg-stone-900/80 text-stone-400 hover:text-amber-100 hover:border-amber-600/60 transition-colors text-lg leading-none"
+              title="Cerrar (I / Esc)"
+            >✕</button>
+          </div>
+        </div>
+
+        {/* Cuerpo */}
+        <div className="grid md:grid-cols-[290px_1fr] gap-5 p-5 overflow-y-auto aetheria-scroll">
+          {/* Columna izquierda: equipo + atributos */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-full border-2 border-amber-600/80 bg-stone-950/90 flex items-center justify-center font-display text-amber-200 text-xl shadow-[0_0_12px_rgba(0,0,0,0.8)]">
+                {hud.level}
+              </div>
+              <div>
+                <div className="font-display text-amber-100 tracking-[0.12em] text-sm">EL CABALLERO DEL ALBA</div>
+                <div className="text-[11px] text-stone-500">Nivel {hud.level} · XP {hud.xp}/{hud.xpNext}</div>
+              </div>
+            </div>
+
+            {/* Huecos de equipo */}
+            <div className="grid grid-cols-3 gap-2 justify-items-center bg-black/30 border border-stone-800/70 rounded-lg p-3">
+              <ItemSlot item={inv.equip.helmet} label="Yelmo" onClick={inv.equip.helmet ? () => g()?.unequipSlot('helmet') : undefined} onHover={setHover} />
+              <ItemSlot item={inv.equip.weapon} label="Arma" onClick={inv.equip.weapon ? () => g()?.unequipSlot('weapon') : undefined} onHover={setHover} />
+              <ItemSlot item={inv.equip.armor} label="Armadura" onClick={inv.equip.armor ? () => g()?.unequipSlot('armor') : undefined} onHover={setHover} />
+              <ItemSlot item={inv.equip.acc1} label="Accesorio I" onClick={inv.equip.acc1 ? () => g()?.unequipSlot('acc1') : undefined} onHover={setHover} />
+              <ItemSlot item={inv.equip.acc2} label="Accesorio II" onClick={inv.equip.acc2 ? () => g()?.unequipSlot('acc2') : undefined} onHover={setHover} />
+            </div>
+
+            {/* Atributos */}
+            <div className="bg-black/30 border border-stone-800/70 rounded-lg p-3">
+              <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display mb-2">Atributos</div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                {stats.map(([k, v]) => (
+                  <div key={k} className="flex justify-between text-[12px] border-b border-stone-800/50 pb-0.5">
+                    <span className="text-stone-500">{k}</span>
+                    <span className="text-amber-100/90 font-semibold">{v}</span>
+                  </div>
+                ))}
+              </div>
+              {inv.perm.hp > 0 && (
+                <div className="mt-2 text-[10px] text-stone-500">Elixires bebidos: +{inv.perm.hp} vida · +{Math.round(inv.perm.dmg * 100)}% daño · +{Math.round(inv.perm.stam * 100)}% aguante</div>
+              )}
+            </div>
+          </div>
+
+          {/* Columna derecha: mochila + detalles */}
+          <div className="space-y-4 min-w-0">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display">Mochila · {inv.bag.length}/{inv.bagSize}</div>
+                <div className="text-[10px] text-stone-600">Clic para equipar · consumibles: usar</div>
+              </div>
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(64px,1fr))] gap-2 bg-black/30 border border-stone-800/70 rounded-lg p-3">
+                {inv.bag.map((it, i) => (
+                  <ItemSlot key={`${it.id}-${i}`} item={it} onClick={() => clickBag(i, it)} onHover={setHover} />
+                ))}
+                {Array.from({ length: Math.max(0, inv.bagSize - inv.bag.length) }).map((_, i) => (
+                  <ItemSlot key={`empty-${i}`} item={null} onHover={setHover} />
+                ))}
+              </div>
+            </div>
+
+            {/* Detalles del objeto */}
+            <div className="bg-black/30 border border-stone-800/70 rounded-lg p-4 min-h-[132px]">
+              {detail ? (
+                <div className="flex gap-4">
+                  <div
+                    className="w-16 h-16 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-3xl"
+                    style={{ borderColor: RARITY_CSS[detail.rarity], boxShadow: `0 0 12px ${RARITY_CSS[detail.rarity]}44` }}
+                  >
+                    {detail.icon}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-display text-base tracking-wide" style={{ color: RARITY_CSS[detail.rarity] }}>{detail.name}</div>
+                    <div className="text-[11px] text-stone-500 mb-1.5">{KIND_LABEL[detail.kind]} · {RARITY_LABEL[detail.rarity]}{detail.count > 1 ? ` · ×${detail.count}` : ''}</div>
+                    <ItemStatLines item={detail} />
+                    <p className="text-[12px] text-stone-400 italic mt-1.5 leading-relaxed">{detail.desc}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full flex items-center justify-center text-[12px] text-stone-600 italic">
+                  Pasa el cursor sobre un objeto para ver sus detalles
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Pie */}
+        <div className="px-6 pb-4 pt-1 text-[10px] text-stone-600 flex justify-between">
+          <span>Clic en un hueco de equipo para quitarlo · I / Esc cierra la mochila</span>
+          <span className="hidden sm:inline">El botín cae de tus enemigos · Los jefes sueltan objetos épicos</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ */
 
 export default function Home() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -273,8 +493,8 @@ export default function Home() {
             </div>
           )}
 
-          {/* Pociones (abajo-izquierda) */}
-          <div className="absolute bottom-4 left-4 flex items-center gap-2">
+          {/* Pociones + mochila (abajo-izquierda) */}
+          <div className="absolute bottom-4 left-4 flex items-center gap-3">
             <div className="w-10 h-10 rounded-full border-2 border-red-800/80 bg-stone-950/90 flex items-center justify-center text-red-300 text-lg shadow-[0_0_10px_rgba(0,0,0,0.8)]">
               ⚗
             </div>
@@ -283,6 +503,15 @@ export default function Home() {
               <span className="text-stone-500">/{hud.maxPotions}</span>
               <div className="text-[10px] text-stone-500 uppercase tracking-wider">F · Beber</div>
             </div>
+            <button
+              onClick={() => g()?.toggleInventory()}
+              className="pointer-events-auto ml-2 h-10 px-3 rounded border-2 border-amber-800/70 bg-stone-950/90 text-amber-200 text-sm
+                hover:bg-amber-900/40 hover:border-amber-500 transition-colors shadow-[0_0_10px_rgba(0,0,0,0.8)] flex items-center gap-2"
+              title="Inventario y equipo (I)"
+            >
+              🎒 <span className="font-display tracking-wider text-xs uppercase">Mochila</span>
+              <kbd className="text-[10px] text-stone-500 border border-stone-700 rounded px-1">I</kbd>
+            </button>
           </div>
 
           {/* Prompt de interacción (abajo-centro) */}
@@ -298,14 +527,20 @@ export default function Home() {
           <div className="absolute bottom-4 right-4 text-right text-[10px] leading-relaxed text-stone-500">
             <div>Clic izq. atacar · Clic der. cargado · Espacio esquivar</div>
             <div>Tab objetivo · F poción · E interactuar · Esc pausa</div>
+            <div>Rueda zoom · I mochila e inventario</div>
           </div>
         </div>
+      )}
+
+      {/* ============ INVENTARIO / EQUIPO ============ */}
+      {booted && hud.inv?.open && (
+        <InventoryPanel hud={hud} g={g} onClose={() => g()?.toggleInventory()} />
       )}
 
       {/* ============ MENÚ PRINCIPAL (mundo en vivo detrás) ============ */}
       {booted && hud.phase === 'menu' && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(2,3,8,0.18)_0%,rgba(2,3,8,0.62)_62%,rgba(2,3,8,0.88)_100%)]">
-          <div className="max-w-2xl w-full px-5 text-center max-h-[96vh] overflow-y-auto">
+          <div className="max-w-2xl w-full px-5 text-center max-h-[96vh] overflow-y-auto aetheria-scroll">
             <div className="relative aetheria-frame backdrop-blur-[3px] bg-black/50 border border-amber-900/40 px-6 sm:px-9 py-7 shadow-[0_0_70px_rgba(0,0,0,0.55)]">
               <Corners />
               <div className="font-display text-amber-600/80 tracking-[0.5em] text-[11px] uppercase mb-3">Un Action RPG de mundo abierto</div>
@@ -326,7 +561,7 @@ export default function Home() {
                 Purifícalos, crece en poder y derriba al señor de la noche en su arena.
               </p>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-2 mt-7 text-[11px]">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-7 text-[11px]">
                 {CONTROLS.map(([k, v]) => (
                   <div key={k} className="flex flex-col items-center gap-0.5">
                     <kbd className="px-2 py-1 border border-stone-700 rounded bg-stone-900/90 text-amber-200/90 font-mono">{k}</kbd>

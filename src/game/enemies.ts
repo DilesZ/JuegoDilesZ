@@ -166,8 +166,9 @@ export class Enemy extends Entity {
 
   takeDamage(dmg: number, srcPos: THREE.Vector3, ctx: GameCtx, heavy: boolean): boolean {
     if (!this.alive || this.state === 'spawn' || this.state === 'dead') return false;
-    const crit = Math.random() < 0.15;
-    const final = Math.round(dmg * (crit ? 1.7 : 1));
+    // la probabilidad de crítico proviene del equipo del héroe
+    const crit = Math.random() < ctx.player.critChance;
+    const final = Math.round(dmg * (crit ? 1.85 : 1));
     this.hp -= final;
     this.aggroed = true;
     this.flash();

@@ -71,3 +71,21 @@ Work Log:
 
 Stage Summary:
 - AETHERIA es ahora 100% anime: cel shading por bandas + contornos de tinta en personajes/árboles/rocas/ruinas, protagonistas chibi con ojos grandes, pelo puntiagudo, orejas y colmillos, nubes Ghibli tintadas por el ciclo día/noche (que sigue empezando de día a las 08:09), paletas saturadas y tipografía redondeada. Sin dependencias nuevas.
+
+---
+Task ID: 4
+Agent: main (Super Z)
+Task: Zoom de cámara con rueda del ratón + menú de inventario y equipo ("haz que con la rueda del raton pueda alejar o acerca la camara, añade menu de inventario, de equipo (armadura arma, accesorios etc)")
+
+Work Log:
+- items.ts (NUEVO): catálogo de 23 objetos en 5 categorías (armas ×6, armaduras ×4, yelmos ×4, accesorios ×6, consumibles ×3) con rarezas común/raro/épico/legendario (colores gris/azul/púrpura/dorado), stats de equipo (dmg/hp/def/speed/stam/crit como bonos aditivos), rollDrop() con pesos por nivel del héroe (jefes: garantizado épico/legendario), clase Inventory (mochila de 24 huecos con apilado de consumibles, 5 huecos de equipo arma/armadura/yelmo/acc1/acc2, equipar con intercambio automático a la mochila).
+- core.ts: HudState ampliado con InvView (vistas serializables de mochila/equipo/stats para React).
+- entities.ts: Player con equip stats + perm (bonos permanentes de consumibles); recomputeMaxHp (vida base por nivel + equipo + permanentes, equipar armadura cura la diferencia); dmgMul/moveSpeedMul/critChance/damageReduction; defensa aplica en takeDamage; regen de aguante y velocidad multiplicadas por equipo. Pickup acepta kind 'item' con orbe del color de la rareza. GameCtx.gainItem añadido.
+- game.ts: ZOOM con rueda (listener window wheel passive:false, camDistTarget clampeado 2.6–13.5, damp suave λ=9, guardado en uiOpen); sistema uiOpen (mochila congela el mundo con updateWorld(0.0001, frozen), exitPointerLock sin pausa, teclas I/B/Escape alternan, keys/queued limpiados); drops (goblin 17%/archer 19%/orc 27%/jefe 100%); gainItem con número de daño del color de rareza y fallback a oro si mochila llena; refreshEquipStats tiñe la runa del arma según rareza; críticos ahora usan player.critChance (×1.85); equipo inicial: Espada del Errante + Túnica del Errante + Elixir + Piedra de Afilar; API pública toggleInventory/equipFromBag/unequipSlot/useBagItem; emitHud incluye invView.
+- page.tsx: panel MOCHILA completo (cabecera con oro y cierre, retrato + nivel, 5 huecos de equipo con bordes de rareza y destello épico+, rejilla de mochila 24 huecos con apilado ×N, caja de detalles al hover con stats/lore, atributos en vivo: vida/daño/reducción/crítico/velocidad/aguante/bajas y acumulación de elixires); botón 🎒 MOCHILA [I] en el HUD; controles del menú ampliados a 12 (Rueda·Zoom, I·Inventario) en grid de 4 columnas; ayuda inferior actualizada.
+- globals.css: .aetheria-scroll (scrollbar fina ámbar) y .aetheria-pop (apertura con muelleo del panel).
+- DEPURACIÓN: uiSelect no existía → uiClick; restaurados orbes de alma y pasos de jugador eliminados por error en ediciones; tipo RC null en ItemSlot; props g() Game|null.
+- VERIFICACIÓN E2E (agent-browser): zoom fuera (target 13.5, cámara elevada) y dentro (2.6, primer plano) verificados en capturas; mochila abre con I, muestra equipo inicial (Vida 120/120 = 100+20 túnica, Daño ×1.10, Reducción 8%); elixir consumido (+12 perm, maxHp 132); piedra consumida (+4% dmg → ×1.14); Anillo de Jade equipado (Vida 150, Reducción 13%); Filo del Alba equipado (Daño ×1.26, Crítico 6%, espada vieja devuelta a la mochila); Escape/I cierran y el juego continúa; consola sin errores; tsc y ESLint limpios; capturas download/inv_*.png, zoom_far.png, zoom_near.png, gameplay_final.png. Nota: los clics crudos CDP dejaron de entregarse a mitad de sesión (capricho del CLI tras un timeout, no del juego) — verificado con eventos sintéticos y clics DOM que todo responde.
+
+Stage Summary:
+- AETHERIA ahora tiene zoom de cámara fluido con la rueda (2.6–13.5 m, suavizado) y un sistema RPG completo de inventario/equipo: 23 objetos con 4 rarezas, 5 huecos de equipo que modifican daño/vida/defensa/velocidad/aguante/crítico, consumibles permanentes, botín de enemigos y jefes, detalles y lore en la UI, y la runa del arma brillando del color de su rareza.

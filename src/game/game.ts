@@ -5,7 +5,8 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { clamp, dampAngle, damp, rand, randInt, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, ENEMY_NAMES } from './core';
+import { clamp, dampAngle, damp, rand, randInt, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, ENEMY_NAMES } from './core';
+import { Inventory, RARITY_INFO, itemById, rollDrop, type EquipSlot, type ItemDef } from './items';
 import { idlePose } from './animations';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
@@ -66,6 +67,14 @@ interface DamageNumber {
 
 const ROAMER_TARGET = 8;
 
+/** Probabilidad de que cada tipo de enemigo suelte un objeto de equipo */
+const DROP_CHANCE: Record<string, number> = {
+  goblin: 0.17,
+  archer: 0.19,
+  orc: 0.27,
+  boss: 1,
+};
+
 export class Game {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -100,10 +109,16 @@ export class Game {
   private inputState: InputState;
   private mouseDX = 0; private mouseDY = 0;
   private locked = false;
+  // inventario / equipo
+  inventory = new Inventory();
+  uiOpen = false;
 
   // cámara
   private camYaw = 0; private camPitch = 0.34;
   private camDist = 6.4;
+  private camDistTarget = 6.4;
+  private static readonly CAM_MIN = 2.6;
+  private static readonly CAM_MAX = 13.5;
   private camPos = new THREE.Vector3();
   private shakeAmt = 0;
   private hitStopT = 0;
@@ -248,13 +263,139 @@ export class Game {
       spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
       onEnemyDied: (e) => this.handleEnemyDied(e),
       playerHurt: () => { this.hurtFlash = 1; },
+      gainItem: (def) => this.gainItem(def),
       nightFactor: 0,
     };
 
     this.phase = 'menu';
 
+    this.grantStarterGear();
+
     this.bindEvents();
     this.emitHud();
+  }
+
+  /* ---------- Inventario y equipo ---------- */
+
+  /** Equipo inicial del héroe: espada + túnica + un par de consumibles */
+  private grantStarterGear() {
+    const inv = this.inventory;
+    inv.forceEquip('weapon', itemById('espada_errante'));
+    inv.forceEquip('armor', itemById('tunica_errante'));
+    inv.addItem(itemById('elixir_vida'));
+    inv.addItem(itemById('piedra_afilar'));
+    this.refreshEquipStats(false);
+  }
+
+  /** Aplica las stats de equipo al jugador y tiñe la gema del arma */
+  private refreshEquipStats(sound = true) {
+    this.player.applyEquipStats(this.inventory.totals());
+    const wep = this.inventory.equip.weapon;
+    const wm = this.player.rig.weaponMat;
+    if (wm) {
+      wm.emissive.setHex(wep ? RARITY_INFO[wep.rarity].hex : 0x54e0ff);
+      wm.emissiveIntensity = wep && wep.rarity !== 'comun' ? 2.1 : 1.2;
+    }
+    if (sound) { this.audio.uiClick(); this.emitHud(); }
+  }
+
+  /** Recogida de objetos (llamada desde Pickup vía ctx) */
+  private gainItem(def: ItemDef) {
+    const ok = this.inventory.addItem(def);
+    if (!ok) {
+      // mochila llena: se convierte en oro
+      const gold = 20;
+      this.player.gold += gold;
+      this.audio.coin();
+      this.addDamageNumber(new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.1, this.player.pos.z), `MOCHILA LLENA +${gold} ◈`, '#ffc84a');
+      return;
+    }
+    this.audio.coin();
+    this.addDamageNumber(
+      new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.2, this.player.pos.z),
+      `+ ${def.icon} ${def.name}`,
+      RARITY_INFO[def.rarity].css,
+      def.rarity === 'epico' || def.rarity === 'legendario',
+    );
+    this.emitHud();
+  }
+
+  toggleInventory() {
+    if (this.phase !== 'playing') return;
+    const open = !this.uiOpen;
+    this.uiOpen = open;
+    this.keys.clear();
+    this.queued = { attack: false, heavy: false, roll: false, potion: false };
+    if (open) {
+      this.audio.uiOpen();
+      if (document.pointerLockElement) document.exitPointerLock();
+    } else {
+      this.audio.uiClick();
+      if (this.phase === 'playing') this.requestLock();
+    }
+    this.emitHud();
+  }
+
+  equipFromBag(i: number) {
+    if (!this.uiOpen) return;
+    const res = this.inventory.equipFromBag(i);
+    if (!res.ok) return;
+    if (res.swapped) this.inventory.addItem(res.swapped);
+    this.refreshEquipStats();
+  }
+
+  unequipSlot(slot: EquipSlot) {
+    if (!this.uiOpen) return;
+    if (this.inventory.unequip(slot)) this.refreshEquipStats();
+  }
+
+  useBagItem(i: number) {
+    if (!this.uiOpen) return;
+    const def = this.inventory.useConsumable(i);
+    if (!def) return;
+    const p = this.player;
+    switch (def.id) {
+      case 'elixir_vida':
+        p.perm.hp += 12;
+        p.applyEquipStats(this.inventory.totals());
+        p.hp = p.maxHp;
+        break;
+      case 'piedra_afilar':
+        p.perm.dmg += 0.04;
+        break;
+      case 'fruta_espiritu':
+        p.perm.stam += 0.08;
+        break;
+    }
+    this.audio.potion();
+    this.addDamageNumber(new THREE.Vector3(p.pos.x, p.pos.y + 2.2, p.pos.z), `${def.icon} ${def.useText ?? def.name}`, '#8ef2a6', true);
+    this.refreshEquipStats();
+  }
+
+  private invView(): InvView {
+    const view = (d: ItemDef | null, count = 1): ItemView | null => d ? {
+      id: d.id, name: d.name, kind: d.kind, rarity: d.rarity, icon: d.icon,
+      desc: d.desc, stats: d.stats, useText: d.useText, count,
+    } : null;
+    const inv = this.inventory;
+    const totals = inv.totals();
+    return {
+      open: this.uiOpen,
+      bag: inv.bag.map(e => view(e.def, e.count)!),
+      bagSize: 24,
+      equip: {
+        weapon: view(inv.equip.weapon),
+        armor: view(inv.equip.armor),
+        helmet: view(inv.equip.helmet),
+        acc1: view(inv.equip.acc1),
+        acc2: view(inv.equip.acc2),
+      },
+      totals,
+      defRed: this.player.damageReduction,
+      dmgMul: this.player.dmgMul,
+      crit: this.player.critChance,
+      perm: { ...this.player.perm },
+    };
   }
 
   /* ---------- Calidad ---------- */
@@ -401,6 +542,17 @@ export class Game {
     if (Math.random() < cfg.potionChance) {
       this.pickups.push(new Pickup(e.pos.clone(), 'potion'));
       this.scene.add(this.pickups[this.pickups.length - 1].root);
+    }
+    // drop de objeto (armas, armaduras, accesorios…)
+    const dropChance = e.isBoss ? 1 : DROP_CHANCE[e.type];
+    if (Math.random() < dropChance) {
+      const def = rollDrop(this.player.level, e.isBoss);
+      const pk = new Pickup(
+        new THREE.Vector3(e.pos.x + rand(-0.8, 0.8), 0, e.pos.z + rand(-0.8, 0.8)),
+        'item', def,
+      );
+      this.pickups.push(pk);
+      this.scene.add(pk.root);
     }
     // guardianes → santuario purificable
     if (e.guardianOf >= 0) {
@@ -549,8 +701,11 @@ export class Game {
         this.stepDist = 0;
         this.audio.footstep();
       }
-      // hit-stop y cámara lenta
-      if (this.hitStopT > 0) {
+      if (this.uiOpen) {
+        // inventario abierto: mundo congelado, escena viva
+        this.updateWorld(0.0001, true);
+      } else if (this.hitStopT > 0) {
+        // hit-stop y cámara lenta
         this.hitStopT -= dt;
         this.updateWorld(dt * 0.06);
       } else if (this.slowmoT > 0) {
@@ -809,7 +964,7 @@ export class Game {
 
   private updateCamera(dt: number) {
     // ratón → rotación
-    if (this.locked && this.phase === 'playing') {
+    if (this.locked && this.phase === 'playing' && !this.uiOpen) {
       this.camYaw -= this.mouseDX * 0.0023;
       this.camPitch += this.mouseDY * 0.0018;
       this.camPitch = clamp(this.camPitch, -0.25, 1.15);
@@ -826,6 +981,8 @@ export class Game {
       this.camPitch = damp(this.camPitch, 0.3, 3, dt);
     }
 
+    // zoom suave hacia la distancia objetivo (rueda del ratón)
+    this.camDist = damp(this.camDist, this.camDistTarget, 9, dt);
     const dist = this.camDist;
     const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
     const off = new THREE.Vector3(Math.sin(this.camYaw) * cp, sp, Math.cos(this.camYaw) * cp);
@@ -959,6 +1116,7 @@ export class Game {
       dayNum: this.cycle.day,
       night: this.cycle.nightFactor > 0.5,
       notice: this.notice,
+      inv: this.invView(),
     });
   }
 
@@ -1058,6 +1216,7 @@ export class Game {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('wheel', this.onWheel, { passive: false });
     document.addEventListener('mousemove', this.onMouseMove);
     document.addEventListener('pointerlockchange', this.onLockChange);
     const c = this.renderer.domElement;
@@ -1074,6 +1233,11 @@ export class Game {
 
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
+    // con la mochila abierta solo se permite cerrarla
+    if (this.uiOpen) {
+      if (e.code === 'Escape' || e.code === 'KeyI' || e.code === 'KeyB') this.toggleInventory();
+      return;
+    }
     if (this.phase !== 'playing') return;
     this.keys.add(e.code);
     switch (e.code) {
@@ -1081,6 +1245,7 @@ export class Game {
       case 'Space': this.queued.roll = true; break;
       case 'KeyF': this.queued.potion = true; break;
       case 'KeyE': this.doInteract(); break;
+      case 'KeyI': case 'KeyB': this.toggleInventory(); break;
     }
   };
 
@@ -1095,17 +1260,27 @@ export class Game {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (this.phase !== 'playing') return;
+    if (this.phase !== 'playing' || this.uiOpen) return;
     if (!this.locked) { this.requestLock(); return; }
     if (e.button === 0) this.queued.attack = true;
     if (e.button === 2) this.queued.heavy = true;
+  };
+
+  /** Zoom de cámara con la rueda del ratón */
+  private onWheel = (e: WheelEvent) => {
+    if (this.phase !== 'playing' || this.uiOpen) return;
+    e.preventDefault();
+    // normaliza deltaY (modo píxel o línea)
+    const dy = e.deltaMode === 1 ? e.deltaY * 24 : e.deltaY;
+    this.camDistTarget = clamp(this.camDistTarget + dy * 0.012, Game.CAM_MIN, Game.CAM_MAX);
   };
 
   private onContextMenu = (e: Event) => { e.preventDefault(); };
 
   private onLockChange = () => {
     this.locked = document.pointerLockElement === this.renderer.domElement;
-    if (!this.locked && this.phase === 'playing') this.pause();
+    // no pausar si la salida de bloqueo fue por abrir la mochila
+    if (!this.locked && this.phase === 'playing' && !this.uiOpen) this.pause();
   };
 
   /* ---------- Limpieza ---------- */
@@ -1116,6 +1291,7 @@ export class Game {
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('wheel', this.onWheel);
     document.removeEventListener('mousemove', this.onMouseMove);
     document.removeEventListener('pointerlockchange', this.onLockChange);
     this.audio.dispose();

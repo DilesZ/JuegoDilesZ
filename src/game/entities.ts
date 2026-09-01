@@ -4,6 +4,7 @@ import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type Hum
 import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS, ZERO_POSE } from './animations';
 import type { Particles } from './particles';
 import type { AudioEngine } from './audio';
+import { NEUTRAL_STATS, RARITY_INFO, type EquipStats, type ItemDef } from './items';
 
 /* ============================================================
    ENTIDADES: base, jugador, estela de espada, proyectiles, drops
@@ -40,6 +41,8 @@ export interface GameCtx {
   spawnProjectile(o: { pos: THREE.Vector3; dir: THREE.Vector3; speed: number; dmg: number; kind: 'arrow' | 'orb' }): void;
   onEnemyDied(e: import('./enemies').Enemy): void;
   playerHurt(): void;
+  /** Recoge un objeto de equipo/consumible del suelo */
+  gainItem(def: ItemDef): void;
   /** 0 = pleno día, 1 = noche cerrada (los enemigos se vuelven más rápidos) */
   nightFactor: number;
 }
@@ -180,6 +183,10 @@ export class Player extends Entity {
   xp = 0; xpNext = 70; level = 1;
   gold = 0; kills = 0;
   baseDmg = 1;
+  // estadísticas de equipo (recalculadas por Game al cambiar el inventario)
+  equip: EquipStats = { ...NEUTRAL_STATS };
+  // bonos permanentes de consumibles
+  perm = { hp: 0, dmg: 0, stam: 0 };
   state: 'idle' | 'roll' | 'attack' | 'hurt' | 'potion' | 'dead' = 'idle';
   stateT = 0;
   attackIdx = 0;
@@ -209,7 +216,28 @@ export class Player extends Entity {
     this.collectMats();
   }
 
-  get dmgMul() { return this.baseDmg * (1 + 0.09 * (this.level - 1)); }
+  /** Vida base por nivel + equipo + permanentes */
+  private recomputeMaxHp() {
+    const levelHp = 100 + 14 * (this.level - 1);
+    const newMax = levelHp + this.equip.hp + this.perm.hp;
+    const diff = newMax - this.maxHp;
+    this.maxHp = newMax;
+    if (diff > 0) this.hp += diff; // equipar armadura también cura la diferencia
+    this.hp = clamp(this.hp, 0, this.maxHp);
+  }
+
+  /** Game lo llama cada vez que cambia el equipamiento */
+  applyEquipStats(s: EquipStats) {
+    this.equip = s;
+    this.recomputeMaxHp();
+  }
+
+  get dmgMul() {
+    return this.baseDmg * (1 + 0.09 * (this.level - 1)) * (1 + this.equip.dmg + this.perm.dmg);
+  }
+  get moveSpeedMul() { return 1 + this.equip.speed; }
+  get critChance() { return clamp(this.equip.crit, 0, 0.75); }
+  get damageReduction() { return this.equip.def / (this.equip.def + 90); }
   get xpProgress() { return this.xp / this.xpNext; }
 
   gainXp(amount: number, ctx: GameCtx) {
@@ -218,9 +246,8 @@ export class Player extends Entity {
       this.xp -= this.xpNext;
       this.level++;
       this.xpNext = Math.round(70 * Math.pow(this.level, 1.35));
-      this.maxHp += 14;
       this.maxStamina += 4;
-      this.hp = this.maxHp;
+      this.recomputeMaxHp();
       this.stamina = this.maxStamina;
       ctx.audio.levelUp();
       ctx.particles.burst({
@@ -292,11 +319,13 @@ export class Player extends Entity {
 
   takeDamage(dmg: number, srcPos: THREE.Vector3, ctx: GameCtx): boolean {
     if (this.iFrames > 0 || this.state === 'dead') return false;
-    this.hp -= dmg;
+    // la defensa de la armadura reduce el daño entrante
+    const final = dmg * (1 - this.damageReduction);
+    this.hp -= final;
     this.iFrames = 0.28;
     ctx.audio.hurt();
     ctx.playerHurt();
-    ctx.addDamageNumber(new THREE.Vector3(this.pos.x + rand(-0.3, 0.3), this.pos.y + 2.1, this.pos.z), `-${Math.round(dmg)}`, '#ff5a4e');
+    ctx.addDamageNumber(new THREE.Vector3(this.pos.x + rand(-0.3, 0.3), this.pos.y + 2.1, this.pos.z), `-${Math.round(final)}`, '#ff5a4e');
     ctx.particles.burst({
       x: this.pos.x, y: this.pos.y + 1.2, z: this.pos.z,
       count: 14, speed: 3.2, color: 0xd8323c, size: 0.24, life: 0.7, gravity: 5, drag: 1.5,
@@ -329,10 +358,11 @@ export class Player extends Entity {
     this.comboTimer = Math.max(0, this.comboTimer - dt);
     if (this.comboTimer === 0 && this.state !== 'attack') this.attackIdx = 0;
 
-    // regeneración de aguante
+    // regeneración de aguante (mejorada por equipo y consumibles)
     this.staminaDelay = Math.max(0, this.staminaDelay - dt);
     if (this.staminaDelay === 0 && this.state !== 'dead') {
-      this.stamina = Math.min(this.maxStamina, this.stamina + 26 * dt);
+      const regen = 26 * (1 + this.equip.stam + this.perm.stam);
+      this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
     }
 
     // dirección de movimiento relativa a cámara
@@ -449,7 +479,7 @@ export class Player extends Entity {
     // movimiento normal (solo fuera de acciones que bloquean)
     if (this.state === 'idle') {
       this.sprinting = input.sprint && hasMove;
-      const speed = this.sprinting ? 9.2 : 6.2;
+      const speed = (this.sprinting ? 9.2 : 6.2) * this.moveSpeedMul;
       if (hasMove) {
         this.pos.addScaledVector(moveDir, speed * dt);
         if (!locked) {
@@ -577,24 +607,31 @@ export class Projectile {
   }
 }
 
-/* ---------- Drops (pociones) ---------- */
+/* ---------- Drops (pociones y objetos de equipo) ---------- */
 
 export class Pickup {
   root: THREE.Group;
   pos = new THREE.Vector3();
   life = 40;
   dead = false;
-  kind: 'potion';
+  kind: 'potion' | 'item';
+  item: ItemDef | null = null;
   private core: THREE.Mesh;
   private t = Math.random() * 10;
 
-  constructor(pos: THREE.Vector3, kind: 'potion') {
+  constructor(pos: THREE.Vector3, kind: 'potion' | 'item', item?: ItemDef) {
     this.kind = kind;
-    const { group, core } = buildPickupOrb(0xff4a4a);
+    const color = kind === 'item' && item ? RARITY_INFO[item.rarity].hex : 0xff4a4a;
+    const { group, core } = buildPickupOrb(color);
     this.root = group;
     this.core = core;
+    this.item = item ?? null;
+    if (kind === 'item') {
+      // los objetos flotan un poco más alto y giran una cartera de destellos
+      this.root.scale.setScalar(1.25);
+    }
     this.pos.copy(pos);
-    this.pos.y = terrainHeight(pos.x, pos.z) + 0.5;
+    this.pos.y = terrainHeight(pos.x, pos.z) + (kind === 'item' ? 0.7 : 0.5);
     this.root.position.copy(this.pos);
   }
 
@@ -607,7 +644,12 @@ export class Pickup {
     this.core.rotation.x += dt * 1.2;
     const p = ctx.player.pos;
     const d = Math.hypot(p.x - this.pos.x, p.z - this.pos.z);
-    if (d < 1.4 && Math.abs(p.y - this.pos.y) < 2.5 && !ctx.player.invulnHit) {
+    if (d < 1.5 && Math.abs(p.y - this.pos.y) < 2.5 && !ctx.player.invulnHit) {
+      if (this.kind === 'item' && this.item) {
+        ctx.gainItem(this.item);
+        this.dead = true;
+        return;
+      }
       if (ctx.player.potions < ctx.player.maxPotions) {
         ctx.player.potions++;
         ctx.audio.potion();

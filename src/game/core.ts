@@ -111,6 +111,33 @@ export function terrainNormalY(x: number, z: number): number {
 
 export type GamePhase = 'menu' | 'loading' | 'playing' | 'paused' | 'dead' | 'victory';
 
+/* Vistas serializables del inventario para la UI (React) */
+import type { EquipSlot, EquipStats, ItemKind, Rarity } from './items';
+
+export interface ItemView {
+  id: string;
+  name: string;
+  kind: ItemKind;
+  rarity: Rarity;
+  icon: string;
+  desc: string;
+  stats: Partial<EquipStats>;
+  useText?: string;
+  count: number;
+}
+
+export interface InvView {
+  open: boolean;
+  bag: ItemView[];
+  bagSize: number;
+  equip: Record<EquipSlot, ItemView | null>;
+  totals: EquipStats;   // bonus de equipo
+  defRed: number;       // reducción de daño 0..1
+  dmgMul: number;       // multiplicador total de daño
+  crit: number;         // prob. crítica total
+  perm: { hp: number; dmg: number; stam: number };  // bonos permanentes de consumibles
+}
+
 export interface HudState {
   phase: GamePhase;
   hp: number; maxHp: number;
@@ -131,6 +158,7 @@ export interface HudState {
   dayNum: number;
   night: boolean;
   notice: string;
+  inv: InvView;
 }
 
 export interface GameRefs {

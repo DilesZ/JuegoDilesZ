@@ -202,3 +202,34 @@
 .aetheria-notice {
   animation: aetheria-notice 7s ease forwards;
 }
+
+/* Scrollbar fina ámbar para paneles (mochila, menú) */
+.aetheria-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(180, 130, 50, 0.55) rgba(0, 0, 0, 0.25);
+}
+.aetheria-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.aetheria-scroll::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+}
+.aetheria-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(214, 168, 88, 0.75), rgba(140, 100, 40, 0.75));
+  border-radius: 6px;
+  border: 1px solid rgba(60, 42, 14, 0.6);
+}
+.aetheria-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(240, 196, 110, 0.9), rgba(170, 122, 50, 0.9));
+}
+
+/* Aparición con muelleo del panel de mochila */
+@keyframes aetheria-pop {
+  0% { opacity: 0; transform: scale(0.94) translateY(10px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.aetheria-pop {
+  animation: aetheria-pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.25) both;
+}
