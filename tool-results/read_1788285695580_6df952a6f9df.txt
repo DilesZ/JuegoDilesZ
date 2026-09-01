@@ -1,0 +1,876 @@
+     1→import * as THREE from 'three';
+     2→import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+     3→import {
+     4→  barkMaps, metalMaps, stoneMaps, woodMaps, grassBladeTexture,
+     5→  toonRamp3, toonRamp4,
+     6→} from './textures';
+     7→
+     8→/* ============================================================
+     9→   MODELOS PROCEDURALES — ESTILO ANIME
+    10→   - Materiales TOON (cel shading por rampa de bandas).
+    11→   - Contornos de tinta (inverted hull) para personajes y props.
+    12→   - Humanoides con rasgos anime: ojos grandes, pelo, orejas, colmillos.
+    13→   ============================================================ */
+    14→
+    15→export type ToonMat = THREE.MeshToonMaterial;
+    16→export type CharMat = THREE.MeshStandardMaterial | THREE.MeshToonMaterial;
+    17→
+    18→/** Material toon con rampa compartida */
+    19→export function toonMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}): THREE.MeshToonMaterial {
+    20→  return new THREE.MeshToonMaterial({
+    21→    color,
+    22→    gradientMap: toonRamp3(),
+    23→    ...opts,
+    24→  });
+    25→}
+    26→
+    27→/* ---------- Registro de viento y llamas (animados por World) ---------- */
+    28→
+    29→interface WindEntry { mat: THREE.Material; amp: number }
+    30→const windMats: WindEntry[] = [];
+    31→const flameMats: THREE.ShaderMaterial[] = [];
+    32→const _time = { value: 0 };
+    33→
+    34→export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | 'bottom' = 'top') {
+    35→  if (windMats.some(w => w.mat === mat)) return;
+    36→  windMats.push({ mat, amp });
+    37→  mat.onBeforeCompile = (shader) => {
+    38→    shader.uniforms.uTime = _time;
+    39→    shader.uniforms.uAmp = { value: amp };
+    40→    shader.vertexShader = shader.vertexShader
+    41→      .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform float uAmp;')
+    42→      .replace('#include <begin_vertex>', `#include <begin_vertex>
+    43→        {
+    44→          float wx = 0.0, wz = 0.0;
+    45→          #ifdef USE_INSTANCING
+    46→            wx = instanceMatrix[3][0]; wz = instanceMatrix[3][2];
+    47→          #endif
+    48→          float swayF = pow(${anchor === 'top' ? 'max(uv.y, 0.0)' : 'max(1.0 - uv.y, 0.0)'}, 1.5);
+    49→          float sway = sin(uTime * 1.6 + wx * 0.35 + wz * 0.5) + 0.45 * sin(uTime * 2.9 + wx * 1.4 + wz * 0.8);
+    50→          transformed.x += sway * uAmp * swayF;
+    51→          transformed.z += sway * uAmp * 0.6 * swayF;
+    52→        }`);
+    53→  };
+    54→  mat.customProgramCacheKey = () => `wind_${amp}_${anchor}`;
+    55→}
+    56→
+    57→export function updateWindAndFlames(t: number) {
+    58→  _time.value = t;
+    59→  for (const m of flameMats) m.uniforms.uTime.value = t;
+    60→}
+    61→
+    62→/** Material de llama procedural (plano con forma de fuego animado) */
+    63→export function makeFlameMaterial(core: number, outer: number, scaleY = 1): THREE.ShaderMaterial {
+    64→  const mat = new THREE.ShaderMaterial({
+    65→    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    66→    uniforms: {
+    67→      uTime: { value: 0 },
+    68→      uCore: { value: new THREE.Color(core) },
+    69→      uOuter: { value: new THREE.Color(outer) },
+    70→      uScaleY: { value: scaleY },
+    71→    },
+    72→    vertexShader: `varying vec2 vUv;
+    73→      void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    74→    fragmentShader: `varying vec2 vUv; uniform float uTime; uniform vec3 uCore; uniform vec3 uOuter; uniform float uScaleY;
+    75→      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+    76→      float noise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+    77→        return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y); }
+    78→      void main(){
+    79→        vec2 uv = vUv; uv.y *= uScaleY;
+    80→        float t = uTime;
+    81→        // ondulación horizontal creciente con la altura
+    82→        float wob = (noise(vec2(uv.y*3.0 - t*2.4, t*0.8)) - 0.5) * 0.34 * uv.y;
+    83→        float x = uv.x - 0.5 + wob;
+    84→        // silueta de llama: ancho decreciente hacia arriba
+    85→        float width = mix(0.42, 0.02, pow(uv.y, 0.72));
+    86→        float body = 1.0 - smoothstep(width*0.15, width, abs(x));
+    87→        // flicker vertical
+    88→        float flick = 0.82 + 0.18 * noise(vec2(t*3.1, uv.y*2.0));
+    89→        body *= flick * smoothstep(0.0, 0.10, uv.y) * (1.0 - smoothstep(0.72, 1.0, uv.y + abs(x)*0.8));
+    90→        if (body <= 0.004) discard;
+    91→        float core = smoothstep(0.12, 0.75, body) * (1.0 - uv.y*0.55);
+    92→        vec3 col = mix(uOuter, uCore, clamp(core, 0.0, 1.0));
+    93→        col *= 1.35 + 0.65 * body;
+    94→        gl_FragColor = vec4(col, body);
+    95→      }`,
+    96→  });
+    97→  flameMats.push(mat);
+    98→  return mat;
+    99→}
+   100→
+   101→/** Geometría de llama: dos planos cruzados */
+   102→export function flameGeometry(w: number, h: number): THREE.BufferGeometry {
+   103→  const p1 = new THREE.PlaneGeometry(w, h);
+   104→  p1.translate(0, h / 2, 0);
+   105→  const p2 = new THREE.PlaneGeometry(w, h);
+   106→  p2.translate(0, h / 2, 0);
+   107→  p2.rotateY(Math.PI / 2);
+   108→  return mergeGeometries([p1, p2])!;
+   109→}
+   110→
+   111→/* ---------- Materiales compartidos texturizados ---------- */
+   112→
+   113→let _bark: THREE.MeshToonMaterial | null = null;
+   114→export function barkMat(): THREE.MeshToonMaterial {
+   115→  if (!_bark) {
+   116→    const { map } = barkMaps();
+   117→    _bark = toonMat(0xffffff, { map });
+   118→  }
+   119→  return _bark;
+   120→}
+   121→
+   122→let _stone: THREE.MeshToonMaterial | null = null;
+   123→export function stoneMat(): THREE.MeshToonMaterial {
+   124→  if (!_stone) {
+   125→    const { map } = stoneMaps();
+   126→    _stone = toonMat(0xffffff, { map });
+   127→  }
+   128→  return _stone;
+   129→}
+   130→
+   131→let _wood: THREE.MeshToonMaterial | null = null;
+   132→export function woodMat(): THREE.MeshToonMaterial {
+   133→  if (!_wood) {
+   134→    const { map } = woodMaps();
+   135→    _wood = toonMat(0xffffff, { map });
+   136→  }
+   137→  return _wood;
+   138→}
+   139→
+   140→export function forgedMat(color = 0xdfe8f4): THREE.MeshToonMaterial {
+   141→  const { map } = metalMaps();
+   142→  return toonMat(color, { map });
+   143→}
+   144→
+   145→/* ---------- Materiales básicos (compat API) ---------- */
+   146→
+   147→export function stdMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}) {
+   148→  return toonMat(color, opts);
+   149→}
+   150→export function metalMat(color: number) {
+   151→  return toonMat(color);
+   152→}
+   153→export function emisMat(color: number, intensity = 1.6) {
+   154→  return new THREE.MeshToonMaterial({
+   155→    color, emissive: color, emissiveIntensity: intensity, gradientMap: toonRamp3(),
+   156→  });
+   157→}
+   158→
+   159→/* ---------- Contornos de tinta (inverted hull) ---------- */
+   160→
+   161→let _outlineMat: THREE.MeshBasicMaterial | null = null;
+   162→function outlineMat(): THREE.MeshBasicMaterial {
+   163→  if (!_outlineMat) {
+   164→    _outlineMat = new THREE.MeshBasicMaterial({ color: 0x191322, side: THREE.BackSide });
+   165→  }
+   166→  return _outlineMat;
+   167→}
+   168→
+   169→/** Clona una geometría desplazando cada vértice a lo largo de su normal */
+   170→function expandGeometry(geo: THREE.BufferGeometry, t: number): THREE.BufferGeometry {
+   171→  const g = geo.clone();
+   172→  const pos = g.getAttribute('position') as THREE.BufferAttribute;
+   173→  const nor = g.getAttribute('normal') as THREE.BufferAttribute | null;
+   174→  for (let i = 0; i < pos.count; i++) {
+   175→    const nx = nor ? nor.getX(i) : 0, ny = nor ? nor.getY(i) : 1, nz = nor ? nor.getZ(i) : 0;
+   176→    pos.setXYZ(i, pos.getX(i) + nx * t, pos.getY(i) + ny * t, pos.getZ(i) + nz * t);
+   177→  }
+   178→  g.computeBoundingSphere();
+   179→  return g;
+   180→}
+   181→
+   182→/**
+   183→ * Añade contornos de tinta estilo anime a todos los meshes de un grupo.
+   184→ * Omite materiales transparentes, aditivos, basic (ojos/glow) y emisivos.
+   185→ */
+   186→export function addOutlines(root: THREE.Object3D, thickness = 0.025) {
+   187→  const targets: THREE.Mesh[] = [];
+   188→  root.traverse(o => {
+   189→    if (!(o instanceof THREE.Mesh)) return;
+   190→    const m = o.material as THREE.Material & { transparent?: boolean; emissiveIntensity?: number };
+   191→    if (!m || Array.isArray(m)) return;
+   192→    if ((m as THREE.MeshBasicMaterial).isMeshBasicMaterial) return;
+   193→    if (m.transparent) return;
+   194→    if (typeof m.emissiveIntensity === 'number' && m.emissiveIntensity > 0.01) return;
+   195→    if (o.userData.noOutline) return;
+   196→    targets.push(o);
+   197→  });
+   198→  for (const mesh of targets) {
+   199→    const out = new THREE.Mesh(expandGeometry(mesh.geometry, thickness), outlineMat());
+   200→    out.castShadow = false;
+   201→    out.receiveShadow = false;
+   202→    out.renderOrder = mesh.renderOrder;
+   203→    mesh.add(out); // hereda transformación (sigue animaciones)
+   204→  }
+   205→}
+   206→
+   207→/** Añade rim light (fresnel) a un material toon/estándar */
+   208→export function addRim(mat: THREE.MeshStandardMaterial | THREE.MeshToonMaterial, color: number, strength = 0.35, power = 3.2) {
+   209→  const c = new THREE.Color(color);
+   210→  mat.onBeforeCompile = (shader) => {
+   211→    shader.uniforms.uRimColor = { value: c };
+   212→    shader.uniforms.uRimStrength = { value: strength };
+   213→    shader.uniforms.uRimPower = { value: power };
+   214→    shader.fragmentShader = shader.fragmentShader
+   215→      .replace('#include <common>', `#include <common>
+   216→        uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;`)
+   217→      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+   218→        {
+   219→          float rimF = pow(1.0 - saturate(dot(normalize(vViewPosition), normal)), uRimPower);
+   220→          totalEmissiveRadiance += uRimColor * rimF * uRimStrength;
+   221→        }`);
+   222→  };
+   223→  mat.customProgramCacheKey = () => `rim_${color}_${strength}_${power}`;
+   224→  return mat;
+   225→}
+   226→
+   227→function mesh(geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0, cast = true) {
+   228→  const m = new THREE.Mesh(geo, mat);
+   229→  m.position.set(x, y, z);
+   230→  m.castShadow = cast;
+   231→  return m;
+   232→}
+   233→
+   234→/* ---------- Armas ---------- */
+   235→
+   236→/** Hoja de sección romboidal (más creíble que una caja) */
+   237→function bladeGeo(len: number, wBase: number, tipFrac = 0.22): THREE.BufferGeometry {
+   238→  const g = new THREE.CylinderGeometry(wBase * 0.22, wBase, len * (1 - tipFrac), 4, 1);
+   239→  g.translate(0, len * (1 - tipFrac) / 2, 0);
+   240→  const tip = new THREE.ConeGeometry(wBase * 0.22, len * tipFrac, 4);
+   241→  tip.rotateY(Math.PI / 4);
+   242→  tip.translate(0, len * (1 - tipFrac) + (len * tipFrac) / 2, 0);
+   243→  const merged = mergeGeometries([g.toNonIndexed(), tip.toNonIndexed()])!;
+   244→  merged.rotateY(Math.PI / 4);
+   245→  merged.scale(1, 1, 0.42);
+   246→  merged.computeVertexNormals();
+   247→  return merged;
+   248→}
+   249→
+   250→export function buildSword(scale = 1): THREE.Group {
+   251→  const g = new THREE.Group();
+   252→  const steel = forgedMat(0xcdd6e2);
+   253→  const gold = forgedMat(0xc7a24a);
+   254→  const blade = mesh(bladeGeo(0.85 * scale, 0.05 * scale), steel, 0, 0.1 * scale, 0);
+   255→  // ranura luminosa (runa encendida)
+   256→  const rune = mesh(new THREE.BoxGeometry(0.012 * scale, 0.5 * scale, 0.024 * scale),
+   257→    emisMat(0x54e0ff, 1.5), 0, 0.5 * scale, 0, false);
+   258→  const guard = mesh(new THREE.TorusGeometry(0.085 * scale, 0.02 * scale, 6, 12, Math.PI), gold, 0, 0.1 * scale, 0);
+   259→  guard.rotation.z = Math.PI;
+   260→  const grip = mesh(new THREE.CylinderGeometry(0.026 * scale, 0.03 * scale, 0.2 * scale, 8), woodMat(), 0, -0.02 * scale, 0);
+   261→  const pommel = mesh(new THREE.OctahedronGeometry(0.045 * scale, 0), gold, 0, -0.14 * scale, 0);
+   262→  g.add(blade, rune, guard, grip, pommel);
+   263→  return g;
+   264→}
+   265→
+   266→export function buildGreatsword(scale = 1): THREE.Group {
+   267→  const g = new THREE.Group();
+   268→  const dark = forgedMat(0x4a4a58);
+   269→  const blade = mesh(bladeGeo(1.62 * scale, 0.15 * scale, 0.16), dark, 0, 0.12 * scale, 0);
+   270→  // grietas incandescentes
+   271→  const crackMat = emisMat(0xff3a1a, 1.8);
+   272→  for (let i = 0; i < 3; i++) {
+   273→    const crack = mesh(new THREE.BoxGeometry(0.016 * scale, 0.3 * scale - i * 0.04 * scale, 0.05 * scale),
+   274→      crackMat, 0, (0.45 + i * 0.35) * scale, 0, false);
+   275→    crack.rotation.z = (i - 1) * 0.18;
+   276→    g.add(crack);
+   277→  }
+   278→  // púas del lomo
+   279→  for (let i = 0; i < 3; i++) {
+   280→    const spike = mesh(new THREE.ConeGeometry(0.03 * scale, 0.12 * scale, 4), dark,
+   281→      0.07 * scale, (0.35 + i * 0.4) * scale, 0);
+   282→    spike.rotation.z = -1.9;
+   283→    g.add(spike);
+   284→  }
+   285→  const guard = mesh(new THREE.BoxGeometry(0.44 * scale, 0.07 * scale, 0.1 * scale), forgedMat(0x2a2a34), 0, 0.1 * scale, 0);
+   286→  const grip = mesh(new THREE.CylinderGeometry(0.04 * scale, 0.05 * scale, 0.34 * scale, 8), woodMat(), 0, -0.1 * scale, 0);
+   287→  const skull = mesh(new THREE.IcosahedronGeometry(0.075 * scale, 0), emisMat(0xff2a1a, 1.6), 0, -0.3 * scale, 0);
+   288→  g.add(blade, guard, grip, skull);
+   289→  return g;
+   290→}
+   291→
+   292→export function buildClub(): THREE.Group {
+   293→  const g = new THREE.Group();
+   294→  const stick = mesh(new THREE.CylinderGeometry(0.045, 0.06, 0.75, 8), barkMat(), 0, 0.3, 0);
+   295→  const head = mesh(new THREE.DodecahedronGeometry(0.17, 0), woodMat(), 0, 0.72, 0);
+   296→  const spike = mesh(new THREE.ConeGeometry(0.05, 0.15, 4), forgedMat(0x8a8a94), 0, 0.88, 0);
+   297→  g.add(stick, head, spike);
+   298→  return g;
+   299→}
+   300→
+   301→export function buildAxe(): THREE.Group {
+   302→  const g = new THREE.Group();
+   303→  const handle = mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.15, 8), woodMat(), 0, 0.45, 0);
+   304→  // hoja: media luna con forma de cuña
+   305→  const headGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.07, 3);
+   306→  const head = mesh(headGeo, forgedMat(0x9aa2ae), 0.13, 0.95, 0);
+   307→  head.rotation.x = Math.PI / 2;
+   308→  head.rotation.z = Math.PI;
+   309→  const edge = mesh(new THREE.TorusGeometry(0.3, 0.022, 5, 10, Math.PI * 0.8), forgedMat(0xd8dee8), 0.13, 0.95, 0);
+   310→  edge.rotation.x = Math.PI / 2;
+   311→  edge.rotation.z = Math.PI * 0.62;
+   312→  g.add(handle, head, edge);
+   313→  return g;
+   314→}
+   315→
+   316→export function buildBow(): THREE.Group {
+   317→  const g = new THREE.Group();
+   318→  const arc = mesh(new THREE.TorusGeometry(0.42, 0.03, 6, 14, Math.PI * 1.15), woodMat(), 0, 0.35, 0);
+   319→  arc.rotation.z = Math.PI * 0.42;
+   320→  const strMat = new THREE.LineBasicMaterial({ color: 0xd8d3c0 });
+   321→  const pts = [new THREE.Vector3(-0.38, 0.05, 0), new THREE.Vector3(0.06, 0.35, 0), new THREE.Vector3(-0.38, 0.65, 0)];
+   322→  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), strMat);
+   323→  g.add(arc, line);
+   324→  return g;
+   325→}
+   326→
+   327→export function buildShield(): THREE.Group {
+   328→  const g = new THREE.Group();
+   329→  const face = mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.045, 14), forgedMat(0xaeb9c9), 0, 0, 0);
+   330→  face.rotation.x = Math.PI / 2;
+   331→  const rim = mesh(new THREE.TorusGeometry(0.3, 0.028, 6, 16), forgedMat(0xd8b34a), 0, 0, 0);
+   332→  const boss0 = mesh(new THREE.SphereGeometry(0.075, 8, 6), forgedMat(0xd8b34a), 0, 0, 0.035);
+   333→  const sigil = mesh(new THREE.TorusGeometry(0.14, 0.014, 5, 12), emisMat(0x54e0ff, 0.9), 0, 0, 0.03, false);
+   334→  g.add(face, rim, boss0, sigil);
+   335→  return g;
+   336→}
+   337→
+   338→export function buildArrowMesh(): THREE.Group {
+   339→  const g = new THREE.Group();
+   340→  const shaft = mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.7, 5), woodMat(), 0, 0, 0, false);
+   341→  shaft.rotation.x = Math.PI / 2;
+   342→  const tip = mesh(new THREE.ConeGeometry(0.045, 0.14, 4), forgedMat(0xcdd6e2), 0, 0, 0.4, false);
+   343→  tip.rotation.x = Math.PI / 2;
+   344→  g.add(shaft, tip);
+   345→  return g;
+   346→}
+   347→
+   348→/* ---------- Humanoide paramétrico ---------- */
+   349→
+   350→export interface HumanoidOpts {
+   351→  scale?: number;
+   352→  skin: number;
+   353→  torso: number;
+   354→  legs: number;
+   355→  arms?: number;
+   356→  /** color del iris; con eyeStyle 'anime' pinta ojo blanco + iris + brillo */
+   357→  eyes?: number | null;
+   358→  eyeStyle?: 'glow' | 'anime';
+   359→  eyeIntensity?: number;
+   360→  weapon?: 'sword' | 'greatsword' | 'club' | 'axe' | 'bow' | 'none';
+   361→  shield?: boolean;
+   362→  helmet?: 'none' | 'knight' | 'horns' | 'hood';
+   363→  helmetColor?: number;
+   364→  shoulder?: number | null;
+   365→  chest?: number | null;
+   366→  cape?: number | null;
+   367→  capeTattered?: boolean;
+   368→  rim?: { color: number; strength: number };
+   369→  bigHead?: boolean;
+   370→  hunched?: boolean;
+   371→  /** color del pelo puntiagudo (anime); null = sin pelo */
+   372→  hair?: number | null;
+   373→  /** orejas largas laterales (goblin/orco) */
+   374→  ears?: boolean;
+   375→  /** colmillos pequeños hacia arriba */
+   376→  tusks?: boolean;
+   377→  /** grosor del contorno de tinta; 0/udefinido = sin contorno */
+   378→  outline?: number;
+   379→}
+   380→
+   381→export interface HumanoidRig {
+   382→  root: THREE.Group;
+   383→  body: THREE.Group;
+   384→  torso: THREE.Group;
+   385→  head: THREE.Group;
+   386→  armL: THREE.Group;
+   387→  armR: THREE.Group;
+   388→  legL: THREE.Group;
+   389→  legR: THREE.Group;
+   390→  handR: THREE.Group;
+   391→  handL: THREE.Group;
+   392→  weapon: THREE.Group | null;
+   393→  weaponMat: CharMat | null;
+   394→  height: number;
+   395→}
+   396→
+   397→export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
+   398→  const s = o.scale ?? 1;
+   399→  const root = new THREE.Group();
+   400→
+   401→  const mkBody = (color: number) => {
+   402→    const m = toonMat(color, { gradientMap: toonRamp4() });
+   403→    if (o.rim) addRim(m, o.rim.color, o.rim.strength);
+   404→    return m;
+   405→  };
+   406→  const skin = mkBody(o.skin);
+   407→  const torsoMat = mkBody(o.torso);
+   408→  const legMat = mkBody(o.legs);
+   409→  const armMat = mkBody(o.arms ?? o.skin);
+   410→
+   411→  const legLen = 0.52, torsoH = 0.55, headR = o.bigHead ? 0.21 : 0.155;
+   412→
+   413→  const body = new THREE.Group();
+   414→  body.position.y = legLen;
+   415→  root.add(body);
+   416→
+   417→  const pelvis = mesh(new THREE.BoxGeometry(0.3, 0.16, 0.2), legMat, 0, 0.04, 0);
+   418→  body.add(pelvis);
+   419→
+   420→  const torso = new THREE.Group();
+   421→  body.add(torso);
+   422→  const chest = mesh(new THREE.BoxGeometry(0.34, torsoH, 0.22), torsoMat, 0, torsoH / 2, 0);
+   423→  torso.add(chest);
+   424→  if (o.chest !== null && o.chest !== undefined) {
+   425→    torso.add(mesh(new THREE.BoxGeometry(0.37, torsoH * 0.55, 0.25), forgedMat(o.chest), 0, torsoH * 0.62, 0));
+   426→  }
+   427→  if (o.hunched) torso.rotation.x = 0.35;
+   428→
+   429→  // Capa
+   430→  if (o.cape !== null && o.cape !== undefined) {
+   431→    const capeGroup = new THREE.Group();
+   432→    capeGroup.position.set(0, torsoH * 0.9, -0.15);
+   433→    capeGroup.rotation.x = 0.14;
+   434→    capeGroup.rotation.y = Math.PI;
+   435→    const geo = new THREE.PlaneGeometry(0.5, 0.68, 4, 6);
+   436→    geo.translate(0, -0.34, 0);
+   437→    if (o.capeTattered) {
+   438→      const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+   439→      for (let i = 0; i < pos.count; i++) {
+   440→        if (pos.getY(i) < -0.3) {
+   441→          pos.setY(i, pos.getY(i) - Math.random() * 0.1);
+   442→          pos.setX(i, pos.getX(i) + (Math.random() - 0.5) * 0.06);
+   443→        }
+   444→      }
+   445→      geo.computeVertexNormals();
+   446→    }
+   447→    const capeMat = stdMat(o.cape, { side: THREE.DoubleSide });
+   448→    registerWind(capeMat, 0.05);
+   449→    const cape = new THREE.Mesh(geo, capeMat);
+   450→    cape.castShadow = true;
+   451→    cape.userData.noOutline = true; // plano sin volumen: el hull invertido fallaría
+   452→    capeGroup.add(cape);
+   453→    torso.add(capeGroup);
+   454→  }
+   455→
+   456→  // Cabeza
+   457→  const head = new THREE.Group();
+   458→  head.position.y = torsoH + 0.06;
+   459→  torso.add(head);
+   460→  head.add(mesh(new THREE.SphereGeometry(headR, 14, 12), skin, 0, headR * 0.8, 0));
+   461→
+   462→  // --- RASGOS ANIME (ojos grandes, boca, orejas, colmillos, pelo) ---
+   463→  const faceMat = (c: number) => new THREE.MeshBasicMaterial({ color: c });
+   464→  if (o.eyes !== null && o.eyes !== undefined && (o.eyeStyle ?? 'glow') === 'anime') {
+   465→    // esclerótica blanca aplastada + iris de color + brillo blanco
+   466→    const scleraR = headR * 0.24;
+   467→    const irisR = headR * 0.13;
+   468→    for (const side of [-1, 1]) {
+   469→      const s = mesh(new THREE.SphereGeometry(scleraR, 10, 8), faceMat(0xffffff),
+   470→        side * headR * 0.44, headR * 0.86, headR * 0.72, false);
+   471→      s.scale.set(0.85, 1.25, 0.5);
+   472→      head.add(s);
+   473→      const iris = mesh(new THREE.SphereGeometry(irisR, 10, 8), faceMat(o.eyes),
+   474→        side * headR * 0.46, headR * 0.86, headR * 0.86, false);
+   475→      iris.scale.set(0.9, 1.25, 0.5);
+   476→      head.add(iris);
+   477→      const pupil = mesh(new THREE.SphereGeometry(irisR * 0.5, 8, 6), faceMat(0x241a2e),
+   478→        side * headR * 0.47, headR * 0.84, headR * 0.95, false);
+   479→      pupil.scale.set(1, 1.3, 0.5);
+   480→      head.add(pupil);
+   481→      const glint = mesh(new THREE.SphereGeometry(irisR * 0.34, 6, 5), faceMat(0xffffff),
+   482→        side * headR * 0.5, headR * 0.97, headR * 0.98, false);
+   483→      head.add(glint);
+   484→    }
+   485→    // boca pequeña
+   486→    const mouth = mesh(new THREE.SphereGeometry(headR * 0.1, 8, 6), faceMat(0x8a4a44),
+   487→      0, headR * 0.42, headR * 0.92, false);
+   488→    mouth.scale.set(1.25, 0.55, 0.4);
+   489→    head.add(mouth);
+   490→  } else if (o.eyes !== null && o.eyes !== undefined) {
+   491→    const eyeMat = emisMat(o.eyes, o.eyeIntensity ?? 2.2);
+   492→    const eL = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, -0.06, headR * 0.85, headR * 0.78, false);
+   493→    const eR = mesh(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, 0.06, headR * 0.85, headR * 0.78, false);
+   494→    head.add(eL, eR);
+   495→  }
+   496→  // orejas largas laterales (elfo/goblin)
+   497→  if (o.ears) {
+   498→    const earGeo = new THREE.ConeGeometry(headR * 0.17, headR * 0.72, 5);
+   499→    for (const side of [-1, 1]) {
+   500→      const e = mesh(earGeo, skin, side * headR * 0.92, headR * 0.95, -0.01);
+   501→      e.rotation.z = side * -Math.PI * 0.46;
+   502→      e.rotation.x = -0.15;
+   503→      head.add(e);
+   504→    }
+   505→  }
+   506→  // colmillos
+   507→  if (o.tusks) {
+   508→    const tuskGeo = new THREE.ConeGeometry(headR * 0.09, headR * 0.34, 5);
+   509→    const tuskMat = faceMat(0xfff6e2);
+   510→    for (const side of [-1, 1]) {
+   511→      const t = mesh(tuskGeo, tuskMat, side * headR * 0.3, headR * 0.42, headR * 0.82, false);
+   512→      t.rotation.z = side * 0.22;
+   513→      head.add(t);
+   514→    }
+   515→  }
+   516→  // pelo puntiagudo anime (las puntas sobresalen claramente del cráneo)
+   517→  if (o.hair) {
+   518→    const hairMat = toonMat(o.hair, { gradientMap: toonRamp4() });
+   519→    const spikes: [number, number, number, number, number][] = [
+   520→      // [x, y, z, tiltZ, tiltX]
+   521→      [0, headR * 1.62, -0.02, 0, 0.05],
+   522→      [-headR * 0.62, headR * 1.48, 0.02, 0.5, 0.08],
+   523→      [headR * 0.62, headR * 1.48, 0.02, -0.5, 0.08],
+   524→      [-headR * 1.02, headR * 1.18, -0.06, 1.0, 0.05],
+   525→      [headR * 1.02, headR * 1.18, -0.06, -1.0, 0.05],
+   526→      [-headR * 0.34, headR * 1.5, -headR * 0.5, 0.2, -0.7],
+   527→      [headR * 0.34, headR * 1.5, -headR * 0.5, -0.2, -0.7],
+   528→      [0, headR * 1.42, headR * 0.62, 0, -0.95],
+   529→    ];
+   530→    for (const [x, y, z, tz, tx] of spikes) {
+   531→      const spike = mesh(new THREE.ConeGeometry(headR * 0.32, headR * 1.15, 5), hairMat, x, y, z);
+   532→      spike.rotation.z = tz;
+   533→      spike.rotation.x = tx;
+   534→      head.add(spike);
+   535→    }
+   536→  }
+   537→  if (o.helmet === 'knight') {
+   538→    const hm = forgedMat(o.helmetColor ?? 0xaeb9c9);
+   539→    // diadema abierta (cara visible estilo anime) + penacho
+   540→    const band = mesh(new THREE.TorusGeometry(headR * 0.98, headR * 0.1, 6, 14), hm, 0, headR * 0.82, 0);
+   541→    band.rotation.x = Math.PI / 2;
+   542→    head.add(band);
+   543→    const plumeMat = toonMat(0xd8564a);
+   544→    const plume = mesh(new THREE.ConeGeometry(headR * 0.22, headR * 1.2, 6), plumeMat, 0, headR * 1.75, -0.02, false);
+   545→    plume.rotation.x = -0.55;
+   546→    head.add(plume);
+   547→  } else if (o.helmet === 'horns') {
+   548→    const hm = forgedMat(o.helmetColor ?? 0x2e2e3c);
+   549→    head.add(mesh(new THREE.SphereGeometry(headR + 0.03, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.6), hm, 0, headR * 0.84, 0));
+   550→    const hornGeo = new THREE.ConeGeometry(0.05, 0.3, 6);
+   551→    const h1 = mesh(hornGeo, stdMat(0xcbb69a), -0.16, headR * 1.25, -0.02);
+   552→    h1.rotation.z = 0.7;
+   553→    const h2 = mesh(hornGeo, stdMat(0xcbb69a), 0.16, headR * 1.25, -0.02);
+   554→    h2.rotation.z = -0.7;
+   555→    head.add(h1, h2);
+   556→  } else if (o.helmet === 'hood') {
+   557→    const hm = stdMat(o.helmetColor ?? 0x2d2a33);
+   558→    const hood = mesh(new THREE.ConeGeometry(headR + 0.06, 0.3, 7), hm, 0, headR * 1.0, -0.02);
+   559→    hood.rotation.x = 0.22;
+   560→    head.add(hood);
+   561→  }
+   562→
+   563→  // Brazos
+   564→  const makeArm = (side: number) => {
+   565→    const arm = new THREE.Group();
+   566→    arm.position.set(side * 0.225, torsoH * 0.88, 0);
+   567→    torso.add(arm);
+   568→    arm.add(mesh(new THREE.CylinderGeometry(0.052, 0.045, 0.5, 8), armMat, 0, -0.25, 0));
+   569→    if (o.shoulder !== null && o.shoulder !== undefined) {
+   570→      arm.add(mesh(new THREE.SphereGeometry(0.1, 8, 6), forgedMat(o.shoulder), 0, 0.02, 0));
+   571→    }
+   572→    const hand = new THREE.Group();
+   573→    hand.position.y = -0.5;
+   574→    arm.add(hand);
+   575→    hand.add(mesh(new THREE.SphereGeometry(0.055, 6, 5), skin, 0, 0, 0));
+   576→    return { arm, hand };
+   577→  };
+   578→  const aL = makeArm(-1), aR = makeArm(1);
+   579→  aL.arm.rotation.x = -0.12; aR.arm.rotation.x = -0.12;
+   580→  aL.arm.rotation.z = 0.1; aR.arm.rotation.z = -0.1;
+   581→
+   582→  // Piernas
+   583→  const makeLeg = (side: number) => {
+   584→    const leg = new THREE.Group();
+   585→    leg.position.set(side * 0.11, 0.02, 0);
+   586→    body.add(leg);
+   587→    leg.add(mesh(new THREE.CylinderGeometry(0.065, 0.05, legLen, 8), legMat, 0, -legLen / 2 + 0.02, 0));
+   588→    leg.add(mesh(new THREE.BoxGeometry(0.1, 0.06, 0.2), stdMat(0x2a2018), 0, -legLen + 0.02, 0.04));
+   589→    return leg;
+   590→  };
+   591→  const legL = makeLeg(-1), legR = makeLeg(1);
+   592→
+   593→  // Arma en mano derecha
+   594→  let weapon: THREE.Group | null = null;
+   595→  let weaponMat: CharMat | null = null;
+   596→  if (o.weapon && o.weapon !== 'none') {
+   597→    weapon = new THREE.Group();
+   598→    weapon.position.y = -0.06;
+   599→    let w: THREE.Group;
+   600→    switch (o.weapon) {
+   601→      case 'sword': w = buildSword(1); break;
+   602→      case 'greatsword': w = buildGreatsword(1); break;
+   603→      case 'club': w = buildClub(); break;
+   604→      case 'axe': w = buildAxe(); break;
+   605→      case 'bow': w = buildBow(); break;
+   606→      default: w = buildSword(1);
+   607→    }
+   608→    weapon.add(w);
+   609→    weapon.traverse(m => {
+   610→      if (m instanceof THREE.Mesh) {
+   611→        const mm = m.material as THREE.MeshStandardMaterial;
+   612→        if (mm && mm.emissive && mm.emissiveIntensity > 0) weaponMat = mm;
+   613→      }
+   614→    });
+   615→    aR.hand.add(weapon);
+   616→  }
+   617→
+   618→  // Escudo en mano izquierda
+   619→  if (o.shield) {
+   620→    const sh = buildShield();
+   621→    sh.position.y = -0.34;
+   622→    sh.rotation.x = Math.PI / 2;
+   623→    sh.rotation.y = -0.25;
+   624→    aL.hand.add(sh);
+   625→  }
+   626→
+   627→  root.scale.setScalar(s);
+   628→  if (o.outline) addOutlines(root, o.outline);
+   629→  return {
+   630→    root, body, torso, head,
+   631→    armL: aL.arm, armR: aR.arm, legL, legR,
+   632→    handR: aR.hand, handL: aL.hand, weapon, weaponMat: weaponMat ?? null,
+   633→    height: (legLen + torsoH + headR * 2.4) * s,
+   634→  };
+   635→}
+   636→
+   637→/* ---------- Creadores de personajes (ESTILO ANIME) ---------- */
+   638→
+   639→export function buildPlayerRig(): HumanoidRig {
+   640→  return buildHumanoid({
+   641→    skin: 0xffdcb8, torso: 0x3d6ec4, legs: 0x2c3f66, arms: 0x3d6ec4,
+   642→    eyes: 0x38b6d8, eyeStyle: 'anime',
+   643→    weapon: 'sword', shield: true,
+   644→    helmet: 'knight', helmetColor: 0xcdd8e8,
+   645→    hair: 0x2c3e6e,
+   646→    chest: 0xd8e2f2, shoulder: 0xd8b34a,
+   647→    cape: 0xc23050,
+   648→    bigHead: true,
+   649→    rim: { color: 0x9fd8ff, strength: 0.3 },
+   650→    outline: 0.022,
+   651→  });
+   652→}
+   653→export function buildGoblinRig(): HumanoidRig {
+   654→  return buildHumanoid({
+   655→    scale: 0.72, skin: 0x6fc23c, torso: 0x9a6a30, legs: 0x6a4a24,
+   656→    eyes: 0xffd23e, eyeStyle: 'anime', weapon: 'club',
+   657→    bigHead: true, hunched: true,
+   658→    ears: true, tusks: true,
+   659→    hair: 0x2e5a1c,
+   660→    outline: 0.032,
+   661→  });
+   662→}
+   663→export function buildArcherRig(): HumanoidRig {
+   664→  return buildHumanoid({
+   665→    scale: 0.95, skin: 0xe8d4b8, torso: 0x4a4438, legs: 0x37322a,
+   666→    eyes: 0x9df2ff, weapon: 'bow', helmet: 'hood', helmetColor: 0x4a4438,
+   667→    outline: 0.024,
+   668→  });
+   669→}
+   670→export function buildOrcRig(): HumanoidRig {
+   671→  return buildHumanoid({
+   672→    scale: 1.42, skin: 0x62a03c, torso: 0x6a4426, legs: 0x4a3220,
+   673→    eyes: 0xff9a2a, eyeStyle: 'anime', weapon: 'axe',
+   674→    shoulder: 0x8a8a96, hunched: true,
+   675→    ears: true, tusks: true,
+   676→    hair: 0x243018,
+   677→    outline: 0.034,
+   678→  });
+   679→}
+   680→export function buildBossRig(): HumanoidRig {
+   681→  return buildHumanoid({
+   682→    scale: 1.95, skin: 0x4a4a64, torso: 0x302e48, legs: 0x26243a,
+   683→    eyes: 0xff2a1e, eyeIntensity: 3, weapon: 'greatsword',
+   684→    helmet: 'horns', helmetColor: 0x26263a, chest: 0x26263a, shoulder: 0x26263a,
+   685→    cape: 0x1c0e18, capeTattered: true,
+   686→    rim: { color: 0xff4a30, strength: 0.5 },
+   687→    outline: 0.05,
+   688→  });
+   689→}
+   690→
+   691→/* ---------- Props del mundo ---------- */
+   692→
+   693→export function buildObelisk(cleansed: boolean): {
+   694→  group: THREE.Group; crystal: THREE.Mesh; runes: THREE.Mesh[]; shards: THREE.Mesh[];
+   695→} {
+   696→  const g = new THREE.Group();
+   697→  const st = stoneMat();
+   698→  const base = mesh(new THREE.CylinderGeometry(1.15, 1.45, 0.5, 8), st, 0, 0.25, 0);
+   699→  const shaft = mesh(new THREE.CylinderGeometry(0.35, 0.64, 3.4, 7), st, 0, 2.0, 0);
+   700→  const ring = mesh(new THREE.TorusGeometry(0.52, 0.06, 6, 14), st, 0, 3.55, 0);
+   701→  ring.rotation.x = Math.PI / 2;
+   702→  const crystalMat = cleansed ? emisMat(0x37d8c8, 2.4) : emisMat(0xd8323c, 1.8);
+   703→  const crystal = mesh(new THREE.OctahedronGeometry(0.46, 0), crystalMat, 0, 4.15, 0);
+   704→  g.add(base, shaft, ring, crystal);
+   705→  const runes: THREE.Mesh[] = [];
+   706→  for (let i = 0; i < 4; i++) {
+   707→    const r = mesh(new THREE.BoxGeometry(0.1, 0.3, 0.03),
+   708→      cleansed ? emisMat(0x37d8c8, 1.6) : emisMat(0xd8323c, 1.2),
+   709→      Math.sin((i / 4) * Math.PI * 2) * 0.56, 1.2 + (i % 2) * 0.8, Math.cos((i / 4) * Math.PI * 2) * 0.56, false);
+   710→    r.lookAt(0, r.position.y, 0);
+   711→    g.add(r);
+   712→    runes.push(r);
+   713→  }
+   714→  // fragmentos orbitando el cristal
+   715→  const shards: THREE.Mesh[] = [];
+   716→  const shardMat = cleansed ? emisMat(0x37d8c8, 1.4) : emisMat(0xd8323c, 1.1);
+   717→  for (let i = 0; i < 3; i++) {
+   718→    const sh = mesh(new THREE.TetrahedronGeometry(0.11), shardMat, 0, 0, 0, false);
+   719→    g.add(sh);
+   720→    shards.push(sh);
+   721→  }
+   722→  addOutlines(g, 0.045);
+   723→  return { group: g, crystal, runes, shards };
+   724→}
+   725→
+   726→export function buildBonfire(): { group: THREE.Group; light: THREE.PointLight; logs: THREE.Mesh[] } {
+   727→  const g = new THREE.Group();
+   728→  const logs: THREE.Mesh[] = [];
+   729→  for (let i = 0; i < 5; i++) {
+   730→    const log = mesh(new THREE.CylinderGeometry(0.09, 0.11, 1.3, 6), barkMat(),
+   731→      Math.sin((i / 5) * Math.PI * 2) * 0.35, 0.22, Math.cos((i / 5) * Math.PI * 2) * 0.35);
+   732→    log.rotation.z = Math.PI / 2.4;
+   733→    log.rotation.y = (i / 5) * Math.PI * 2;
+   734→    g.add(log); logs.push(log);
+   735→  }
+   736→  // anillo de piedras
+   737→  for (let i = 0; i < 8; i++) {
+   738→    const a = (i / 8) * Math.PI * 2;
+   739→    const st = mesh(new THREE.DodecahedronGeometry(0.16 + (i % 2) * 0.05, 0), stoneMat(),
+   740→      Math.cos(a) * 0.78, 0.08, Math.sin(a) * 0.78);
+   741→    st.rotation.set(Math.random(), Math.random() * 3, Math.random());
+   742→    g.add(st);
+   743→  }
+   744→  // llamas shader (cruzadas) + núcleo brillante
+   745→  const flame = new THREE.Mesh(flameGeometry(1.05, 1.5), makeFlameMaterial(0xffe9a8, 0xff6a1a));
+   746→  flame.position.y = 0.28;
+   747→  flame.name = 'flame';
+   748→  g.add(flame);
+   749→  const inner = new THREE.Mesh(flameGeometry(0.5, 0.7), makeFlameMaterial(0xffffff, 0xffc23e));
+   750→  inner.position.y = 0.22;
+   751→  inner.name = 'flameInner';
+   752→  g.add(inner);
+   753→  const light = new THREE.PointLight(0xff9040, 16, 22, 1.55);
+   754→  light.position.set(0, 1.5, 0);
+   755→  g.add(light);
+   756→  const glow = mesh(new THREE.CylinderGeometry(1.55, 1.85, 0.06, 14), stdMat(0x1c1c22), 0, 0.03, 0, false);
+   757→  g.add(glow);
+   758→  return { group: g, light, logs };
+   759→}
+   760→
+   761→export function buildTorch(soul = false): { group: THREE.Group; light: THREE.PointLight; flame: THREE.Mesh } {
+   762→  const g = new THREE.Group();
+   763→  const pole = mesh(new THREE.CylinderGeometry(0.06, 0.085, 2.4, 7), woodMat(), 0, 1.2, 0);
+   764→  const bowl = mesh(new THREE.CylinderGeometry(0.22, 0.12, 0.22, 8), forgedMat(0x4a4a52), 0, 2.45, 0);
+   765→  const flame = new THREE.Mesh(
+   766→    flameGeometry(0.42, 0.62),
+   767→    soul ? makeFlameMaterial(0xffc9b0, 0xd8202e) : makeFlameMaterial(0xffe2a0, 0xff7a1e),
+   768→  );
+   769→  flame.position.y = 2.62;
+   770→  const light = new THREE.PointLight(soul ? 0xe03040 : 0xff8030, 6.5, 14, 1.8);
+   771→  light.position.set(0, 2.95, 0);
+   772→  g.add(pole, bowl, flame, light);
+   773→  return { group: g, light, flame };
+   774→}
+   775→
+   776→export function buildRuinedPillar(h = 2.4): THREE.Group {
+   777→  const g = new THREE.Group();
+   778→  const st = stoneMat();
+   779→  g.add(mesh(new THREE.BoxGeometry(0.72, 0.26, 0.72), st, 0, 0.13, 0));
+   780→  const col = mesh(new THREE.CylinderGeometry(0.26, 0.3, h, 10), st, 0, h / 2 + 0.22, 0);
+   781→  col.rotation.z = 0.03;
+   782→  g.add(col);
+   783→  // capitel caído
+   784→  const cap = mesh(new THREE.BoxGeometry(0.78, 0.22, 0.78), st, 0.08, h + 0.3, 0.05);
+   785→  cap.rotation.set(0.1, 0.4, -0.12);
+   786→  g.add(cap);
+   787→  addOutlines(g, 0.035);
+   788→  return g;
+   789→}
+   790→
+   791→export function buildBrokenArch(): THREE.Group {
+   792→  const g = new THREE.Group();
+   793→  const st = stoneMat();
+   794→  const l = mesh(new THREE.BoxGeometry(0.55, 3.4, 0.55), st, -1.5, 1.7, 0);
+   795→  const r = mesh(new THREE.BoxGeometry(0.55, 2.6, 0.55), st, 1.5, 1.3, 0.1);
+   796→  r.rotation.z = 0.08;
+   797→  const top = mesh(new THREE.BoxGeometry(3.8, 0.5, 0.6), st, -0.2, 3.55, 0);
+   798→  top.rotation.z = -0.1;
+   799→  g.add(l, r, top);
+   800→  addOutlines(g, 0.04);
+   801→  return g;
+   802→}
+   803→
+   804→export function buildPickupOrb(color: number): { group: THREE.Group; core: THREE.Mesh } {
+   805→  const g = new THREE.Group();
+   806→  const core = mesh(new THREE.IcosahedronGeometry(0.16, 0), emisMat(color, 2.4), 0, 0, 0, false);
+   807→  const halo = mesh(new THREE.SphereGeometry(0.24, 10, 8),
+   808→    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending, depthWrite: false }), 0, 0, 0, false);
+   809→  g.add(core, halo);
+   810→  return { group: g, core };
+   811→}
+   812→
+   813→export function buildSigil(): { group: THREE.Group; ring: THREE.Mesh } {
+   814→  const g = new THREE.Group();
+   815→  const mat = stoneMat();
+   816→  g.add(mesh(new THREE.CylinderGeometry(2.2, 2.5, 0.3, 24), mat, 0, 0.15, 0));
+   817→  const ring = mesh(new THREE.TorusGeometry(1.5, 0.09, 8, 32), emisMat(0xd8323c, 1.6), 0, 0.4, 0, false);
+   818→  ring.rotation.x = Math.PI / 2;
+   819→  g.add(ring);
+   820→  return { group: g, ring };
+   821→}
+   822→
+   823→/* ---------- Hierba: mata de 3 hojas curvadas (textura alpha) ---------- */
+   824→
+   825→export function grassGeometry(): THREE.BufferGeometry {
+   826→  const blades: THREE.BufferGeometry[] = [];
+   827→  const H = 0.6;
+   828→  for (let i = 0; i < 3; i++) {
+   829→    const p = new THREE.PlaneGeometry(0.2, H, 1, 3);
+   830→    p.translate(0, H / 2, 0);
+   831→    // curvatura de la hoja
+   832→    const pos = p.getAttribute('position') as THREE.BufferAttribute;
+   833→    for (let v = 0; v < pos.count; v++) {
+   834→      const y = pos.getY(v);
+   835→      const k = Math.pow(y / H, 2);
+   836→      pos.setZ(v, k * 0.16);
+   837→      pos.setX(v, pos.getX(v) * (1 - k * 0.35));
+   838→    }
+   839→    p.rotateY((i / 3) * Math.PI + 0.3);
+   840→    p.rotateX(((i * 37) % 10 - 5) * 0.02);
+   841→    blades.push(p);
+   842→  }
+   843→  const merged = mergeGeometries(blades)!;
+   844→  merged.computeVertexNormals();
+   845→  return merged;
+   846→}
+   847→
+   848→export function grassMaterial(): THREE.MeshToonMaterial {
+   849→  const mat = new THREE.MeshToonMaterial({
+   850→    map: grassBladeTexture(),
+   851→    alphaTest: 0.42,
+   852→    side: THREE.DoubleSide,
+   853→    color: 0xffffff,
+   854→    gradientMap: toonRamp3(),
+   855→  });
+   856→  registerWind(mat, 0.09);
+   857→  return mat;
+   858→}
+   859→
+   860→/** Material de copa de pino (dos tonos) con viento — anime saturado */
+   861→export function canopyMat(color: number): THREE.MeshToonMaterial {
+   862→  const m = toonMat(color);
+   863→  registerWind(m, 0.06);
+   864→  return m;
+   865→}
+   866→
+   867→/** Seta luminosa (para instanciar en grupos) */
+   868→export function mushroomGeos(): { stem: THREE.BufferGeometry; cap: THREE.BufferGeometry } {
+   869→  const stem = new THREE.CylinderGeometry(0.03, 0.045, 0.16, 6);
+   870→  stem.translate(0, 0.08, 0);
+   871→  const cap = new THREE.SphereGeometry(0.09, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55);
+   872→  cap.scale(1, 0.75, 1);
+   873→  cap.translate(0, 0.15, 0);
+   874→  return { stem, cap };
+   875→}
+   876→

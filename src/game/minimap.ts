@@ -17,6 +17,7 @@ export function drawMinimap(
   shrines: { x: number; z: number; cleansed: boolean }[],
   bossActive: boolean,
   victory: boolean,
+  merchant?: { x: number; z: number },
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -77,6 +78,20 @@ export function drawMinimap(
     ctx.strokeStyle = s.cleansed ? '#a8fff4' : '#ff8a8a';
     ctx.lineWidth = 1;
     ctx.strokeRect(-3.4, -3.4, 6.8, 6.8);
+    ctx.restore();
+  }
+
+  // mercader (rombo dorado)
+  if (merchant) {
+    const [mx, mz] = toMap(merchant.x, merchant.z);
+    ctx.save();
+    ctx.translate(mx, mz);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = '#ffc84a';
+    ctx.fillRect(-2.6, -2.6, 5.2, 5.2);
+    ctx.strokeStyle = '#5a3c10';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-2.6, -2.6, 5.2, 5.2);
     ctx.restore();
   }
 

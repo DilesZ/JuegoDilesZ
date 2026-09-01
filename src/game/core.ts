@@ -138,6 +138,25 @@ export interface InvView {
   perm: { hp: number; dmg: number; stam: number };  // bonos permanentes de consumibles
 }
 
+/* Vista serializable de la tienda del mercader para la UI (React) */
+export interface ShopEntryView {
+  item: ItemView;
+  price: number;   // precio de compra ◈
+}
+export interface ShopSellView {
+  index: number;   // índice en la mochila (para vender)
+  item: ItemView;
+  sell: number;    // oro recibido ◈
+}
+export interface ShopView {
+  open: boolean;
+  name: string;
+  stock: ShopEntryView[];
+  bag: ShopSellView[];
+  gold: number;
+  restockDay: number; // día en que se reabasteció
+}
+
 export interface HudState {
   phase: GamePhase;
   hp: number; maxHp: number;
@@ -159,6 +178,7 @@ export interface HudState {
   night: boolean;
   notice: string;
   inv: InvView;
+  shop: ShopView;
 }
 
 export interface GameRefs {

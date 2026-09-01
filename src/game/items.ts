@@ -200,6 +200,65 @@ export function itemById(id: string): ItemDef {
   return it;
 }
 
+/* ---------- Economía (mercader) ---------- */
+
+/** Valor base por rareza en monedas ◈ */
+export const RARITY_VALUE: Record<Rarity, number> = {
+  comun: 30,
+  raro: 85,
+  epico: 190,
+  legendario: 420,
+};
+
+/** Precio de compra al mercader (ligero recargo sobre el valor) */
+export function buyPrice(def: ItemDef): number {
+  const base = RARITY_VALUE[def.rarity];
+  const kindMul = def.kind === 'consumible' ? 0.8 : 1; // los consumibles son más baratos
+  return Math.max(10, Math.round((base * kindMul) / 5) * 5);
+}
+
+/** Precio de venta al mercader (40% del valor, mínimo 6 ◈) */
+export function sellPrice(def: ItemDef): number {
+  return Math.max(6, Math.round(RARITY_VALUE[def.rarity] * 0.4));
+}
+
+/**
+ * Surtido del mercader: consumibles siempre + N piezas de equipo
+ * con sesgo de rareza según el nivel del héroe (sin repeticiones).
+ */
+export function merchantStock(level: number, nEquip = 6): ItemDef[] {
+  const stock: ItemDef[] = [
+    itemById('elixir_vida'),
+    itemById('piedra_afilar'),
+    itemById('fruta_espiritu'),
+  ];
+  const lv = Math.max(1, level);
+  const weights: [Rarity, number][] = [
+    ['comun', Math.max(0.6, 2.6 - lv * 0.15)],
+    ['raro', 1.7],
+    ['epico', 0.55 + Math.min(0.5, lv * 0.05)],
+    ['legendario', 0.12 + Math.min(0.25, lv * 0.02)],
+  ];
+  const picked = new Set<string>();
+  let guard = 0;
+  while (stock.length - 3 < nEquip && guard++ < 200) {
+    const def = rollDropRarity(weights);
+    if (picked.has(def.id)) continue;
+    picked.add(def.id);
+    stock.push(def);
+  }
+  return stock;
+}
+
+function rollDropRarity(weights: [Rarity, number][]): ItemDef {
+  const rarity = pickWeighted(weights);
+  const kind = pickWeighted(KIND_WEIGHTS);
+  const pool = ITEMS.filter(i => i.rarity === rarity && i.kind === kind && i.kind !== 'consumible');
+  const fallback = ITEMS.filter(i => i.rarity === rarity && i.kind !== 'consumible');
+  const src = pool.length ? pool : fallback;
+  return src[Math.floor(Math.random() * src.length)];
+}
+
 /* ---------- Botín ---------- */
 
 const KIND_WEIGHTS: [ItemKind, number][] = [

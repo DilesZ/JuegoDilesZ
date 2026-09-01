@@ -1,0 +1,681 @@
+     1→'use client';
+     2→
+     3→import { useEffect, useRef, useState } from 'react';
+     4→import type { HudState, ItemView } from '@/game/core';
+     5→import type { Game, QualityTier } from '@/game/game';
+     6→
+     7→/* ============================================================
+     8→   AETHERIA — Eco del Reino Caído · Action RPG 3D
+     9→   Menú cinemático sobre el mundo en vivo + HUD + Inventario
+    10→   ============================================================ */
+    11→
+    12→const INITIAL_HUD: HudState = {
+    13→  phase: 'menu',
+    14→  hp: 100, maxHp: 100,
+    15→  stamina: 100, maxStamina: 100,
+    16→  xp: 0, xpNext: 70, level: 1,
+    17→  gold: 0, potions: 4, maxPotions: 6,
+    18→  shrinesCleansed: 0, shrinesTotal: 3,
+    19→  objective: '',
+    20→  enemiesAlive: 0,
+    21→  bossActive: false, bossName: '', bossHp: 0, bossMaxHp: 1, bossPhase: 1,
+    22→  kills: 0, time: 0,
+    23→  lockOn: false,
+    24→  prompt: '',
+    25→  fps: 60,
+    26→  endless: false,
+    27→  quality: 'alto',
+    28→  clock: '08:09',
+    29→  dayNum: 1,
+    30→  night: false,
+    31→  notice: '',
+    32→  inv: {
+    33→    open: false,
+    34→    bag: [], bagSize: 24,
+    35→    equip: { weapon: null, armor: null, helmet: null, acc1: null, acc2: null },
+    36→    totals: { dmg: 0, hp: 0, def: 0, speed: 0, stam: 0, crit: 0 },
+    37→    defRed: 0, dmgMul: 1, crit: 0,
+    38→    perm: { hp: 0, dmg: 0, stam: 0 },
+    39→  },
+    40→};
+    41→
+    42→function fmtTime(t: number): string {
+    43→  const m = Math.floor(t / 60);
+    44→  const s = Math.floor(t % 60);
+    45→  return `${m}:${s.toString().padStart(2, '0')}`;
+    46→}
+    47→
+    48→function Bar({ value, max, className, height = 'h-3.5' }: { value: number; max: number; className: string; height?: string }) {
+    49→  const pct = Math.max(0, Math.min(100, (value / Math.max(1, max)) * 100));
+    50→  return (
+    51→    <div className={`w-full ${height} rounded-sm border border-black/60 bg-black/70 overflow-hidden shadow-[inset_0_1px_3px_rgba(0,0,0,0.8)]`}>
+    52→      <div className={`h-full ${className} transition-[width] duration-150 ease-out`} style={{ width: `${pct}%` }} />
+    53→    </div>
+    54→  );
+    55→}
+    56→
+    57→function MenuButton({ onClick, children, primary = false, small = false }: { onClick: () => void; children: React.ReactNode; primary?: boolean; small?: boolean }) {
+    58→  return (
+    59→    <button
+    60→      onClick={onClick}
+    61→      className={`${small ? 'px-4 py-2 text-[11px] min-h-[38px]' : 'px-8 py-3 min-h-[46px] text-sm'} font-display tracking-[0.2em] uppercase border transition-all duration-200
+    62→        ${primary
+    63→          ? 'border-amber-500/70 bg-amber-900/30 text-amber-100 hover:bg-amber-700/40 hover:border-amber-400 hover:shadow-[0_0_24px_rgba(245,180,80,0.25)]'
+    64→          : 'border-stone-600/60 bg-stone-900/70 text-stone-300 hover:bg-stone-800 hover:text-amber-100'}`}
+    65→    >
+    66→      {children}
+    67→    </button>
+    68→  );
+    69→}
+    70→
+    71→/** Reloj del mundo: sol/luna + día + hora in-game */
+    72→function ClockChip({ clock, day, night }: { clock: string; day: number; night: boolean }) {
+    73→  return (
+    74→    <div className="inline-flex items-center gap-2 bg-black/50 border border-amber-900/40 rounded px-3 py-1 backdrop-blur-[2px]">
+    75→      {night ? (
+    76→        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-indigo-200 drop-shadow-[0_0_6px_rgba(165,180,252,0.9)]">
+    77→          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor" />
+    78→        </svg>
+    79→      ) : (
+    80→        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-amber-300 drop-shadow-[0_0_6px_rgba(252,211,77,0.9)]">
+    81→          <circle cx="12" cy="12" r="4.4" fill="currentColor" />
+    82→          {Array.from({ length: 8 }).map((_, i) => (
+    83→            <line key={i} x1="12" y1="1.5" x2="12" y2="4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" transform={`rotate(${i * 45} 12 12)`} />
+    84→          ))}
+    85→        </svg>
+    86→      )}
+    87→      <span className="font-display text-[12px] tracking-[0.14em] text-amber-100/95">
+    88→        Día {day} · {clock}
+    89→      </span>
+    90→    </div>
+    91→  );
+    92→}
+    93→
+    94→/** Esquinas ornamentales del panel */
+    95→function Corners() {
+    96→  const base = 'absolute w-5 h-5 border-amber-500/60 pointer-events-none';
+    97→  return (
+    98→    <>
+    99→      <span className={`${base} top-1.5 left-1.5 border-t-2 border-l-2`} />
+   100→      <span className={`${base} top-1.5 right-1.5 border-t-2 border-r-2`} />
+   101→      <span className={`${base} bottom-1.5 left-1.5 border-b-2 border-l-2`} />
+   102→      <span className={`${base} bottom-1.5 right-1.5 border-b-2 border-r-2`} />
+   103→    </>
+   104→  );
+   105→}
+   106→
+   107→const CONTROLS: [string, string][] = [
+   108→  ['W A S D', 'Moverse'],
+   109→  ['Ratón', 'Cámara'],
+   110→  ['Rueda', 'Zoom de cámara'],
+   111→  ['Clic izq.', 'Ataque ligero (combo ×3)'],
+   112→  ['Clic der.', 'Ataque cargado'],
+   113→  ['Espacio', 'Esquiva rodando (invulnerable)'],
+   114→  ['Tab', 'Fijar objetivo'],
+   115→  ['F', 'Beber poción'],
+   116→  ['E', 'Interactuar'],
+   117→  ['I', 'Inventario y equipo'],
+   118→  ['Shift', 'Esprintar'],
+   119→  ['Esc', 'Pausa'],
+   120→];
+   121→
+   122→const QUALITIES: { id: QualityTier; label: string }[] = [
+   123→  { id: 'bajo', label: 'Bajo' },
+   124→  { id: 'medio', label: 'Medio' },
+   125→  { id: 'alto', label: 'Alto' },
+   126→];
+   127→
+   128→/* ============================================================
+   129→   INVENTARIO / EQUIPO
+   130→   ============================================================ */
+   131→
+   132→const RARITY_CSS: Record<string, string> = {
+   133→  comun: '#a8b2c0', raro: '#54a8ff', epico: '#c07aff', legendario: '#ffb347',
+   134→};
+   135→const RARITY_LABEL: Record<string, string> = {
+   136→  comun: 'Común', raro: 'Raro', epico: 'Épico', legendario: 'Legendario',
+   137→};
+   138→const KIND_LABEL: Record<string, string> = {
+   139→  weapon: 'Arma', armor: 'Armadura', helmet: 'Yelmo', accessory: 'Accesorio', consumible: 'Consumible',
+   140→};
+   141→const SLOT_LABEL: Record<string, string> = {
+   142→  weapon: 'Arma', armor: 'Armadura', helmet: 'Yelmo', acc1: 'Accesorio I', acc2: 'Accesorio II',
+   143→};
+   144→
+   145→/** Líneas de estadísticas de un objeto, tipo "+26% Daño" */
+   146→function ItemStatLines({ item }: { item: ItemView }) {
+   147→  const s = item.stats;
+   148→  const rows: string[] = [];
+   149→  if (s.dmg) rows.push(`+${Math.round(s.dmg * 100)}% Daño`);
+   150→  if (s.hp) rows.push(`+${s.hp} Vida`);
+   151→  if (s.def) rows.push(`+${s.def} Defensa`);
+   152→  if (s.speed) rows.push(`+${Math.round(s.speed * 100)}% Velocidad`);
+   153→  if (s.stam) rows.push(`+${Math.round(s.stam * 100)}% Aguante`);
+   154→  if (s.crit) rows.push(`+${Math.round(s.crit * 100)}% Crítico`);
+   155→  if (!rows.length && item.useText) rows.push(item.useText);
+   156→  if (!rows.length) return null;
+   157→  return (
+   158→    <ul className="space-y-0.5">
+   159→      {rows.map(r => (
+   160→        <li key={r} className="text-[12px] text-emerald-300/90 font-semibold">{r}</li>
+   161→      ))}
+   162→    </ul>
+   163→  );
+   164→}
+   165→
+   166→/** Hueco de equipo o de mochila */
+   167→function ItemSlot({
+   168→  item, label, onClick, onHover, size = 'w-16 h-16', iconSize = 'text-2xl',
+   169→}: {
+   170→  item: ItemView | null; label?: string; onClick?: () => void;
+   171→  onHover?: (it: ItemView | null) => void; size?: string; iconSize?: string;
+   172→}) {
+   173→  const rc = item ? RARITY_CSS[item.rarity] : null;
+   174→  return (
+   175→    <button
+   176→      onClick={onClick}
+   177→      onMouseEnter={() => onHover?.(item)}
+   178→      onMouseLeave={() => onHover?.(null)}
+   179→      disabled={!onClick}
+   180→      className={`relative ${size} shrink-0 rounded-md border-2 bg-stone-950/85 transition-all duration-150 flex items-center justify-center
+   181→        ${item && onClick ? 'cursor-pointer hover:scale-[1.06] hover:z-10' : ''} ${!item && onClick ? 'cursor-default' : ''}`}
+   182→      style={rc ? { borderColor: rc, boxShadow: `0 0 10px ${rc}44, inset 0 0 8px ${rc}22` } : { borderColor: 'rgba(120,113,108,0.35)' }}
+   183→      title={item ? item.name : (label ?? '')}
+   184→    >
+   185→      {item ? (
+   186→        <span className={`${iconSize} leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]`}>{item.icon}</span>
+   187→      ) : (
+   188→        label && <span className="text-[9px] uppercase tracking-widest text-stone-600 px-1 text-center leading-tight">{label}</span>
+   189→      )}
+   190→      {item && item.count > 1 && (
+   191→        <span className="absolute bottom-0.5 right-1 text-[10px] font-bold text-amber-100 drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">×{item.count}</span>
+   192→      )}
+   193→      {item && rc && (item.rarity === 'epico' || item.rarity === 'legendario') && (
+   194→        <span className="absolute -top-1 -right-1 w-2 h-2 rotate-45" style={{ background: rc, boxShadow: `0 0 6px ${rc}` }} />
+   195→      )}
+   196→    </button>
+   197→  );
+   198→}
+   199→
+   200→function InventoryPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | null; onClose: () => void }) {
+   201→  const [hover, setHover] = useState<ItemView | null>(null);
+   202→  const inv = hud.inv;
+   203→
+   204→  const clickBag = (i: number, it: ItemView) => {
+   205→    if (it.kind === 'consumible') g()?.useBagItem(i);
+   206→    else g()?.equipFromBag(i);
+   207→  };
+   208→
+   209→  const stats: [string, string][] = [
+   210→    ['Nivel', `${hud.level}`],
+   211→    ['Vida', `${Math.ceil(hud.hp)} / ${hud.maxHp}`],
+   212→    ['Daño', `×${inv.dmgMul.toFixed(2)}`],
+   213→    ['Reducción', `${Math.round(inv.defRed * 100)}%`],
+   214→    ['Crítico', `${Math.round(inv.crit * 100)}%`],
+   215→    ['Velocidad', `+${Math.round(inv.totals.speed * 100)}%`],
+   216→    ['Aguante', `+${Math.round((inv.totals.stam + inv.perm.stam) * 100)}%`],
+   217→    ['Bajas', `${hud.kills}`],
+   218→  ];
+   219→
+   220→  const detail = hover ?? inv.equip.weapon ?? null;
+   221→
+   222→  return (
+   223→    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-[3px] pointer-events-auto">
+   224→      <div className="relative aetheria-frame w-[min(1040px,95vw)] max-h-[92vh] bg-[#0d0b14]/95 border border-amber-900/50 shadow-[0_0_80px_rgba(0,0,0,0.7)] flex flex-col aetheria-pop">
+   225→        <Corners />
+   226→
+   227→        {/* Cabecera */}
+   228→        <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-amber-900/30">
+   229→          <div className="flex items-baseline gap-4">
+   230→            <h2 className="font-display text-2xl text-amber-200 tracking-[0.2em] uppercase">Mochila</h2>
+   231→            <span className="text-[11px] text-stone-500 tracking-[0.25em] uppercase hidden sm:inline">Equipo del caballero</span>
+   232→          </div>
+   233→          <div className="flex items-center gap-4">
+   234→            <div className="text-sm text-amber-300/90 font-semibold">◈ {hud.gold}</div>
+   235→            <button
+   236→              onClick={onClose}
+   237→              className="w-9 h-9 rounded border border-stone-700/70 bg-stone-900/80 text-stone-400 hover:text-amber-100 hover:border-amber-600/60 transition-colors text-lg leading-none"
+   238→              title="Cerrar (I / Esc)"
+   239→            >✕</button>
+   240→          </div>
+   241→        </div>
+   242→
+   243→        {/* Cuerpo */}
+   244→        <div className="grid md:grid-cols-[290px_1fr] gap-5 p-5 overflow-y-auto aetheria-scroll">
+   245→          {/* Columna izquierda: equipo + atributos */}
+   246→          <div className="space-y-4">
+   247→            <div className="flex items-center gap-3">
+   248→              <div className="w-12 h-12 rounded-full border-2 border-amber-600/80 bg-stone-950/90 flex items-center justify-center font-display text-amber-200 text-xl shadow-[0_0_12px_rgba(0,0,0,0.8)]">
+   249→                {hud.level}
+   250→              </div>
+   251→              <div>
+   252→                <div className="font-display text-amber-100 tracking-[0.12em] text-sm">EL CABALLERO DEL ALBA</div>
+   253→                <div className="text-[11px] text-stone-500">Nivel {hud.level} · XP {hud.xp}/{hud.xpNext}</div>
+   254→              </div>
+   255→            </div>
+   256→
+   257→            {/* Huecos de equipo */}
+   258→            <div className="grid grid-cols-3 gap-2 justify-items-center bg-black/30 border border-stone-800/70 rounded-lg p-3">
+   259→              <ItemSlot item={inv.equip.helmet} label="Yelmo" onClick={inv.equip.helmet ? () => g()?.unequipSlot('helmet') : undefined} onHover={setHover} />
+   260→              <ItemSlot item={inv.equip.weapon} label="Arma" onClick={inv.equip.weapon ? () => g()?.unequipSlot('weapon') : undefined} onHover={setHover} />
+   261→              <ItemSlot item={inv.equip.armor} label="Armadura" onClick={inv.equip.armor ? () => g()?.unequipSlot('armor') : undefined} onHover={setHover} />
+   262→              <ItemSlot item={inv.equip.acc1} label="Accesorio I" onClick={inv.equip.acc1 ? () => g()?.unequipSlot('acc1') : undefined} onHover={setHover} />
+   263→              <ItemSlot item={inv.equip.acc2} label="Accesorio II" onClick={inv.equip.acc2 ? () => g()?.unequipSlot('acc2') : undefined} onHover={setHover} />
+   264→            </div>
+   265→
+   266→            {/* Atributos */}
+   267→            <div className="bg-black/30 border border-stone-800/70 rounded-lg p-3">
+   268→              <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display mb-2">Atributos</div>
+   269→              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+   270→                {stats.map(([k, v]) => (
+   271→                  <div key={k} className="flex justify-between text-[12px] border-b border-stone-800/50 pb-0.5">
+   272→                    <span className="text-stone-500">{k}</span>
+   273→                    <span className="text-amber-100/90 font-semibold">{v}</span>
+   274→                  </div>
+   275→                ))}
+   276→              </div>
+   277→              {inv.perm.hp > 0 && (
+   278→                <div className="mt-2 text-[10px] text-stone-500">Elixires bebidos: +{inv.perm.hp} vida · +{Math.round(inv.perm.dmg * 100)}% daño · +{Math.round(inv.perm.stam * 100)}% aguante</div>
+   279→              )}
+   280→            </div>
+   281→          </div>
+   282→
+   283→          {/* Columna derecha: mochila + detalles */}
+   284→          <div className="space-y-4 min-w-0">
+   285→            <div>
+   286→              <div className="flex items-center justify-between mb-2">
+   287→                <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display">Mochila · {inv.bag.length}/{inv.bagSize}</div>
+   288→                <div className="text-[10px] text-stone-600">Clic para equipar · consumibles: usar</div>
+   289→              </div>
+   290→              <div className="grid grid-cols-[repeat(auto-fill,minmax(64px,1fr))] gap-2 bg-black/30 border border-stone-800/70 rounded-lg p-3">
+   291→                {inv.bag.map((it, i) => (
+   292→                  <ItemSlot key={`${it.id}-${i}`} item={it} onClick={() => clickBag(i, it)} onHover={setHover} />
+   293→                ))}
+   294→                {Array.from({ length: Math.max(0, inv.bagSize - inv.bag.length) }).map((_, i) => (
+   295→                  <ItemSlot key={`empty-${i}`} item={null} onHover={setHover} />
+   296→                ))}
+   297→              </div>
+   298→            </div>
+   299→
+   300→            {/* Detalles del objeto */}
+   301→            <div className="bg-black/30 border border-stone-800/70 rounded-lg p-4 min-h-[132px]">
+   302→              {detail ? (
+   303→                <div className="flex gap-4">
+   304→                  <div
+   305→                    className="w-16 h-16 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-3xl"
+   306→                    style={{ borderColor: RARITY_CSS[detail.rarity], boxShadow: `0 0 12px ${RARITY_CSS[detail.rarity]}44` }}
+   307→                  >
+   308→                    {detail.icon}
+   309→                  </div>
+   310→                  <div className="min-w-0">
+   311→                    <div className="font-display text-base tracking-wide" style={{ color: RARITY_CSS[detail.rarity] }}>{detail.name}</div>
+   312→                    <div className="text-[11px] text-stone-500 mb-1.5">{KIND_LABEL[detail.kind]} · {RARITY_LABEL[detail.rarity]}{detail.count > 1 ? ` · ×${detail.count}` : ''}</div>
+   313→                    <ItemStatLines item={detail} />
+   314→                    <p className="text-[12px] text-stone-400 italic mt-1.5 leading-relaxed">{detail.desc}</p>
+   315→                  </div>
+   316→                </div>
+   317→              ) : (
+   318→                <div className="h-full flex items-center justify-center text-[12px] text-stone-600 italic">
+   319→                  Pasa el cursor sobre un objeto para ver sus detalles
+   320→                </div>
+   321→              )}
+   322→            </div>
+   323→          </div>
+   324→        </div>
+   325→
+   326→        {/* Pie */}
+   327→        <div className="px-6 pb-4 pt-1 text-[10px] text-stone-600 flex justify-between">
+   328→          <span>Clic en un hueco de equipo para quitarlo · I / Esc cierra la mochila</span>
+   329→          <span className="hidden sm:inline">El botín cae de tus enemigos · Los jefes sueltan objetos épicos</span>
+   330→        </div>
+   331→      </div>
+   332→    </div>
+   333→  );
+   334→}
+   335→
+   336→/* ============================================================ */
+   337→
+   338→export default function Home() {
+   339→  const containerRef = useRef<HTMLDivElement>(null);
+   340→  const minimapRef = useRef<HTMLCanvasElement>(null);
+   341→  const vignetteRef = useRef<HTMLDivElement>(null);
+   342→  const gameRef = useRef<Game | null>(null);
+   343→  const [hud, setHud] = useState<HudState>(INITIAL_HUD);
+   344→  const [booted, setBooted] = useState(false);
+   345→  const [bootError, setBootError] = useState(false);
+   346→
+   347→  /* Arranque: construye el mundo en segundo plano y muestra el
+   348→     menú cinemático con la hoguera en vivo detrás del panel. */
+   349→  useEffect(() => {
+   350→    let cancelled = false;
+   351→    const boot = async () => {
+   352→      try {
+   353→        await new Promise(r => setTimeout(r, 250)); // deja pintar el velo de carga
+   354→        const mod = await import('@/game/game');
+   355→        if (cancelled || !containerRef.current || !minimapRef.current || !vignetteRef.current) return;
+   356→        const game = new mod.Game(
+   357→          { container: containerRef.current, minimap: minimapRef.current, vignette: vignetteRef.current },
+   358→          setHud,
+   359→        );
+   360→        gameRef.current = game;
+   361→        (window as unknown as { __game?: Game }).__game = game;
+   362→        game.start();
+   363→        setBooted(true);
+   364→      } catch (err) {
+   365→        console.error('[AETHERIA] fallo al arrancar:', err);
+   366→        if (!cancelled) setBootError(true);
+   367→      }
+   368→    };
+   369→    void boot();
+   370→    return () => { cancelled = true; gameRef.current?.dispose(); gameRef.current = null; };
+   371→  }, []);
+   372→
+   373→  const g = () => gameRef.current;
+   374→  const startGame = () => {
+   375→    if (!booted) return;
+   376→    g()?.beginAdventure();
+   377→  };
+   378→  const toggleFullscreen = () => {
+   379→    if (document.fullscreenElement) void document.exitFullscreen();
+   380→    else void document.documentElement.requestFullscreen?.();
+   381→  };
+   382→  const inGame = hud.phase !== 'menu';
+   383→  const hpFrac = hud.hp / Math.max(1, hud.maxHp);
+   384→
+   385→  return (
+   386→    <main className="fixed inset-0 overflow-hidden bg-[#05060a] select-none">
+   387→      {/* Lienzo del juego */}
+   388→      <div ref={containerRef} className="absolute inset-0" />
+   389→
+   390→      {/* Viñeta de daño */}
+   391→      <div
+   392→        ref={vignetteRef}
+   393→        className="absolute inset-0 pointer-events-none z-10"
+   394→        style={{ opacity: 0, boxShadow: 'inset 0 0 140px 50px rgba(180, 20, 20, 0.75)', transition: 'opacity 80ms linear' }}
+   395→      />
+   396→
+   397→      {/* Minimapa (siempre montado para que el ref exista al arrancar) */}
+   398→      <canvas
+   399→        ref={minimapRef}
+   400→        width={168}
+   401→        height={168}
+   402→        className={`absolute top-4 right-4 z-20 pointer-events-none rounded-full shadow-[0_4px_20px_rgba(0,0,0,0.8)] transition-opacity duration-500 ${
+   403→          inGame && hud.phase !== 'menu' ? 'opacity-100' : 'opacity-0'
+   404→        }`}
+   405→      />
+   406→
+   407→      {/* ============ VELO DE CARGA ============ */}
+   408→      {!booted && (
+   409→        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-[#05060a]">
+   410→          <div className="w-10 h-10 border-2 border-amber-700/30 border-t-amber-400 rounded-full animate-spin" />
+   411→          <div className="mt-5 text-amber-300/90 font-display tracking-[0.35em] text-sm uppercase animate-pulse">
+   412→            {bootError ? 'No se pudo forjar el mundo' : 'Forjando el mundo…'}
+   413→          </div>
+   414→          {!bootError && (
+   415→            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Toon shading anime · Nubes Ghibli · Ciclo día/noche</div>
+   416→          )}
+   417→        </div>
+   418→      )}
+   419→
+   420→      {/* ============ HUD DE JUEGO ============ */}
+   421→      {booted && inGame && (
+   422→        <div className="absolute inset-0 pointer-events-none z-20 font-body">
+   423→          {/* Punto de mira */}
+   424→          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+   425→            <div className={`w-1.5 h-1.5 rounded-full ${hud.lockOn ? 'bg-amber-300 shadow-[0_0_8px_#fcd34d]' : 'bg-white/50'}`} />
+   426→          </div>
+   427→
+   428→          {/* Estado del jugador (arriba-izquierda) */}
+   429→          <div className="absolute top-4 left-4 w-72 space-y-1.5">
+   430→            <div className="flex items-center gap-2">
+   431→              <div className="w-11 h-11 shrink-0 rounded-full border-2 border-amber-600/80 bg-stone-950/90 flex items-center justify-center font-display text-amber-200 text-lg shadow-[0_0_12px_rgba(0,0,0,0.8)]">
+   432→                {hud.level}
+   433→              </div>
+   434→              <div className="flex-1 space-y-1.5">
+   435→                <Bar value={hud.hp} max={hud.maxHp} className={`bg-gradient-to-r from-rose-900 via-red-600 to-red-400 ${hpFrac < 0.3 ? 'animate-pulse' : ''}`} />
+   436→                <Bar value={hud.stamina} max={hud.maxStamina} className="bg-gradient-to-r from-emerald-800 to-emerald-400" height="h-2" />
+   437→                <Bar value={hud.xp} max={hud.xpNext} className="bg-gradient-to-r from-amber-700 to-amber-300" height="h-1" />
+   438→              </div>
+   439→            </div>
+   440→            <div className="flex items-center gap-4 text-xs text-stone-300/90 pl-1" style={{ paddingLeft: '3.25rem' }}>
+   441→              <span className="text-amber-300/90 font-semibold">◈ {hud.gold}</span>
+   442→              <span>☠ {hud.kills}</span>
+   443→              <span className="text-stone-400">{fmtTime(hud.time)}</span>
+   444→            </div>
+   445→          </div>
+   446→
+   447→          {/* Estado técnico bajo el minimapa */}
+   448→          <div className="absolute top-[188px] right-4">
+   449→            <div className="text-[10px] text-stone-400 bg-black/40 px-2 py-0.5 rounded">
+   450→              {hud.enemiesAlive} enemigos · {hud.fps} FPS · {hud.quality}
+   451→            </div>
+   452→          </div>
+   453→
+   454→          {/* Objetivo + reloj del mundo (arriba-centro) */}
+   455→          <div className="absolute top-4 left-1/2 -translate-x-1/2 text-center max-w-md">
+   456→            <div className="text-[13px] tracking-[0.18em] uppercase text-amber-200/90 font-display bg-black/45 border border-amber-900/40 rounded px-4 py-1.5">
+   457→              {hud.objective}
+   458→            </div>
+   459→            <div className="mt-2">
+   460→              <ClockChip clock={hud.clock} day={hud.dayNum} night={hud.night} />
+   461→            </div>
+   462→            <div className="flex items-center justify-center gap-1.5 mt-2">
+   463→              {Array.from({ length: hud.shrinesTotal }).map((_, i) => (
+   464→                <div
+   465→                  key={i}
+   466→                  className={`w-3 h-3 rotate-45 border ${
+   467→                    i < hud.shrinesCleansed
+   468→                      ? 'bg-teal-400 border-teal-200 shadow-[0_0_8px_rgba(55,216,200,0.8)]'
+   469→                      : 'bg-red-900/70 border-red-500/70 shadow-[0_0_6px_rgba(216,50,60,0.5)]'
+   470→                  }`}
+   471→                />
+   472→              ))}
+   473→            </div>
+   474→          </div>
+   475→
+   476→          {/* Aviso de amanecer/anochecer */}
+   477→          {hud.notice && (
+   478→            <div key={hud.notice + hud.dayNum} className="absolute top-[7.5rem] left-1/2 -translate-x-1/2 aetheria-notice">
+   479→              <div className="font-display text-[13px] tracking-[0.22em] uppercase text-amber-100/95 bg-black/55 border-y border-amber-700/50 px-6 py-1.5 drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]">
+   480→                {hud.notice}
+   481→              </div>
+   482→            </div>
+   483→          )}
+   484→
+   485→          {/* Barra del jefe */}
+   486→          {hud.bossActive && (
+   487→            <div className="absolute top-28 left-1/2 -translate-x-1/2 w-[min(560px,70vw)]">
+   488→              <div className="text-center font-gothic tracking-[0.14em] text-red-200 text-2xl mb-1 uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
+   489→                {hud.bossName}
+   490→                {hud.bossPhase >= 2 && <span className="ml-3 align-middle text-[11px] font-display text-red-400 animate-pulse tracking-[0.3em]">FASE {hud.bossPhase}</span>}
+   491→              </div>
+   492→              <Bar value={hud.bossHp} max={hud.bossMaxHp} className="bg-gradient-to-r from-red-950 via-red-600 to-red-400" height="h-4" />
+   493→            </div>
+   494→          )}
+   495→
+   496→          {/* Pociones + mochila (abajo-izquierda) */}
+   497→          <div className="absolute bottom-4 left-4 flex items-center gap-3">
+   498→            <div className="w-10 h-10 rounded-full border-2 border-red-800/80 bg-stone-950/90 flex items-center justify-center text-red-300 text-lg shadow-[0_0_10px_rgba(0,0,0,0.8)]">
+   499→              ⚗
+   500→            </div>
+   501→            <div className="text-sm text-stone-200">
+   502→              <span className="font-bold text-lg">{hud.potions}</span>
+   503→              <span className="text-stone-500">/{hud.maxPotions}</span>
+   504→              <div className="text-[10px] text-stone-500 uppercase tracking-wider">F · Beber</div>
+   505→            </div>
+   506→            <button
+   507→              onClick={() => g()?.toggleInventory()}
+   508→              className="pointer-events-auto ml-2 h-10 px-3 rounded border-2 border-amber-800/70 bg-stone-950/90 text-amber-200 text-sm
+   509→                hover:bg-amber-900/40 hover:border-amber-500 transition-colors shadow-[0_0_10px_rgba(0,0,0,0.8)] flex items-center gap-2"
+   510→              title="Inventario y equipo (I)"
+   511→            >
+   512→              🎒 <span className="font-display tracking-wider text-xs uppercase">Mochila</span>
+   513→              <kbd className="text-[10px] text-stone-500 border border-stone-700 rounded px-1">I</kbd>
+   514→            </button>
+   515→          </div>
+   516→
+   517→          {/* Prompt de interacción (abajo-centro) */}
+   518→          {hud.prompt && (
+   519→            <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
+   520→              <div className="bg-black/70 border border-amber-700/50 text-amber-100 text-sm px-5 py-2 rounded animate-pulse">
+   521→                {hud.prompt}
+   522→              </div>
+   523→            </div>
+   524→          )}
+   525→
+   526→          {/* Ayuda de controles (abajo-derecha) */}
+   527→          <div className="absolute bottom-4 right-4 text-right text-[10px] leading-relaxed text-stone-500">
+   528→            <div>Clic izq. atacar · Clic der. cargado · Espacio esquivar</div>
+   529→            <div>Tab objetivo · F poción · E interactuar · Esc pausa</div>
+   530→            <div>Rueda zoom · I mochila e inventario</div>
+   531→          </div>
+   532→        </div>
+   533→      )}
+   534→
+   535→      {/* ============ INVENTARIO / EQUIPO ============ */}
+   536→      {booted && hud.inv?.open && (
+   537→        <InventoryPanel hud={hud} g={g} onClose={() => g()?.toggleInventory()} />
+   538→      )}
+   539→
+   540→      {/* ============ MENÚ PRINCIPAL (mundo en vivo detrás) ============ */}
+   541→      {booted && hud.phase === 'menu' && (
+   542→        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(2,3,8,0.18)_0%,rgba(2,3,8,0.62)_62%,rgba(2,3,8,0.88)_100%)]">
+   543→          <div className="max-w-2xl w-full px-5 text-center max-h-[96vh] overflow-y-auto aetheria-scroll">
+   544→            <div className="relative aetheria-frame backdrop-blur-[3px] bg-black/50 border border-amber-900/40 px-6 sm:px-9 py-7 shadow-[0_0_70px_rgba(0,0,0,0.55)]">
+   545→              <Corners />
+   546→              <div className="font-display text-amber-600/80 tracking-[0.5em] text-[11px] uppercase mb-3">Un Action RPG de mundo abierto</div>
+   547→              <h1 className="font-logo text-5xl md:text-6xl aetheria-logo tracking-[0.08em]">
+   548→                AETHERIA
+   549→              </h1>
+   550→              <div className="font-display text-stone-400 tracking-[0.34em] text-sm mt-2 uppercase">Eco del Reino Caído</div>
+   551→
+   552→              <div className="flex items-center justify-center gap-3 my-5">
+   553→                <span className="h-px w-16 bg-gradient-to-r from-transparent to-amber-700/60" />
+   554→                <span className="w-1.5 h-1.5 rotate-45 bg-amber-600/70" />
+   555→                <span className="h-px w-16 bg-gradient-to-l from-transparent to-amber-700/60" />
+   556→              </div>
+   557→
+   558→              <p className="font-body text-stone-400 text-[13.5px] leading-relaxed max-w-lg mx-auto">
+   559→                La luna sangra sobre las ruinas de Aetheria. Tres santuarios corruptos alimentan
+   560→                la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Caballero Caído.
+   561→                Purifícalos, crece en poder y derriba al señor de la noche en su arena.
+   562→              </p>
+   563→
+   564→              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-7 text-[11px]">
+   565→                {CONTROLS.map(([k, v]) => (
+   566→                  <div key={k} className="flex flex-col items-center gap-0.5">
+   567→                    <kbd className="px-2 py-1 border border-stone-700 rounded bg-stone-900/90 text-amber-200/90 font-mono">{k}</kbd>
+   568→                    <span className="text-stone-500">{v}</span>
+   569→                  </div>
+   570→                ))}
+   571→              </div>
+   572→
+   573→              {/* Calidad + pantalla completa */}
+   574→              <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+   575→                <div className="flex items-center border border-stone-700/70 bg-stone-950/70 overflow-hidden">
+   576→                  <span className="px-3 text-[10px] uppercase tracking-widest text-stone-500 border-r border-stone-800 py-2">Gfx</span>
+   577→                  {QUALITIES.map(q => (
+   578→                    <button
+   579→                      key={q.id}
+   580→                      onClick={() => g()?.setQuality(q.id)}
+   581→                      className={`px-3.5 py-2 text-[11px] tracking-widest uppercase transition-colors ${
+   582→                        hud.quality === q.id
+   583→                          ? 'bg-amber-900/50 text-amber-200'
+   584→                          : 'text-stone-400 hover:bg-stone-800/80 hover:text-amber-100'
+   585→                      }`}
+   586→                    >
+   587→                      {q.label}
+   588→                    </button>
+   589→                  ))}
+   590→                </div>
+   591→                <MenuButton small onClick={toggleFullscreen}>⛶ &nbsp;Pantalla completa</MenuButton>
+   592→              </div>
+   593→
+   594→              <div className="mt-7">
+   595→                <MenuButton primary onClick={startGame}>⚔ &nbsp;Comenzar la aventura</MenuButton>
+   596→              </div>
+   597→              <div className="mt-3 text-[11px] text-amber-200/60 font-display tracking-[0.18em] uppercase">
+   598→                El ciclo día y noche comienza al alba · La noche acelera a tus enemigos
+   599→              </div>
+   600→              <div className="mt-4 text-[10px] text-stone-600 leading-relaxed">
+   601→                Arte y sonido: ambientCG (CC0) · Kenney (CC0) · Little Robot Sound Factory (CC-BY 3.0) · Cleyton Kauffman · Fuentes: Google Fonts (OFL)
+   602→              </div>
+   603→            </div>
+   604→          </div>
+   605→        </div>
+   606→      )}
+   607→
+   608→      {/* ============ PAUSA ============ */}
+   609→      {hud.phase === 'paused' && (
+   610→        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/80 backdrop-blur-[2px]">
+   611→          <div className="text-center max-w-lg w-full px-6">
+   612→            <h2 className="font-display text-4xl text-amber-100 tracking-[0.25em] mb-6">PAUSA</h2>
+   613→            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-stone-400 mb-8 max-w-sm mx-auto">
+   614→              {CONTROLS.map(([k, v]) => (
+   615→                <div key={k} className="flex justify-between gap-3 border-b border-stone-800/70 pb-1">
+   616→                  <span className="text-amber-200/80 font-mono">{k}</span>
+   617→                  <span>{v}</span>
+   618→                </div>
+   619→              ))}
+   620→            </div>
+   621→            <div className="flex gap-4 justify-center">
+   622→              <MenuButton primary onClick={() => g()?.resume()}>Reanudar</MenuButton>
+   623→              <MenuButton onClick={() => g()?.restart()}>Reiniciar</MenuButton>
+   624→            </div>
+   625→            <div className="mt-8 text-[10px] text-stone-600">
+   626→              Día {hud.dayNum} · {hud.clock} · {hud.night ? 'Noche' : 'Día'} en Aetheria
+   627→            </div>
+   628→          </div>
+   629→        </div>
+   630→      )}
+   631→
+   632→      {/* ============ MUERTE ============ */}
+   633→      {hud.phase === 'dead' && (
+   634→        <div className="absolute inset-0 z-30 flex items-center justify-center bg-gradient-to-b from-red-950/60 via-black/90 to-black/95">
+   635→          <div className="text-center px-6">
+   636→            <h2 className="font-gothic text-7xl text-red-500 tracking-[0.12em] drop-shadow-[0_0_40px_rgba(220,38,38,0.5)] animate-pulse">
+   637→              HAS CAÍDO
+   638→            </h2>
+   639→            <p className="text-stone-400 mt-4 text-sm italic">La hoguera aún arde por ti, caballero…</p>
+   640→            <div className="flex gap-6 justify-center mt-8 text-sm text-stone-300">
+   641→              <span>Nivel <b className="text-amber-300">{hud.level}</b></span>
+   642→              <span>Bajas <b className="text-amber-300">{hud.kills}</b></span>
+   643→              <span>Oro <b className="text-amber-300">{hud.gold}</b></span>
+   644→              <span>Tiempo <b className="text-amber-300">{fmtTime(hud.time)}</b></span>
+   645→            </div>
+   646→            <div className="mt-8">
+   647→              <MenuButton primary onClick={() => g()?.respawn()}>🔥 &nbsp;Reaparecer en la hoguera</MenuButton>
+   648→            </div>
+   649→          </div>
+   650→        </div>
+   651→      )}
+   652→
+   653→      {/* ============ VICTORIA ============ */}
+   654→      {hud.phase === 'victory' && (
+   655→        <div className="absolute inset-0 z-30 flex items-center justify-center bg-gradient-to-b from-amber-950/50 via-black/90 to-black/95">
+   656→          <div className="text-center px-6 max-w-xl">
+   657→            <div className="text-amber-500/80 tracking-[0.4em] text-xs uppercase mb-3">El Caballero Caído ha sido derrotado</div>
+   658→            <h2 className="font-display text-5xl text-amber-200 tracking-[0.15em] drop-shadow-[0_0_40px_rgba(245,180,80,0.35)]">
+   659→              EL REINO RESPIRA
+   660→            </h2>
+   661→            <p className="text-stone-400 mt-5 text-sm leading-relaxed">
+   662→              Los santuarios brillan de nuevo con luz esmeralda. Pero la noche es larga…
+   663→              el sigilo de la arena puede despertar a Bel&apos;Zaroth una y otra vez, cada vez más fuerte.
+   664→            </p>
+   665→            <div className="flex gap-6 justify-center mt-8 text-sm text-stone-300">
+   666→              <span>Nivel <b className="text-amber-300">{hud.level}</b></span>
+   667→              <span>Bajas <b className="text-amber-300">{hud.kills}</b></span>
+   668→              <span>Oro <b className="text-amber-300">{hud.gold}</b></span>
+   669→              <span>Tiempo <b className="text-amber-300">{fmtTime(hud.time)}</b></span>
+   670→            </div>
+   671→            <div className="flex gap-4 justify-center mt-8">
+   672→              <MenuButton primary onClick={() => g()?.continueEndless()}>Continuar (modo infinito)</MenuButton>
+   673→              <MenuButton onClick={() => g()?.restart()}>Nueva partida</MenuButton>
+   674→            </div>
+   675→          </div>
+   676→        </div>
+   677→      )}
+   678→    </main>
+   679→  );
+   680→}
+   681→

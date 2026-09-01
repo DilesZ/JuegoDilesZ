@@ -5,8 +5,8 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { clamp, dampAngle, damp, rand, randInt, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, ENEMY_NAMES } from './core';
-import { Inventory, RARITY_INFO, itemById, rollDrop, type EquipSlot, type ItemDef } from './items';
+import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, ENEMY_NAMES } from './core';
+import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, type EquipSlot, type ItemDef } from './items';
 import { idlePose } from './animations';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
@@ -14,6 +14,7 @@ import { World } from './world';
 import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
+import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
 import { drawMinimap } from './minimap';
 
 export type QualityTier = 'bajo' | 'medio' | 'alto';
@@ -67,6 +68,14 @@ interface DamageNumber {
 
 const ROAMER_TARGET = 8;
 
+/** Segundos de reaparición por tipo (estilo MMORPG: cada punto repuebla) */
+const RESPAWN_T: Record<EnemyType, number> = {
+  goblin: 26,
+  archer: 32,
+  orc: 48,
+  boss: 140,
+};
+
 /** Probabilidad de que cada tipo de enemigo suelte un objeto de equipo */
 const DROP_CHANCE: Record<string, number> = {
   goblin: 0.17,
@@ -109,9 +118,15 @@ export class Game {
   private inputState: InputState;
   private mouseDX = 0; private mouseDY = 0;
   private locked = false;
-  // inventario / equipo
+  // inventario / equipo / tienda
   inventory = new Inventory();
   uiOpen = false;
+  uiPanel: 'inv' | 'shop' | null = null;
+  merchant!: Merchant;
+  private shopStock: ItemDef[] = [];
+  private restockDay = -1;
+  /** reapariciones estilo MMORPG pendientes (punto de spawn + temporizador) */
+  private respawnQueue: { type: EnemyType; x: number; z: number; guardianOf: number; t: number }[] = [];
 
   // cámara
   private camYaw = 0; private camPitch = 0.34;
@@ -141,7 +156,7 @@ export class Game {
   private hudTimer = 0;
   private minimapTimer = 0;
   private lockEnemy: Enemy | null = null;
-  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil'; idx?: number } | null = null;
+  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil' | 'merchant'; idx?: number } | null = null;
   private victoryDelay = -1;
 
   // números de daño (DOM pool)
@@ -206,6 +221,13 @@ export class Game {
     this.player.pos.set(bx, terrainHeight(bx, bz), bz);
     this.player.yaw = Math.atan2(WORLD.bonfire.x - bx, WORLD.bonfire.z - bz) + Math.PI;
     this.camYaw = this.player.yaw + Math.PI;
+
+    // mercader con su puesto junto a la hoguera
+    this.merchant = new Merchant();
+    this.scene.add(this.merchant.root);
+    for (const c of this.merchant.colliderList()) this.world.colliders.push(c);
+    this.shopStock = merchantStock(1);
+    this.restockDay = this.cycle.day;
 
     // post-procesado: MSAA + GTAO + bloom + tono + grading
     const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
@@ -322,7 +344,13 @@ export class Game {
 
   toggleInventory() {
     if (this.phase !== 'playing') return;
-    const open = !this.uiOpen;
+    this.setPanel(this.uiPanel === 'inv' ? null : 'inv');
+  }
+
+  /** Abre/cierra un panel de UI (mochila o tienda) congelando el mundo */
+  private setPanel(panel: 'inv' | 'shop' | null) {
+    this.uiPanel = panel;
+    const open = panel !== null;
     this.uiOpen = open;
     this.keys.clear();
     this.queued = { attack: false, heavy: false, roll: false, potion: false };
@@ -380,7 +408,7 @@ export class Game {
     const inv = this.inventory;
     const totals = inv.totals();
     return {
-      open: this.uiOpen,
+      open: this.uiPanel === 'inv',
       bag: inv.bag.map(e => view(e.def, e.count)!),
       bagSize: 24,
       equip: {
@@ -396,6 +424,70 @@ export class Game {
       crit: this.player.critChance,
       perm: { ...this.player.perm },
     };
+  }
+
+  /* ---------- Tienda del mercader ---------- */
+
+  openShop() {
+    if (this.phase !== 'playing' || this.uiOpen) return;
+    this.setPanel('shop');
+  }
+
+  closeShop() {
+    if (this.uiPanel === 'shop') this.setPanel(null);
+  }
+
+  private shopView(): ShopView {
+    const view = (d: ItemDef, count = 1): ItemView => ({
+      id: d.id, name: d.name, kind: d.kind, rarity: d.rarity, icon: d.icon,
+      desc: d.desc, stats: d.stats, useText: d.useText, count,
+    });
+    return {
+      open: this.uiPanel === 'shop',
+      name: MERCHANT_NAME,
+      stock: this.shopStock.map(d => ({ item: view(d), price: buyPrice(d) })),
+      bag: this.inventory.bag.map((e, i) => ({ index: i, item: view(e.def, e.count), sell: sellPrice(e.def) })),
+      gold: this.player.gold,
+      restockDay: this.restockDay,
+    };
+  }
+
+  /** Compra un objeto del surtido (clic en la tienda) */
+  buyItem(i: number) {
+    if (this.uiPanel !== 'shop') return;
+    const def = this.shopStock[i];
+    if (!def) return;
+    const price = buyPrice(def);
+    const p = this.player;
+    const head = new THREE.Vector3(p.pos.x, p.pos.y + 2.15, p.pos.z);
+    if (p.gold < price) {
+      this.audio.uiClick();
+      this.addDamageNumber(head, `FALTAN ${price - p.gold} ◈`, '#ff8a7a');
+      return;
+    }
+    if (!this.inventory.addItem(def)) {
+      this.audio.uiClick();
+      this.addDamageNumber(head, 'MOCHILA LLENA', '#ff8a7a');
+      return;
+    }
+    p.gold -= price;
+    this.audio.coin();
+    this.addDamageNumber(head, `- ${price} ◈  ${def.icon} ${def.name}`, RARITY_INFO[def.rarity].css);
+    this.emitHud();
+  }
+
+  /** Vende una unidad de la mochila al mercader (40% del valor) */
+  sellBagItem(i: number) {
+    if (this.uiPanel !== 'shop') return;
+    const e = this.inventory.bag[i];
+    if (!e) return;
+    const gold = sellPrice(e.def);
+    this.inventory.removeAt(i);
+    this.player.gold += gold;
+    this.audio.coin();
+    const p = this.player;
+    this.addDamageNumber(new THREE.Vector3(p.pos.x, p.pos.y + 2.15, p.pos.z), `+ ${gold} ◈  ${e.def.icon} ${e.def.name}`, '#ffc84a');
+    this.emitHud();
   }
 
   /* ---------- Calidad ---------- */
@@ -530,6 +622,32 @@ export class Game {
     this.player.gold += gold;
     this.audio.coin();
     this.player.gainXp(cfg.xp, this.ctx);
+    // REAPARICIÓN ESTILO MMORPG: el punto de spawn repuebla tras un tiempo
+    if (!e.isBoss) {
+      const shrineCleansed = e.guardianOf >= 0 && this.world.shrines[e.guardianOf].cleansed;
+      if (!shrineCleansed) {
+        if (e.guardianOf >= 0) {
+          // guardias: los santuarios sin purificar vuelven a llenarse
+          this.respawnQueue.push({
+            type: e.type, x: e.home.x, z: e.home.z, guardianOf: e.guardianOf,
+            t: RESPAWN_T[e.type] * rand(0.85, 1.25),
+          });
+        } else {
+          // errantes: solo se reponen si la población no supera el objetivo
+          const pendingRoam = this.respawnQueue.filter(r => r.guardianOf === -1).length;
+          const aliveRoam = this.enemies.filter(o => o.alive && o.guardianOf === -1 && !o.isBoss).length;
+          if (aliveRoam + pendingRoam < ROAMER_TARGET + 2) {
+            this.respawnQueue.push({
+              type: e.type, x: e.home.x, z: e.home.z, guardianOf: -1,
+              t: RESPAWN_T[e.type] * rand(0.85, 1.25),
+            });
+          }
+        }
+      }
+    } else {
+      // jefe del mundo: reaparece en modo infinito, cada vez más fuerte
+      this.bossRespawnT = RESPAWN_T.boss;
+    }
     // orbes de alma
     for (let i = 0; i < 10; i++) {
       this.particles.spawn({
@@ -591,6 +709,11 @@ export class Game {
       this.interactTarget = { kind: 'bonfire' };
       return;
     }
+    // puesto del mercader
+    if (merchantDist(p.x, p.z) < 2.7) {
+      this.interactTarget = { kind: 'merchant' };
+      return;
+    }
     for (const sh of this.world.shrines) {
       if (sh.cleansed) continue;
       const guardians = this.enemies.filter(e => e.guardianOf === sh.idx && e.alive);
@@ -635,6 +758,8 @@ export class Game {
         this.awakenTimer = 2.5;
       }
       this.emitHud();
+    } else if (t.kind === 'merchant') {
+      this.openShop();
     } else if (t.kind === 'sigil') {
       this.world.sigilReady();
       this.spawnBoss(1.35 ** this.bossKills());
@@ -739,6 +864,8 @@ export class Game {
       });
     });
     this.particles.update(dt, this.camera.position);
+    // el mercader vive también en la escena del menú (mira a la cámara)
+    this.merchant.update(dt, this.cycle.nightFactor, this.camera.position);
     // héroe contemplando la hoguera
     this.player.applier.apply(idlePose(this.menuT), dt, 6);
     this.player.root.position.copy(this.player.pos);
@@ -863,6 +990,13 @@ export class Game {
       });
     });
 
+    // mercader: animación, mirada, saludo y farol nocturno
+    const greeted = this.merchant.update(dt, this.cycle.nightFactor, this.player.pos);
+    if (greeted && !this.uiOpen && this.phase === 'playing') {
+      const line = pick(Merchant.greetingLines());
+      this.addDamageNumber(new THREE.Vector3(this.merchant.pos.x, this.merchant.pos.y + 2.35, this.merchant.pos.z), `“${line}”`, '#ffd98a');
+    }
+
     if (frozen) return;
 
     // estela de espada
@@ -873,12 +1007,46 @@ export class Game {
     }
     this.trail.update(dt, this.player.state === 'attack');
 
-    // despawn/respawn de errantes
+    // despawn/respawn de errantes (cuenta también las reapariciones pendientes)
     this.roamerTimer -= dt;
     if (this.roamerTimer <= 0) {
       this.roamerTimer = rand(3.5, 6);
       const aliveRoamers = this.enemies.filter(e => e.alive && e.guardianOf === -1 && !e.isBoss).length;
-      if (aliveRoamers < ROAMER_TARGET) this.spawnRoamer();
+      const pendingRoamers = this.respawnQueue.filter(r => r.guardianOf === -1).length;
+      if (aliveRoamers + pendingRoamers < ROAMER_TARGET) this.spawnRoamer();
+    }
+
+    // REAPARICIÓN ESTILO MMORPG: cada punto de spawn repuebla tras su tiempo
+    if (this.respawnQueue.length > 0) {
+      for (const r of this.respawnQueue) r.t -= dt;
+      for (const r of this.respawnQueue) {
+        if (r.t > 0) continue;
+        // los guardias de santuarios ya purificados no vuelven
+        if (r.guardianOf >= 0 && this.world.shrines[r.guardianOf].cleansed) { r.t = -1; continue; }
+        // nunca reaparece delante del jugador (como en los MMO)
+        const dP = Math.hypot(r.x - this.player.pos.x, r.z - this.player.pos.z);
+        if (dP < 14) { r.t = 3; continue; }
+        if (r.guardianOf >= 0) {
+          // guardias: tope por santuario (4), exentos del tope global
+          const aliveG = this.enemies.filter(e => e.alive && e.guardianOf === r.guardianOf).length;
+          const pendG = this.respawnQueue.filter(o => o !== r && o.guardianOf === r.guardianOf && o.t > 0).length;
+          if (aliveG + pendG >= 4) { r.t = 4; continue; }
+        }
+        // los errantes ya están acotados por la guarda de agenda
+        // (aliveRoam + pendientes < ROAMER_TARGET + 2 al morir)
+        this.spawnEnemy(r.type, r.x, r.z, r.guardianOf);
+        r.t = -1;
+      }
+      this.respawnQueue = this.respawnQueue.filter(r => r.t > 0);
+    }
+
+    // reabastecimiento diario del mercader
+    if (this.cycle.day !== this.restockDay) {
+      this.restockDay = this.cycle.day;
+      this.shopStock = merchantStock(this.player.level);
+      this.notice = `${MERCHANT_NAME} ha reabastecido su tienda`;
+      this.noticeT = 6;
+      this.emitHud();
     }
 
     // despertar del jefe
@@ -886,10 +1054,10 @@ export class Game {
       this.awakenTimer -= dt;
       if (this.awakenTimer <= 0) this.spawnBoss();
     }
-    // reaparición del jefe tras morir el jugador en plena lucha
+    // reaparición del jefe (tras morir el jugador en plena lucha o auto-respawn de mundo)
     if (this.bossRespawnT > 0) {
       this.bossRespawnT -= dt;
-      if (this.bossRespawnT <= 0 && this.shrinesCleansed >= 3) this.spawnBoss();
+      if (this.bossRespawnT <= 0 && this.shrinesCleansed >= 3) this.spawnBoss(1.35 ** this.bossKills());
     }
 
     // interacción
@@ -1080,6 +1248,7 @@ export class Game {
       this.world.shrines.map(s => ({ x: s.pos.x, z: s.pos.z, cleansed: s.cleansed })),
       this.bossActive,
       this.bossDefeated,
+      { x: MERCHANT_SPOT.stall.x, z: MERCHANT_SPOT.stall.z },
     );
   }
 
@@ -1117,6 +1286,7 @@ export class Game {
       night: this.cycle.nightFactor > 0.5,
       notice: this.notice,
       inv: this.invView(),
+      shop: this.shopView(),
     });
   }
 
@@ -1124,6 +1294,7 @@ export class Game {
     if (!this.interactTarget || this.player.state === 'dead') return '';
     switch (this.interactTarget.kind) {
       case 'bonfire': return 'E · Descansar en la hoguera (cura y reabastece)';
+      case 'merchant': return `E · Comerciar con ${MERCHANT_NAME} el Mercader`;
       case 'shrine': return `E · Purificar ${WORLD.shrines[this.interactTarget.idx!].name}`;
       case 'sigil': return 'E · Despertar al jefe de nuevo';
     }
@@ -1170,9 +1341,10 @@ export class Game {
   }
 
   respawn() {
-    // limpiar enemigos vivos, proyectiles y drops
+    // limpiar enemigos vivos, proyectiles, drops y reapariciones pendientes
     for (const e of this.enemies) this.scene.remove(e.root);
     this.enemies = [];
+    this.respawnQueue = [];
     this.boss = null;
     this.bossActive = false;
     this.lockEnemy = null;
@@ -1233,9 +1405,12 @@ export class Game {
 
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
-    // con la mochila abierta solo se permite cerrarla
+    // con un panel abierto (mochila/tienda) solo se permite cerrarlo
     if (this.uiOpen) {
-      if (e.code === 'Escape' || e.code === 'KeyI' || e.code === 'KeyB') this.toggleInventory();
+      if (e.code === 'Escape' || e.code === 'KeyI' || e.code === 'KeyB') {
+        if (this.uiPanel === 'shop') this.setPanel(null);
+        else this.toggleInventory();
+      }
       return;
     }
     if (this.phase !== 'playing') return;

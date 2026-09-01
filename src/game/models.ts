@@ -687,6 +687,20 @@ export function buildBossRig(): HumanoidRig {
     outline: 0.05,
   });
 }
+/** Ferran, el mercader del campamento — mercader anime con peto y banda */
+export function buildMerchantRig(): HumanoidRig {
+  return buildHumanoid({
+    scale: 1.04, skin: 0xf2cfa4, torso: 0x7a3b52, legs: 0x3a3048, arms: 0x7a3b52,
+    eyes: 0xffb347, eyeStyle: 'anime',
+    hair: 0x4a2f1e,
+    chest: 0xc7a24a,
+    helmet: 'hood', helmetColor: 0x5e3248,
+    cape: 0x4e2a3e,
+    bigHead: true,
+    rim: { color: 0xffd9a0, strength: 0.25 },
+    outline: 0.024,
+  });
+}
 
 /* ---------- Props del mundo ---------- */
 
@@ -819,6 +833,116 @@ export function buildSigil(): { group: THREE.Group; ring: THREE.Mesh } {
   g.add(ring);
   return { group: g, ring };
 }
+
+/**
+ * Puesto del mercader: dos postes, toldo a rayas rojo/crema,
+ * mostrador de madera con género (frascos, saco de monedas, caja)
+ * y un farol cálido que arde de noche.
+ */
+export function buildMerchantStall(): { group: THREE.Group; lantern: THREE.PointLight; lanternCore: THREE.Mesh } {
+  const g = new THREE.Group();
+  const wood = woodMat();
+  const darkWood = woodMat();
+  darkWood.color.setHex(0x4a3423);
+
+  // postes
+  const poleGeo = new THREE.CylinderGeometry(0.055, 0.07, 2.35, 7);
+  const pL = mesh(poleGeo, wood, -1.05, 1.175, -0.55);
+  const pR = mesh(poleGeo, wood, 1.05, 1.175, -0.55);
+  const pBack = mesh(poleGeo, darkWood, 0, 1.125, 0.62);
+  pBack.scale.y = 1.0;
+  g.add(pL, pR, pBack);
+
+  // toldo a rayas (listones alternos, ligeramente inclinado hacia delante)
+  const awning = new THREE.Group();
+  awning.position.set(0, 2.28, 0.02);
+  awning.rotation.x = -0.16;
+  const stripeA = toonMat(0xb8443c);
+  const stripeB = toonMat(0xe8dcc2);
+  const stripeGeo = new THREE.BoxGeometry(0.35, 0.045, 1.75);
+  for (let i = 0; i < 6; i++) {
+    const s = mesh(stripeGeo, i % 2 === 0 ? stripeA : stripeB, -0.875 + i * 0.35, 0, -0.1, false);
+    s.userData.noOutline = true;
+    awning.add(s);
+  }
+  // canto del toldo
+  const trim = mesh(new THREE.BoxGeometry(2.16, 0.07, 0.06), toonMat(0xc7a24a), 0, -0.05, 0.82, false);
+  trim.userData.noOutline = true;
+  awning.add(trim);
+  g.add(awning);
+
+  // mostrador
+  const counter = mesh(new THREE.BoxGeometry(2.25, 0.78, 0.72), wood, 0, 0.46, 0.1);
+  g.add(counter);
+  // tablón superior del mostrador
+  const top = mesh(new THREE.BoxGeometry(2.4, 0.07, 0.86), darkWood, 0, 0.88, 0.1);
+  g.add(top);
+  // manto frontal con rombos dorados
+  const skirt = mesh(new THREE.BoxGeometry(2.28, 0.5, 0.04), toonMat(0x7a3b52), 0, 0.42, 0.47, false);
+  skirt.userData.noOutline = true;
+  g.add(skirt);
+  for (let i = 0; i < 3; i++) {
+    const d = mesh(new THREE.OctahedronGeometry(0.06), emisMat(0xffb347, 0.9), -0.6 + i * 0.6, 0.42, 0.5, false);
+    d.userData.noOutline = true;
+    g.add(d);
+  }
+
+  // género sobre el mostrador: frascos de elixir
+  const potionColors = [0xff5a4e, 0x51e07c, 0x54a8ff];
+  potionColors.forEach((c, i) => {
+    const bottle = new THREE.Group();
+    const body = mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.16, 8), toonMat(c), 0, 0.08, 0, false);
+    const neck = mesh(new THREE.CylinderGeometry(0.03, 0.045, 0.09, 6), toonMat(c), 0, 0.2, 0, false);
+    const cork = mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.04, 6), toonMat(0x8a6a42), 0, 0.26, 0, false);
+    bottle.add(body, neck, cork);
+    bottle.position.set(-0.62 + i * 0.24, 0.92, 0.12);
+    g.add(bottle);
+  });
+  // saco de monedas
+  const sack = mesh(new THREE.SphereGeometry(0.14, 8, 7), toonMat(0xb09a6a), 0.42, 0.99, 0.1);
+  sack.scale.set(1, 0.9, 1);
+  g.add(sack);
+  const tie = mesh(new THREE.TorusGeometry(0.05, 0.014, 5, 8), toonMat(0x8a6a42), 0.42, 1.12, 0.1);
+  tie.rotation.x = Math.PI / 2;
+  g.add(tie);
+  const coin = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.012, 10), emisMat(0xffc84a, 1.1), 0.42, 1.16, 0.08, false);
+  coin.rotation.x = 0.4;
+  g.add(coin);
+  // caja de madera con espada
+  const crate = mesh(new THREE.BoxGeometry(0.42, 0.3, 0.34), darkWood, -0.78, 1.06, 0.12);
+  g.add(crate);
+  const blade = mesh(bladeGeo(0.72, 0.045), forgedMat(0xcdd6e2), -0.7, 1.28, 0.16);
+  blade.rotation.z = -0.5;
+  g.add(blade);
+
+  // farol colgante del toldo
+  const lanternGroup = new THREE.Group();
+  lanternGroup.position.set(0.95, 1.95, 0.35);
+  const hook = mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.3, 5), forgedMat(0x6a6a72), 0, 0.15, 0, false);
+  hook.userData.noOutline = true;
+  const cage = mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.2, 6), forgedMat(0x55504e), 0, -0.06, 0);
+  const core = mesh(new THREE.OctahedronGeometry(0.065), emisMat(0xffb36a, 2.6), 0, -0.06, 0, false);
+  core.userData.noOutline = true;
+  lanternGroup.add(hook, cage, core);
+  g.add(lanternGroup);
+  const lantern = new THREE.PointLight(0xffb36a, 0, 12, 2);
+  lantern.position.set(0.95, 1.8, 0.35);
+  g.add(lantern);
+
+  // rótulo colgante con emblema de moneda
+  const signBoard = mesh(new THREE.BoxGeometry(0.5, 0.3, 0.04), darkWood, -0.95, 1.78, 0.3);
+  g.add(signBoard);
+  const emblem = mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.02, 12), emisMat(0xffc84a, 1.5), -0.95, 1.78, 0.33, false);
+  emblem.rotation.x = Math.PI / 2;
+  emblem.userData.noOutline = true;
+  g.add(emblem);
+
+  // contornos de tinta del puesto (se excluyen los planos marcados)
+  addOutlines(g, 0.03);
+
+  return { group: g, lantern, lanternCore: core };
+}
+
 
 /* ---------- Hierba: mata de 3 hojas curvadas (textura alpha) ---------- */
 

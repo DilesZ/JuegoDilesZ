@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import type { HudState, ItemView } from '@/game/core';
+import type { HudState, ItemView, ShopEntryView, ShopSellView } from '@/game/core';
 import type { Game, QualityTier } from '@/game/game';
 
 /* ============================================================
@@ -36,6 +36,14 @@ const INITIAL_HUD: HudState = {
     totals: { dmg: 0, hp: 0, def: 0, speed: 0, stam: 0, crit: 0 },
     defRed: 0, dmgMul: 1, crit: 0,
     perm: { hp: 0, dmg: 0, stam: 0 },
+  },
+  shop: {
+    open: false,
+    name: 'Ferran',
+    stock: [],
+    bag: [],
+    gold: 0,
+    restockDay: 1,
   },
 };
 
@@ -333,6 +341,149 @@ function InventoryPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | nu
   );
 }
 
+/* ============================================================
+   TIENDA DEL MERCADER
+   ============================================================ */
+
+function MerchantPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | null; onClose: () => void }) {
+  const [hover, setHover] = useState<{ item: ItemView; extra: string; accent: string } | null>(null);
+  const shop = hud.shop;
+  const afford = (e: ShopEntryView) => hud.gold >= e.price;
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-[3px] pointer-events-auto">
+      <div className="relative aetheria-frame w-[min(1040px,95vw)] max-h-[92vh] bg-[#0d0b14]/95 border border-amber-900/50 shadow-[0_0_80px_rgba(0,0,0,0.7)] flex flex-col aetheria-pop">
+        <Corners />
+
+        {/* Cabecera */}
+        <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-amber-900/30">
+          <div className="flex items-center gap-4">
+            <div className="w-11 h-11 rounded-full border-2 border-amber-600/80 bg-stone-950/90 flex items-center justify-center text-xl shadow-[0_0_12px_rgba(0,0,0,0.8)]">
+              🧙
+            </div>
+            <div>
+              <h2 className="font-display text-2xl text-amber-200 tracking-[0.18em] uppercase leading-none">
+                {shop.name} · Mercader del Alba
+              </h2>
+              <div className="text-[11px] text-stone-500 tracking-[0.2em] uppercase mt-1">
+                “Género honesto para caminos largos” · Día {shop.restockDay}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className={`text-sm font-semibold px-3 py-1.5 rounded border ${hud.gold > 0 ? 'text-amber-300/90 border-amber-800/50 bg-black/40' : 'text-red-300 border-red-900/50 bg-black/40'}`}>
+              ◈ {hud.gold}
+            </div>
+            <button
+              onClick={onClose}
+              className="w-9 h-9 rounded border border-stone-700/70 bg-stone-900/80 text-stone-400 hover:text-amber-100 hover:border-amber-600/60 transition-colors text-lg leading-none"
+              title="Cerrar (Esc)"
+            >✕</button>
+          </div>
+        </div>
+
+        {/* Cuerpo: comprar | vender */}
+        <div className="grid md:grid-cols-2 gap-5 p-5 overflow-y-auto aetheria-scroll">
+          {/* Mercadería */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display">Mercadería · clic para comprar</div>
+              <div className="text-[10px] text-stone-600">{shop.stock.length} objetos</div>
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(76px,1fr))] gap-2 bg-black/30 border border-stone-800/70 rounded-lg p-3">
+              {shop.stock.map((e, i) => (
+                <button
+                  key={`${e.item.id}-${i}`}
+                  onClick={() => g()?.buyItem(i)}
+                  onMouseEnter={() => setHover({ item: e.item, extra: `Precio de compra: ${e.price} ◈`, accent: afford(e) ? '#8ef2a6' : '#ff8a7a' })}
+                  onMouseLeave={() => setHover(null)}
+                  className={`relative group rounded-md border-2 bg-stone-950/85 h-20 flex flex-col items-center justify-center gap-0.5 transition-all duration-150
+                    ${afford(e) ? 'cursor-pointer hover:scale-[1.06] hover:z-10' : 'opacity-45 cursor-not-allowed'}`}
+                  style={{
+                    borderColor: RARITY_CSS[e.item.rarity],
+                    boxShadow: `0 0 10px ${RARITY_CSS[e.item.rarity]}44, inset 0 0 8px ${RARITY_CSS[e.item.rarity]}22`,
+                  }}
+                  title={afford(e) ? `Comprar ${e.item.name}` : 'Oro insuficiente'}
+                >
+                  <span className="text-2xl leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]">{e.item.icon}</span>
+                  <span className={`text-[11px] font-bold leading-none ${afford(e) ? 'text-amber-300' : 'text-red-400/90'}`}>◈ {e.price}</span>
+                  {e.item.rarity === 'epico' || e.item.rarity === 'legendario' ? (
+                    <span className="absolute -top-1 -right-1 w-2 h-2 rotate-45" style={{ background: RARITY_CSS[e.item.rarity], boxShadow: `0 0 6px ${RARITY_CSS[e.item.rarity]}` }} />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 text-[10px] text-stone-600">El género se reabastece cada amanecer · Precios según rareza</div>
+          </div>
+
+          {/* Vender */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] uppercase tracking-[0.3em] text-amber-600/80 font-display">Tu mochila · clic para vender</div>
+              <div className="text-[10px] text-stone-600">40% del valor</div>
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(76px,1fr))] gap-2 bg-black/30 border border-stone-800/70 rounded-lg p-3 min-h-[120px] content-start">
+              {shop.bag.length === 0 && (
+                <div className="col-span-full text-center text-[12px] text-stone-600 italic py-6">
+                  La mochila está vacía… caza algo de botín
+                </div>
+              )}
+              {shop.bag.map((e) => (
+                <button
+                  key={`sell-${e.index}-${e.item.id}`}
+                  onClick={() => g()?.sellBagItem(e.index)}
+                  onMouseEnter={() => setHover({ item: e.item, extra: `Te pagan: ${e.sell} ◈`, accent: '#ffc84a' })}
+                  onMouseLeave={() => setHover(null)}
+                  className="relative rounded-md border-2 border-stone-700/70 bg-stone-950/85 h-20 flex flex-col items-center justify-center gap-0.5 cursor-pointer hover:scale-[1.06] hover:z-10 hover:border-amber-500/70 transition-all duration-150"
+                  style={{ borderColor: `${RARITY_CSS[e.item.rarity]}66` }}
+                  title={`Vender 1 × ${e.item.name}`}
+                >
+                  <span className="text-2xl leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]">{e.item.icon}</span>
+                  <span className="text-[11px] font-bold leading-none text-amber-300">+◈ {e.sell}</span>
+                  {e.item.count > 1 && (
+                    <span className="absolute bottom-0.5 right-1 text-[10px] font-bold text-amber-100 drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">×{e.item.count}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 text-[10px] text-stone-600">Cada clic vende una unidad · El equipo equipado está a salvo</div>
+          </div>
+        </div>
+
+        {/* Detalle + pie */}
+        <div className="px-5 pb-4">
+          <div className="bg-black/30 border border-stone-800/70 rounded-lg p-3 min-h-[76px]">
+            {hover ? (
+              <div className="flex items-center gap-3">
+                <div
+                  className="w-11 h-11 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-2xl"
+                  style={{ borderColor: RARITY_CSS[hover.item.rarity], boxShadow: `0 0 10px ${RARITY_CSS[hover.item.rarity]}44` }}
+                >
+                  {hover.item.icon}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-display text-sm tracking-wide" style={{ color: RARITY_CSS[hover.item.rarity] }}>{hover.item.name}</div>
+                  <div className="text-[10px] text-stone-500">{KIND_LABEL[hover.item.kind]} · {RARITY_LABEL[hover.item.rarity]}</div>
+                  <ItemStatLines item={hover.item} />
+                </div>
+                <div className="text-sm font-bold shrink-0" style={{ color: hover.accent }}>{hover.extra}</div>
+              </div>
+            ) : (
+              <div className="h-full flex items-center justify-center text-[12px] text-stone-600 italic">
+                Pasa el cursor sobre un objeto para ver su precio y detalles
+              </div>
+            )}
+          </div>
+          <div className="mt-2 text-[10px] text-stone-600 flex justify-between">
+            <span>Esc / ✕ cierra la tienda · El oro cae de tus enemigos</span>
+            <span className="hidden sm:inline">Los épicos y legendarios destellan en el género de Ferran</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================ */
 
 export default function Home() {
@@ -526,8 +677,8 @@ export default function Home() {
           {/* Ayuda de controles (abajo-derecha) */}
           <div className="absolute bottom-4 right-4 text-right text-[10px] leading-relaxed text-stone-500">
             <div>Clic izq. atacar · Clic der. cargado · Espacio esquivar</div>
-            <div>Tab objetivo · F poción · E interactuar · Esc pausa</div>
-            <div>Rueda zoom · I mochila e inventario</div>
+            <div>Tab objetivo · F poción · E interactuar / comerciar · Esc pausa</div>
+            <div>Rueda zoom · I mochila · Ferran comercia junto a la hoguera</div>
           </div>
         </div>
       )}
@@ -535,6 +686,11 @@ export default function Home() {
       {/* ============ INVENTARIO / EQUIPO ============ */}
       {booted && hud.inv?.open && (
         <InventoryPanel hud={hud} g={g} onClose={() => g()?.toggleInventory()} />
+      )}
+
+      {/* ============ TIENDA DEL MERCADER ============ */}
+      {booted && hud.shop?.open && (
+        <MerchantPanel hud={hud} g={g} onClose={() => g()?.closeShop()} />
       )}
 
       {/* ============ MENÚ PRINCIPAL (mundo en vivo detrás) ============ */}
@@ -559,6 +715,10 @@ export default function Home() {
                 La luna sangra sobre las ruinas de Aetheria. Tres santuarios corruptos alimentan
                 la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Caballero Caído.
                 Purifícalos, crece en poder y derriba al señor de la noche en su arena.
+              </p>
+              <p className="font-body text-amber-200/70 text-[12px] leading-relaxed max-w-lg mx-auto mt-2">
+                Comercia con <span className="text-amber-300">Ferran el Mercader</span> junto a la hoguera ·
+                Los enemigos reaparecen en sus puestos con el tiempo, como en los MMORPG
               </p>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-7 text-[11px]">
