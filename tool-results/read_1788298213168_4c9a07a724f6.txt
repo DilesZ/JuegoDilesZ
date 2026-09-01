@@ -1,0 +1,782 @@
+     1→import * as THREE from 'three';
+     2→import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+     3→import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
+     4→import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+     5→import { rand, terrainHeight } from './core';
+     6→import { buildSword, buildShield, stoneMat, type VisualRig } from './models';
+     7→import { CLIPS, sampleClip, idlePose, strafePose, type Pose } from './animations';
+     8→
+     9→/* ============================================================
+    10→   PERSONAJES GLB REALES (rigged + animados, licencia libre)
+    11→   - Héroe: readyplayer.me.glb + MOCAP de Ready Player Me
+    12→     (Animation Library — mismo esqueleto, carga directa;
+    13→      licencia RPM: uso con avatares Ready Player Me).
+    14→   - Enemigos: Quaternius "Ultimate Monsters" (CC0):
+    15→       goblin → Tribal · archer → Ghost_Skull (espectro)
+    16→       orc    → Orc    · boss  → Demon (Bel'Zaroth)
+    17→     Clips mapeados: Idle/Walk/Run/HitReact/Death/Punch/Weapon.
+    18→   - Mercader: Soldier.glb (Idle/Walk nativos)
+    19→   - Zorros: Fox.glb (Survey/Walk/Run)
+    20→   - Ruinas: dungeon_warkarma.glb fusionado por material
+    21→
+    22→   Los clips de COMBATE del héroe se hornean sobre el esqueleto real
+    23→   a partir de los mismos CLIPS procedurales del juego (mismas
+    24→   duraciones → hitAt/dur de la jugabilidad intactos).
+    25→   Si algún GLB falla, loadCharacterAssets devuelve null y el juego
+    26→   sigue con los rigs procedurales de siempre (fallback completo).
+    27→   ============================================================ */
+    28→
+    29→const MODEL_DIR = '/assets/models';
+    30→/** altura del rig procedural sin escalar (para escalar bodyY) */
+    31→const PROC_HEIGHT = 1.574;
+    32→
+    33→/* ---------- Animador con crossfade por estados ---------- */
+    34→
+    35→export class GlbAnimator {
+    36→  mixer: THREE.AnimationMixer;
+    37→  private actions = new Map<string, THREE.AnimationAction>();
+    38→  private durations = new Map<string, number>();
+    39→  current = '';
+    40→  speed = 1;
+    41→
+    42→  constructor(root: THREE.Object3D, clips: Record<string, THREE.AnimationClip>) {
+    43→    this.mixer = new THREE.AnimationMixer(root);
+    44→    for (const [name, clip] of Object.entries(clips)) {
+    45→      this.actions.set(name, this.mixer.clipAction(clip));
+    46→      this.durations.set(name, clip.duration);
+    47→    }
+    48→  }
+    49→
+    50→  has(name: string) { return this.actions.has(name); }
+    51→  clipDur(name: string) { return this.durations.get(name) ?? 0; }
+    52→
+    53→  play(name: string, opts: { fade?: number; once?: boolean; restart?: boolean; timeScale?: number } = {}) {
+    54→    const next = this.actions.get(name);
+    55→    if (!next) return;
+    56→    if (this.current === name && !opts.restart) {
+    57→      if (opts.timeScale !== undefined) next.setEffectiveTimeScale(opts.timeScale);
+    58→      return;
+    59→    }
+    60→    const fade = opts.fade ?? 0.18;
+    61→    const prev = this.current ? this.actions.get(this.current) : null;
+    62→    next.reset();
+    63→    next.setLoop(opts.once ? THREE.LoopOnce : THREE.LoopRepeat, opts.once ? 1 : Infinity);
+    64→    next.clampWhenFinished = !!opts.once;
+    65→    next.setEffectiveTimeScale(opts.timeScale ?? 1);
+    66→    next.setEffectiveWeight(1);
+    67→    next.fadeIn(fade).play();
+    68→    if (prev && prev !== next) prev.fadeOut(fade);
+    69→    this.current = name;
+    70→  }
+    71→
+    72→  update(dt: number) { this.mixer.update(dt * this.speed); }
+    73→}
+    74→
+    75→/* ---------- Carácter GLB genérico ---------- */
+    76→
+    77→export interface GlbCharacter {
+    78→  root: THREE.Group;
+    79→  model: THREE.Object3D;
+    80→  rig: VisualRig;
+    81→  animator: GlbAnimator;
+    82→  height: number;
+    83→}
+    84→
+    85→/** Pack de un monstruo: fuente + clips ya renombrados a nombres del motor */
+    86→export interface MonsterPack {
+    87→  source: THREE.Object3D;
+    88→  clips: Record<string, THREE.AnimationClip>;
+    89→}
+    90→
+    91→export interface CharacterPack {
+    92→  heroSource: THREE.Object3D;
+    93→  /** mocap RPM (idle/walk/run/back/strafeL/strafeR) — esqueleto idéntico al héroe */
+    94→  rpmClips: Record<string, THREE.AnimationClip>;
+    95→  soldierSource: THREE.Object3D;
+    96→  /** clips del Soldier renombrados en minúscula (mercader) */
+    97→  soldierClips: Record<string, THREE.AnimationClip>;
+    98→  /** monstruos por variante de enemigo (Quaternius CC0) */
+    99→  monsters: Partial<Record<'goblin' | 'archer' | 'orc' | 'boss', MonsterPack>>;
+   100→  foxSource: THREE.Object3D;
+   101→  foxClips: THREE.AnimationClip[];
+   102→  dungeon: THREE.Group | null;
+   103→  dungeonRadius: number;
+   104→}
+   105→
+   106→/* ============================================================
+   107→   HORNEADO DE CLIPS: pose procedural → pistas del esqueleto real
+   108→   La rotación procedural (euler XYZ) se aplica en ejes del mundo
+   109→   sobre la dirección de reposo alineada del hueso:
+   110→     D  = qAnim · R_align          (espacio mundo del personaje)
+   111→     L' = Pw⁻¹ · D · Pw · L0       (local del hueso)
+   112→   ============================================================ */
+   113→
+   114→const _q1 = new THREE.Quaternion();
+   115→const _q2 = new THREE.Quaternion();
+   116→const _q3 = new THREE.Quaternion();
+   117→const _v1 = new THREE.Vector3();
+   118→const _v2 = new THREE.Vector3();
+   119→const AX = new THREE.Vector3(1, 0, 0);
+   120→const AY = new THREE.Vector3(0, 1, 0);
+   121→const AZ = new THREE.Vector3(0, 0, 1);
+   122→const DOWN = new THREE.Vector3(0, -1, 0);
+   123→
+   124→function findBone(model: THREE.Object3D, ...candidates: string[]): THREE.Object3D | null {
+   125→  let found: THREE.Object3D | null = null;
+   126→  const wanted = candidates.map(c => c.toLowerCase());
+   127→  model.traverse(o => {
+   128→    if (found) return;
+   129→    const raw = o.name.includes(':') ? o.name.slice(o.name.lastIndexOf(':') + 1) : o.name;
+   130→    if (wanted.includes(raw.toLowerCase())) found = o;
+   131→  });
+   132→  return found;
+   133→}
+   134→
+   135→/** dirección de reposo del hueso hacia su primer hijo (espacio raíz) */
+   136→function boneDirection(bone: THREE.Object3D, model: THREE.Object3D): THREE.Vector3 {
+   137→  model.updateMatrixWorld(true);
+   138→  const a = bone.getWorldPosition(new THREE.Vector3());
+   139→  const child = bone.children.find(c => c.type === 'Bone') ?? bone.children[0];
+   140→  const b = child ? child.getWorldPosition(new THREE.Vector3()) : a.clone().add(new THREE.Vector3(0, 0.1, 0));
+   141→  const d = b.sub(a);
+   142→  if (d.lengthSq() < 1e-8) d.set(0, -1, 0);
+   143→  return d.normalize();
+   144→}
+   145→
+   146→class SkeletonBinder {
+   147→  hips: THREE.Object3D | null = null;
+   148→  private hipsParentInv = new THREE.Matrix4();
+   149→  private hipsRestWorld = new THREE.Vector3();
+   150→  private joints = new Map<string, { bone: THREE.Object3D; align: THREE.Quaternion; parentW: THREE.Quaternion; restLocal: THREE.Quaternion }>();
+   151→
+   152→  constructor(model: THREE.Object3D, withLimbs: boolean) {
+   153→    model.updateMatrixWorld(true);
+   154→    const hips = findBone(model, 'Hips', 'Pelvis');
+   155→    this.hips = hips;
+   156→    if (hips && hips.parent) {
+   157→      this.hipsParentInv.copy(hips.parent.matrixWorld).invert();
+   158→      this.hipsRestWorld.copy(hips.getWorldPosition(new THREE.Vector3()));
+   159→    }
+   160→    const bind = (key: string, bone: THREE.Object3D | null, alignDir: THREE.Vector3 | null) => {
+   161→      if (!bone || !bone.parent) return;
+   162→      const parentW = new THREE.Quaternion();
+   163→      bone.parent.getWorldQuaternion(parentW);
+   164→      const align = new THREE.Quaternion();
+   165→      if (alignDir) align.setFromUnitVectors(boneDirection(bone, model), alignDir);
+   166→      this.joints.set(key, { bone, align, parentW, restLocal: bone.quaternion.clone() });
+   167→    };
+   168→    bind('body', this.hips, null);
+   169→    bind('torso', findBone(model, 'Spine1', 'Spine2', 'Spine', 'Chest'), null);
+   170→    bind('head', findBone(model, 'Head', 'Neck'), null);
+   171→    if (withLimbs) {
+   172→      bind('armL', findBone(model, 'LeftArm', 'LeftForeArm'), DOWN);
+   173→      bind('armR', findBone(model, 'RightArm', 'RightForeArm'), DOWN);
+   174→      bind('legL', findBone(model, 'LeftUpLeg', 'LeftLeg'), DOWN);
+   175→      bind('legR', findBone(model, 'RightUpLeg', 'RightLeg'), DOWN);
+   176→    }
+   177→  }
+   178→
+   179→  /** Construye las pistas del esqueleto para poses muestreadas */
+   180→  tracks(samples: { t: number; pose: Pose }[], height: number): THREE.KeyframeTrack[] {
+   181→    const tracks: THREE.KeyframeTrack[] = [];
+   182→    const times = samples.map(s => s.t);
+   183→    const k = height / PROC_HEIGHT;
+   184→    for (const [key, b] of this.joints) {
+   185→      const vals = new Float32Array(samples.length * 4);
+   186→      samples.forEach((s, i) => {
+   187→        const e = s.pose[key as keyof Pose] as [number, number, number];
+   188→        // qAnim = qX·qY·qZ (mismo orden que Euler 'XYZ' del rig procedural)
+   189→        _q1.setFromAxisAngle(AX, e[0]);
+   190→        _q2.setFromAxisAngle(AY, e[1]);
+   191→        _q1.multiply(_q2);
+   192→        _q2.setFromAxisAngle(AZ, e[2]);
+   193→        _q1.multiply(_q2);        // _q1 = qAnim
+   194→        _q1.multiply(b.align);    // D = qAnim · R_align
+   195→        _q3.copy(b.parentW).invert().multiply(_q1).multiply(b.parentW).multiply(b.restLocal);
+   196→        vals[i * 4] = _q3.x; vals[i * 4 + 1] = _q3.y; vals[i * 4 + 2] = _q3.z; vals[i * 4 + 3] = _q3.w;
+   197→      });
+   198→      tracks.push(new THREE.QuaternionKeyframeTrack(`${b.bone.name}.quaternion`, times, vals));
+   199→    }
+   200→    // posición de caderas (bodyY del rig procedural)
+   201→    if (this.hips) {
+   202→      const vals = new Float32Array(samples.length * 3);
+   203→      samples.forEach((s, i) => {
+   204→        _v1.set(0, s.pose.bodyY * k, 0).add(this.hipsRestWorld);
+   205→        _v2.copy(_v1).applyMatrix4(this.hipsParentInv);
+   206→        vals[i * 3] = _v2.x; vals[i * 3 + 1] = _v2.y; vals[i * 3 + 2] = _v2.z;
+   207→      });
+   208→      tracks.push(new THREE.VectorKeyframeTrack(`${this.hips.name}.position`, times, vals));
+   209→    }
+   210→    return tracks;
+   211→  }
+   212→}
+   213→
+   214→/** Hornea un clip de acción (duración EXACTA de CLIPS → jugabilidad intacta) */
+   215→function bakeActionClip(name: string, clipName: string, binder: SkeletonBinder, height: number, steps = 14): THREE.AnimationClip {
+   216→  const dur = CLIPS[clipName].dur;
+   217→  const samples: { t: number; pose: Pose }[] = [];
+   218→  for (let i = 0; i <= steps; i++) {
+   219→    const t = dur * (i / steps);
+   220→    samples.push({ t, pose: sampleClip(CLIPS[clipName], t) });
+   221→  }
+   222→  return new THREE.AnimationClip(name, dur, binder.tracks(samples, height));
+   223→}
+   224→
+   225→/** Hornea un clip en bucle a partir de una función de pose */
+   226→function bakeLoopClip(name: string, dur: number, steps: number, fn: (t: number) => Pose, binder: SkeletonBinder, height: number): THREE.AnimationClip {
+   227→  const samples: { t: number; pose: Pose }[] = [];
+   228→  for (let i = 0; i <= steps; i++) {
+   229→    const t = dur * (i / steps);
+   230→    samples.push({ t, pose: fn(t) });
+   231→  }
+   232→  return new THREE.AnimationClip(name, dur, binder.tracks(samples, height));
+   233→}
+   234→
+   235→/** Saludo del mercader: brazo derecho saludando (1.2 s) */
+   236→function greetPose(t: number): Pose {
+   237→  const dur = 1.2;
+   238→  const p = idlePose(t);
+   239→  const w = Math.min(1, Math.min(t, dur - t) / 0.35);
+   240→  p.armR = [-2.35 * w, 0, (-0.45 + Math.sin(t * 13) * 0.28) * w];
+   241→  p.head = [0, 0, -0.06 * w];
+   242→  return p;
+   243→}
+   244→
+   245→/** Beber poción (0.45 s): lleva la mano izquierda a la cara */
+   246→function potionPose(t: number): Pose {
+   247→  const dur = 0.45;
+   248→  const p = idlePose(t);
+   249→  const w = Math.sin((t / dur) * Math.PI);
+   250→  p.armL = [-1.9 * w, 0, 0.35 * w];
+   251→  p.head = [0.12 * w, 0, 0];
+   252→  return p;
+   253→}
+   254→
+   255→/* ---------- Utilidades de normalización y materiales ---------- */
+   256→
+   257→/** Escala el modelo a una altura objetivo y apoya los pies en y=0 */
+   258→function normalizeModel(model: THREE.Object3D, targetH: number): number {
+   259→  model.updateMatrixWorld(true);
+   260→  const bbox = new THREE.Box3().setFromObject(model);
+   261→  const h = Math.max(0.001, bbox.max.y - bbox.min.y);
+   262→  model.scale.setScalar(targetH / h);
+   263→  model.updateMatrixWorld(true);
+   264→  const bb2 = new THREE.Box3().setFromObject(model);
+   265→  model.position.y -= bb2.min.y;
+   266→  return targetH;
+   267→}
+   268→
+   269→/** Prepara materiales de personaje para PBR (rugosidad, sombras) */
+   270→function enableShadows(model: THREE.Object3D) {
+   271→  model.traverse(o => {
+   272→    if (o instanceof THREE.Mesh) {
+   273→      o.castShadow = true;
+   274→      o.receiveShadow = false;
+   275→    }
+   276→  });
+   277→}
+   278→
+   279→function tuneCharacterMaterials(model: THREE.Object3D) {
+   280→  model.traverse(o => {
+   281→    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+   282→      const m = o.material as THREE.MeshStandardMaterial;
+   283→      if (m.isMeshStandardMaterial) {
+   284→        m.roughness = Math.min(0.95, Math.max(0.55, m.roughness));
+   285→        m.metalness = Math.min(0.35, m.metalness);
+   286→        if (m.map) m.map.anisotropy = 4;
+   287→        m.envMapIntensity = 0.85;
+   288→      }
+   289→    }
+   290→  });
+   291→}
+   292→
+   293→function captureRest(model: THREE.Object3D): Map<THREE.Object3D, { q: THREE.Quaternion; p: THREE.Vector3 }> {
+   294→  const map = new Map<THREE.Object3D, { q: THREE.Quaternion; p: THREE.Vector3 }>();
+   295→  model.traverse(o => {
+   296→    if (o instanceof THREE.Bone) map.set(o, { q: o.quaternion.clone(), p: o.position.clone() });
+   297→  });
+   298→  return map;
+   299→}
+   300→
+   301→function restoreRest(model: THREE.Object3D, rest: Map<THREE.Object3D, { q: THREE.Quaternion; p: THREE.Vector3 }>) {
+   302→  for (const [bone, r] of rest) {
+   303→    bone.quaternion.copy(r.q);
+   304→    bone.position.copy(r.p);
+   305→  }
+   306→  model.updateMatrixWorld(true);
+   307→}
+   308→
+   309→function lowercaseClips(clips: THREE.AnimationClip[]): Record<string, THREE.AnimationClip> {
+   310→  const out: Record<string, THREE.AnimationClip> = {};
+   311→  for (const c of clips) out[c.name.toLowerCase()] = c;
+   312→  return out;
+   313→}
+   314→
+   315→/* ============================================================
+   316→   FÁBRICAS DE PERSONAJES
+   317→   ============================================================ */
+   318→
+   319→function makeCharacter(
+   320→  model: THREE.Object3D,
+   321→  height: number,
+   322→  clips: Record<string, THREE.AnimationClip>,
+   323→  weapon: THREE.Group | null,
+   324→  weaponMat: THREE.Material | null,
+   325→  shield: boolean,
+   326→): GlbCharacter {
+   327→  const root = new THREE.Group();
+   328→  root.add(model);
+   329→  let handR: THREE.Object3D | null = null;
+   330→  let handL: THREE.Object3D | null = null;
+   331→  if (weapon || shield) {
+   332→    handR = findBone(model, 'RightHand', 'RightForeArm', 'Hand.R');
+   333→    handL = findBone(model, 'LeftHand', 'LeftForeArm', 'Hand.L');
+   334→  }
+   335→  model.updateMatrixWorld(true);
+   336→  if (weapon && handR) {
+   337→    handR.add(weapon);
+   338→    // Fija la hoja en espacio mundo (arriba y ligeramente al frente):
+   339→    // q_local = q_mundo_mano⁻¹ · q_deseado, con el modelo en reposo.
+   340→    const handWorld = new THREE.Quaternion();
+   341→    handR.getWorldQuaternion(handWorld);
+   342→    const desired = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.5, 0, 0));
+   343→    weapon.quaternion.copy(handWorld.invert().multiply(desired));
+   344→    weapon.position.set(0, 0.06, 0.02);
+   345→  }
+   346→  if (shield && handL) {
+   347→    const sh = buildShield();
+   348→    sh.scale.setScalar(0.9);
+   349→    handL.add(sh);
+   350→    const handWorldL = new THREE.Quaternion();
+   351→    handL.getWorldQuaternion(handWorldL);
+   352→    const desiredL = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -1.15, 0));
+   353→    sh.quaternion.copy(handWorldL.invert().multiply(desiredL));
+   354→    sh.position.set(0, -0.07, 0);
+   355→  }
+   356→  const animator = new GlbAnimator(model, clips);
+   357→  return {
+   358→    root, model,
+   359→    rig: { root, weapon, weaponMat: (weaponMat ?? null) as VisualRig['weaponMat'], handR, handL, height },
+   360→    animator, height,
+   361→  };
+   362→}
+   363→
+   364→/** MOCAP RPM → nombres de motor (mismo esqueleto que readyplayer.me) */
+   365→const RPM_MAP: [string, string][] = [
+   366→  ['idle', 'M_Standing_Idle_001'],
+   367→  ['walk', 'M_Jog_001'],
+   368→  ['run', 'M_Run_001'],
+   369→  ['back', 'M_Jog_Backwards_001'],
+   370→  ['strafeL', 'M_Jog_Strafe_Left_001'],
+   371→  ['strafeR', 'M_Jog_Strafe_Right_001'],
+   372→];
+   373→
+   374→/** Héroe: readyplayer.me + mocap RPM directo + combate horneado */
+   375→export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
+   376→  const targetH = 1.62;
+   377→  const model = SkeletonUtils.clone(pack.heroSource);
+   378→  normalizeModel(model, targetH);
+   379→  enableShadows(model);
+   380→  tuneCharacterMaterials(model);
+   381→  // Vestimenta de fantasía: tiñe el chándal salmón del avatar hacia
+   382→  // cueros/tejidos oscuros de espadachín (DMC). Piel y cara intactas.
+   383→  model.traverse(o => {
+   384→    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+   385→      const m = o.material as THREE.MeshStandardMaterial;
+   386→      if (m.name.startsWith('Wolf3D_Outfit')) {
+   387→        m.color.lerp(new THREE.Color(0x4a4238), 0.82);   // cuero gris-pardo
+   388→        m.roughness = 0.82;
+   389→        m.metalness = 0.05;
+   390→      } else if (m.name === 'Wolf3D_Body') {
+   391→        m.color.lerp(new THREE.Color(0xc8a888), 0.18);   // piel ligeramente morena
+   392→        m.roughness = 0.74;
+   393→      }
+   394→    }
+   395→  });
+   396→  const rest = captureRest(model);
+   397→
+   398→  const binder = new SkeletonBinder(model, true);
+   399→  const clips: Record<string, THREE.AnimationClip> = {};
+   400→  for (const n of ['slash1', 'slash2', 'slash3', 'heavy', 'roll', 'hurt', 'death']) {
+   401→    clips[n] = bakeActionClip(n, n, binder, targetH);
+   402→  }
+   403→  clips.strafe = bakeLoopClip('strafe', Math.PI / 4, 12, t => strafePose(t, false), binder, targetH);
+   404→  clips.potion = bakeLoopClip('potion', 0.45, 8, t => potionPose(t), binder, targetH);
+   405→  // locomoción REAL (mocap RPM, sin retarget: mismo esqueleto)
+   406→  for (const [engine, raw] of RPM_MAP) {
+   407→    const clip = pack.rpmClips[raw];
+   408→    if (clip) clips[engine] = clip;
+   409→  }
+   410→  restoreRest(model, rest);
+   411→
+   412→  const weapon = buildSword(1.05);
+   413→  let weaponMat: THREE.Material | null = null;
+   414→  weapon.traverse(m => {
+   415→    if (m instanceof THREE.Mesh) {
+   416→      const mm = m.material as THREE.MeshStandardMaterial;
+   417→      if (mm && mm.emissive && mm.emissiveIntensity > 0) weaponMat = mm;
+   418→    }
+   419→  });
+   420→  return makeCharacter(model, targetH, clips, weapon, weaponMat, true);
+   421→}
+   422→
+   423→export type EnemyVariant = 'goblin' | 'archer' | 'orc' | 'boss';
+   424→
+   425→const ENEMY_LOOK: Record<EnemyVariant, {
+   426→  h: number; tint: number; emissive: number | null; emissiveI: number;
+   427→}> = {
+   428→  goblin: { h: 1.12, tint: 0xb2c48a, emissive: null, emissiveI: 0 },
+   429→  archer: { h: 1.38, tint: 0xbadce8, emissive: 0x2ad8ff, emissiveI: 0.3 },
+   430→  orc: { h: 2.16, tint: 0xd8a898, emissive: null, emissiveI: 0 },
+   431→  boss: { h: 2.95, tint: 0x8a7a94, emissive: 0xff2a1e, emissiveI: 0.16 },
+   432→};
+   433→
+   434→/** Mapeo de clips nativos del monstruo → nombres del motor */
+   435→const MONSTER_CLIPS: Record<EnemyVariant, Record<string, string>> = {
+   436→  goblin: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Punch' },
+   437→  archer: { idle: 'Flying_Idle', walk: 'Fast_Flying', run: 'Fast_Flying', strafe: 'Flying_Idle', hurt: 'HitReact', death: 'Death', attack1: 'Headbutt', attack2: 'Headbutt', cast: 'Punch' },
+   438→  orc: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Punch' },
+   439→  boss: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Weapon' },
+   440→};
+   441→
+   442→/** Velocidad de reproducción por clip (ajusta paso natural a velocidad de juego) */
+   443→const MONSTER_TIMESCALE: Record<EnemyVariant, Record<string, number>> = {
+   444→  goblin: { walk: 1.5, run: 1.35 },
+   445→  archer: { walk: 0.6, run: 1.0 },
+   446→  orc: { walk: 1.35, run: 1.25 },
+   447→  boss: { walk: 1.1, run: 1.05 },
+   448→};
+   449→
+   450→export function monsterTimeScale(type: EnemyVariant, clip: string): number {
+   451→  return MONSTER_TIMESCALE[type]?.[clip] ?? 1;
+   452→}
+   453→
+   454→/** Enemigo: monstruo Quaternius clonado + tinte por tipo + clips del motor */
+   455→export function createEnemyCharacter(pack: CharacterPack, type: EnemyVariant): GlbCharacter {
+   456→  const mp = pack.monsters[type];
+   457→  if (!mp) throw new Error(`sin monstruo para ${type}`);
+   458→  const look = ENEMY_LOOK[type];
+   459→  const model = SkeletonUtils.clone(mp.source);
+   460→  // materiales propios (flash, fundido y tinte por variante)
+   461→  model.traverse(o => {
+   462→    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+   463→      const m = (o.material as THREE.MeshStandardMaterial).clone();
+   464→      m.color = new THREE.Color(look.tint).multiply(m.color);
+   465→      m.roughness = 0.66;
+   466→      m.metalness = 0.12;
+   467→      m.envMapIntensity = 0.8;
+   468→      if (look.emissive) {
+   469→        m.emissive = new THREE.Color(look.emissive);
+   470→        m.emissiveIntensity = look.emissiveI;
+   471→      }
+   472→      o.material = m;
+   473→    }
+   474→  });
+   475→  normalizeModel(model, look.h);
+   476→  enableShadows(model);
+   477→
+   478→  // clips renombrados a nombres del motor
+   479→  const clips: Record<string, THREE.AnimationClip> = {};
+   480→  for (const [engine, native] of Object.entries(MONSTER_CLIPS[type])) {
+   481→    const c = mp.clips[native];
+   482→    if (c) clips[engine] = c;
+   483→  }
+   484→  // clips de combate del héroe NO aplican; los nombres usados por la IA:
+   485→  // idle/walk/run/strafe/hurt/death + attack1/attack2/cast (ENEMY_CFG)
+   486→  return makeCharacter(model, look.h, clips, null, null, false);
+   487→}
+   488→
+   489→/**
+   490→ * Devuelve duraciones reales de los clips de ataque de cada tipo para
+   491→ * sincronizar ENEMY_CFG (hitAt/dur) con la animación. Game lo aplica al iniciar.
+   492→ */
+   493→export function monsterAttackTimings(pack: CharacterPack): {
+   494→  type: EnemyVariant; idx: number; dur: number; hitAt: number;
+   495→}[] {
+   496→  const defs: { type: EnemyVariant; idx: number; clip: string; frac: number }[] = [
+   497→    { type: 'goblin', idx: 0, clip: 'attack1', frac: 0.62 },
+   498→    { type: 'archer', idx: 0, clip: 'cast', frac: 0.45 },
+   499→    { type: 'orc', idx: 0, clip: 'attack2', frac: 0.62 },
+   500→    { type: 'boss', idx: 0, clip: 'attack1', frac: 0.58 },
+   501→    { type: 'boss', idx: 1, clip: 'attack2', frac: 0.62 },
+   502→    { type: 'boss', idx: 2, clip: 'attack1', frac: 0.45 },
+   503→    { type: 'boss', idx: 3, clip: 'cast', frac: 0.5 },
+   504→  ];
+   505→  const out: { type: EnemyVariant; idx: number; dur: number; hitAt: number }[] = [];
+   506→  for (const d of defs) {
+   507→    const mp = pack.monsters[d.type];
+   508→    if (!mp) continue;
+   509→    const native = MONSTER_CLIPS[d.type][d.clip];
+   510→    const clip = native ? mp.clips[native] : null;
+   511→    if (!clip || clip.duration < 0.15) continue;
+   512→    out.push({ type: d.type, idx: d.idx, dur: clip.duration, hitAt: clip.duration * d.frac });
+   513→  }
+   514→  return out;
+   515→}
+   516→
+   517→/** Mercader: Soldier clonado (Idle/Walk nativos + saludo horneado) */
+   518→export function createMerchantCharacter(pack: CharacterPack): GlbCharacter {
+   519→  const targetH = 1.58;
+   520→  const model = SkeletonUtils.clone(pack.soldierSource);
+   521→  model.traverse(o => {
+   522→    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+   523→      const m = (o.material as THREE.MeshStandardMaterial).clone();
+   524→      if (m.name.includes('Body')) m.color.lerp(new THREE.Color(0x7a3b52), 0.55);
+   525→      m.roughness = 0.72;
+   526→      o.material = m;
+   527→    }
+   528→  });
+   529→  normalizeModel(model, targetH);
+   530→  enableShadows(model);
+   531→  const rest = captureRest(model);
+   532→  const binder = new SkeletonBinder(model, true);
+   533→  const clips: Record<string, THREE.AnimationClip> = { ...pack.soldierClips };
+   534→  clips.greet = bakeLoopClip('greet', 1.2, 16, t => greetPose(t), binder, targetH);
+   535→  restoreRest(model, rest);
+   536→  return makeCharacter(model, targetH, clips, null, null, false);
+   537→}
+   538→
+   539→/* ============================================================
+   540→   ZORROS — criaturas ambientales (Survey/Walk/Run nativos)
+   541→   ============================================================ */
+   542→
+   543→export class Fox {
+   544→  root = new THREE.Group();
+   545→  pos = new THREE.Vector3();
+   546→  yaw = 0;
+   547→  private animator: GlbAnimator;
+   548→  private target = new THREE.Vector3();
+   549→  private state: 'survey' | 'walk' | 'run' = 'survey';
+   550→  private t = rand(0, 5);
+   551→  private cd = rand(1, 4);
+   552→
+   553→  constructor(pack: CharacterPack, x: number, z: number) {
+   554→    const model = SkeletonUtils.clone(pack.foxSource);
+   555→    normalizeModel(model, 0.58);
+   556→    enableShadows(model);
+   557→    const clips = lowercaseClips(pack.foxClips);
+   558→    if (clips.survey) clips.idle = clips.survey;
+   559→    this.animator = new GlbAnimator(model, clips);
+   560→    this.root.add(model);
+   561→    this.pos.set(x, terrainHeight(x, z), z);
+   562→    this.root.position.copy(this.pos);
+   563→    this.pickTarget();
+   564→  }
+   565→
+   566→  private pickTarget() {
+   567→    const a = rand(0, Math.PI * 2);
+   568→    const r = rand(8, 46);
+   569→    this.target.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+   570→    this.target.y = terrainHeight(this.target.x, this.target.z);
+   571→  }
+   572→
+   573→  update(dt: number, playerPos: THREE.Vector3) {
+   574→    this.t += dt;
+   575→    this.cd -= dt;
+   576→    const dPlayer = Math.hypot(playerPos.x - this.pos.x, playerPos.z - this.pos.z);
+   577→    if (dPlayer < 4.5) {
+   578→      const away = new THREE.Vector3(this.pos.x - playerPos.x, 0, this.pos.z - playerPos.z).normalize();
+   579→      this.target.copy(this.pos).addScaledVector(away, 12);
+   580→      this.target.y = terrainHeight(this.target.x, this.target.z);
+   581→      this.state = 'run';
+   582→    } else if (this.cd <= 0) {
+   583→      if (this.state !== 'survey') {
+   584→        this.state = 'survey'; this.cd = rand(2, 5);
+   585→      } else {
+   586→        this.pickTarget();
+   587→        this.state = rand(0, 1) > 0.35 ? 'walk' : 'run';
+   588→        this.cd = rand(4, 9);
+   589→      }
+   590→    }
+   591→    if (this.state !== 'survey') {
+   592→      const to = new THREE.Vector3().subVectors(this.target, this.pos).setY(0);
+   593→      if (to.length() < 1.4) { this.state = 'survey'; this.cd = rand(2, 6); }
+   594→      else {
+   595→        to.normalize();
+   596→        const spd = this.state === 'run' ? 5.2 : 1.7;
+   597→        this.pos.addScaledVector(to, spd * dt);
+   598→        this.pos.y = terrainHeight(this.pos.x, this.pos.z);
+   599→        this.yaw = this.yaw + (Math.atan2(to.x, to.z) - this.yaw) * (1 - Math.exp(-6 * dt));
+   600→      }
+   601→    }
+   602→    const r = Math.hypot(this.pos.x, this.pos.z);
+   603→    if (r > 78) { this.pos.multiplyScalar(78 / r); this.pickTarget(); }
+   604→    this.animator.play(this.state, { fade: 0.25 });
+   605→    this.animator.update(dt);
+   606→    this.root.position.copy(this.pos);
+   607→    this.root.rotation.y = this.yaw;
+   608→  }
+   609→}
+   610→
+   611→export function createFoxes(pack: CharacterPack, count: number): Fox[] {
+   612→  const foxes: Fox[] = [];
+   613→  for (let i = 0; i < count; i++) {
+   614→    const a = rand(0, Math.PI * 2);
+   615→    const r = rand(20, 55);
+   616→    foxes.push(new Fox(pack, Math.cos(a) * r, Math.sin(a) * r));
+   617→  }
+   618→  return foxes;
+   619→}
+   620→
+   621→/* ============================================================
+   622→   RUINAS — mazmorra GLB fusionada por material (1 landmark)
+   623→   ============================================================ */
+   624→
+   625→function mergeDungeon(scene: THREE.Object3D): { group: THREE.Group; radius: number } {
+   626→  const byMat = new Map<THREE.Material, THREE.BufferGeometry[]>();
+   627→  scene.updateMatrixWorld(true);
+   628→  scene.traverse(o => {
+   629→    if (!(o instanceof THREE.Mesh) || !o.material || Array.isArray(o.material)) return;
+   630→    const geo = o.geometry.clone().applyMatrix4(o.matrixWorld);
+   631→    const list = byMat.get(o.material as THREE.Material) ?? [];
+   632→    list.push(geo);
+   633→    byMat.set(o.material as THREE.Material, list);
+   634→  });
+   635→  const group = new THREE.Group();
+   636→  let radius = 6;
+   637→  // Material de piedra del juego: cohesiona las ruinas y evita
+   638→  // materiales metálicos del GLB sin IBL (salían negros)
+   639→  const stone = stoneMat();
+   640→  for (const [, geos] of byMat) {
+   641→    const merged = mergeDungeonGeos(geos);
+   642→    if (!merged) continue;
+   643→    merged.computeBoundingSphere();
+   644→    radius = Math.max(radius, merged.boundingSphere?.radius ?? 6);
+   645→    const mesh = new THREE.Mesh(merged, stone);
+   646→    mesh.receiveShadow = true;
+   647→    mesh.castShadow = false;
+   648→    mesh.name = 'ruina';
+   649→    group.add(mesh);
+   650→  }
+   651→  // normalizar: la mazmorra llega en unidades arbitrarias → landmark de ~34 m
+   652→  const bbox = new THREE.Box3().setFromObject(group);
+   653→  const maxDim = Math.max(bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z);
+   654→  const s = 34 / Math.max(1, maxDim);
+   655→  group.scale.setScalar(s);
+   656→  group.updateMatrixWorld(true);
+   657→  const bbox2 = new THREE.Box3().setFromObject(group);
+   658→  group.position.y = -bbox2.min.y;
+   659→  radius *= s;
+   660→  return { group, radius };
+   661→}
+   662→
+   663→function mergeDungeonGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+   664→  try {
+   665→    const clean = geos.map(g => {
+   666→      const c = g.index ? g.toNonIndexed() : g;
+   667→      for (const name of [...Object.keys(c.attributes)]) {
+   668→        if (!['position', 'normal', 'uv', 'color'].includes(name)) c.deleteAttribute(name);
+   669→      }
+   670→      if (!c.attributes.uv) {
+   671→        const count = c.attributes.position.count;
+   672→        c.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+   673→      }
+   674→      if (!c.attributes.normal) c.computeVertexNormals();
+   675→      return c;
+   676→    });
+   677→    return mergeGeometries(clean, false);
+   678→  } catch (err) {
+   679→    console.warn('[AETHERIA] no se pudieron fusionar las ruinas:', err);
+   680→    return null;
+   681→  }
+   682→}
+   683→
+   684→/* ============================================================
+   685→   CARGA DE ASSETS (local, desde public/assets/models)
+   686→   ============================================================ */
+   687→
+   688→const ASSETS: { file: string; label: string }[] = [
+   689→  { file: 'readyplayer.me.glb', label: 'el héroe' },
+   690→  { file: 'rpm-anims/M_Standing_Idle_001.glb', label: 'el mocap' },
+   691→  { file: 'rpm-anims/M_Jog_001.glb', label: 'el mocap' },
+   692→  { file: 'rpm-anims/M_Run_001.glb', label: 'el mocap' },
+   693→  { file: 'rpm-anims/M_Jog_Backwards_001.glb', label: 'el mocap' },
+   694→  { file: 'rpm-anims/M_Jog_Strafe_Left_001.glb', label: 'el mocap' },
+   695→  { file: 'rpm-anims/M_Jog_Strafe_Right_001.glb', label: 'el mocap' },
+   696→  { file: 'Soldier.glb', label: 'aliados' },
+   697→  { file: 'monsters/Tribal.gltf', label: 'las bestias' },
+   698→  { file: 'monsters/Ghost_Skull.gltf', label: 'los espectros' },
+   699→  { file: 'monsters/Orc.gltf', label: 'los orcos' },
+   700→  { file: 'monsters/Demon.gltf', label: 'el señor de la noche' },
+   701→  { file: 'Fox.glb', label: 'criaturas' },
+   702→  { file: 'dungeon_warkarma.glb', label: 'las ruinas' },
+   703→];
+   704→
+   705→interface LoadedGltf { scene: THREE.Group; animations: THREE.AnimationClip[] }
+   706→
+   707→export async function loadCharacterAssets(
+   708→  onProgress?: (frac: number, label: string) => void,
+   709→): Promise<CharacterPack | null> {
+   710→  try {
+   711→    const loader = new GLTFLoader();
+   712→    const loaded: Record<string, LoadedGltf> = {};
+   713→    for (let i = 0; i < ASSETS.length; i++) {
+   714→      const a = ASSETS[i];
+   715→      onProgress?.(i / ASSETS.length, a.label);
+   716→      loaded[a.file] = await new Promise<LoadedGltf>((res, rej) => {
+   717→        loader.load(`${MODEL_DIR}/${a.file}`, res, undefined, rej);
+   718→      });
+   719→    }
+   720→    onProgress?.(0.95, 'despertar al mundo');
+   721→
+   722→    const heroG = loaded['readyplayer.me.glb'];
+   723→    const soldierG = loaded['Soldier.glb'];
+   724→    const foxG = loaded['Fox.glb'];
+   725→    const dungeonG = loaded['dungeon_warkarma.glb'];
+   726→
+   727→    // mocap RPM: guardado con el nombre de archivo como clave
+   728→    const rpmClips: Record<string, THREE.AnimationClip> = {};
+   729→    for (const [engine, raw] of RPM_MAP) {
+   730→      const file = `rpm-anims/${raw}.glb`;
+   731→      const gltf = loaded[file];
+   732→      if (gltf && gltf.animations.length > 0) rpmClips[raw] = gltf.animations[0];
+   733→      void engine;
+   734→    }
+   735→
+   736→    // monstruos: fuente + clips nativos indexados por nombre
+   737→    const monsters: CharacterPack['monsters'] = {};
+   738→    const monsterFiles: [EnemyVariant, string][] = [
+   739→      ['goblin', 'monsters/Tribal.gltf'],
+   740→      ['archer', 'monsters/Ghost_Skull.gltf'],
+   741→      ['orc', 'monsters/Orc.gltf'],
+   742→      ['boss', 'monsters/Demon.gltf'],
+   743→    ];
+   744→    for (const [variant, file] of monsterFiles) {
+   745→      const gltf = loaded[file];
+   746→      if (!gltf) continue;
+   747→      const clips: Record<string, THREE.AnimationClip> = {};
+   748→      for (const c of gltf.animations) clips[c.name] = c;
+   749→      monsters[variant] = { source: gltf.scene, clips };
+   750→    }
+   751→    const monsterCount = Object.keys(monsters).length;
+   752→    if (monsterCount === 0) {
+   753→      console.warn('[AETHERIA] monstruos no disponibles — fallback procedural');
+   754→    }
+   755→
+   756→    let dungeon: THREE.Group | null = null;
+   757→    let dungeonRadius = 8;
+   758→    try {
+   759→      const d = mergeDungeon(dungeonG.scene);
+   760→      dungeon = d.group;
+   761→      dungeonRadius = d.radius;
+   762→    } catch (err) {
+   763→      console.warn('[AETHERIA] ruinas no disponibles:', err);
+   764→    }
+   765→
+   766→    return {
+   767→      heroSource: heroG.scene,
+   768→      rpmClips,
+   769→      soldierSource: soldierG.scene,
+   770→      soldierClips: lowercaseClips(soldierG.animations),
+   771→      monsters,
+   772→      foxSource: foxG.scene,
+   773→      foxClips: foxG.animations,
+   774→      dungeon,
+   775→      dungeonRadius,
+   776→    };
+   777→  } catch (err) {
+   778→    console.warn('[AETHERIA] modelos GLB no disponibles — se usan los rigs procedurales:', err);
+   779→    return null;
+   780→  }
+   781→}
+   782→

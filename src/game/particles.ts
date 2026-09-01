@@ -122,6 +122,19 @@ export class Particles {
     scene.add(this.points);
   }
 
+  /** Escribe el color sin allocations (hex o THREE.Color) */
+  private writeColor(c: THREE.Color | number, g: number, i3: number) {
+    if (typeof c === 'number') {
+      this.col[i3] = ((c >> 16) & 255) / 255 * g;
+      this.col[i3 + 1] = ((c >> 8) & 255) / 255 * g;
+      this.col[i3 + 2] = (c & 255) / 255 * g;
+    } else {
+      this.col[i3] = c.r * g;
+      this.col[i3 + 1] = c.g * g;
+      this.col[i3 + 2] = c.b * g;
+    }
+  }
+
   spawn(o: SpawnOpts) {
     const i = this.cursor;
     this.cursor = (this.cursor + 1) % this.cap;
@@ -129,9 +142,8 @@ export class Particles {
     this.pos[i3] = o.x; this.pos[i3 + 1] = o.y; this.pos[i3 + 2] = o.z;
     this.vel[i3] = o.vx ?? 0; this.vel[i3 + 1] = o.vy ?? 0; this.vel[i3 + 2] = o.vz ?? 0;
     const c = o.color ?? 0xffffff;
-    const tc = c instanceof THREE.Color ? c : new THREE.Color(c);
     const g = o.glow ?? 1;
-    this.col[i3] = tc.r * g; this.col[i3 + 1] = tc.g * g; this.col[i3 + 2] = tc.b * g;
+    this.writeColor(c, g, i3);
     const s = o.size ?? 0.3;
     this.size[i] = s; this.size0[i] = s;
     this.life[i] = 0; this.maxLife[i] = o.life ?? 1;
@@ -148,19 +160,46 @@ export class Particles {
     this.alive++;
   }
 
-  /** Ráfaga esférica */
+  /** Ráfaga esférica (sin spreads ni allocations por partícula) */
   burst(o: SpawnOpts & { count: number; speed: number; speedVar?: number; spread?: number }) {
     const n = o.count;
+    const spread = o.spread ?? 1;
+    const gravPositive = !!o.gravity && o.gravity > 0;
     for (let k = 0; k < n; k++) {
       const th = Math.random() * Math.PI * 2;
       const ph = Math.acos(2 * Math.random() - 1);
       const sp = o.speed * (1 - (o.speedVar ?? 0.5) * Math.random());
-      const spread = o.spread ?? 1;
       const vx = Math.sin(ph) * Math.cos(th) * sp * spread;
-      const vy = Math.abs(Math.cos(ph)) * sp * (o.gravity && o.gravity > 0 ? 0.9 : 1) * spread;
+      const vy = Math.abs(Math.cos(ph)) * sp * (gravPositive ? 0.9 : 1) * spread;
       const vz = Math.sin(ph) * Math.sin(th) * sp * spread;
-      this.spawn({ ...o, vx, vy, vz });
+      this.spawn2(o, vx, vy, vz);
     }
+  }
+
+  /** spawn con velocidad explícita (evita el spread {...o}) */
+  private spawn2(o: SpawnOpts & { count?: number; speed?: number; speedVar?: number; spread?: number }, vx: number, vy: number, vz: number) {
+    const i = this.cursor;
+    this.cursor = (this.cursor + 1) % this.cap;
+    const i3 = i * 3;
+    this.pos[i3] = o.x; this.pos[i3 + 1] = o.y; this.pos[i3 + 2] = o.z;
+    this.vel[i3] = vx; this.vel[i3 + 1] = vy; this.vel[i3 + 2] = vz;
+    const c = o.color ?? 0xffffff;
+    const g = o.glow ?? 1;
+    this.writeColor(c, g, i3);
+    const s = o.size ?? 0.3;
+    this.size[i] = s; this.size0[i] = s;
+    this.life[i] = 0; this.maxLife[i] = o.life ?? 1;
+    this.grav[i] = o.gravity ?? 0;
+    this.drag[i] = o.drag ?? 0;
+    this.glow[i] = g;
+    this.fadePow[i] = o.fadePow ?? 1;
+    this.shrink[i] = o.shrink === false ? 0 : 1;
+    this.grow[i] = o.grow ?? 0;
+    this.spin[i] = o.spin ?? (Math.random() - 0.5) * 4;
+    this.angle[i] = Math.random() * Math.PI * 2;
+    this.seek[i] = o.seek ?? null;
+    this.alpha[i] = 1;
+    this.alive++;
   }
 
   update(dt: number, cameraPos: THREE.Vector3) {

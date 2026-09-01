@@ -177,9 +177,27 @@ export interface HudState {
   dayNum: number;
   night: boolean;
   notice: string;
+  /** medidor de estilo DMC */
+  styleLetter: string;
+  styleLabel: string;
+  styleCss: string;
+  styleProgress: number;
+  comboHits: number;
+  comboActive: boolean;
   inv: InvView;
   shop: ShopView;
 }
+
+/* Rangos del medidor de estilo (D→SSS, estilo Devil May Cry) */
+export const STYLE_RANKS: { min: number; letter: string; label: string; css: string }[] = [
+  { min: 0,   letter: 'D',   label: 'Descuidado',      css: '#9aa0a6' },
+  { min: 30,  letter: 'C',   label: 'Combativo',       css: '#7fd45f' },
+  { min: 70,  letter: 'B',   label: 'Brutal',          css: '#4fc3f7' },
+  { min: 120, letter: 'A',   label: 'Asombroso',       css: '#ffd54f' },
+  { min: 180, letter: 'S',   label: 'Salvaje',         css: '#ff9e3d' },
+  { min: 250, letter: 'SS',  label: 'Sobrenatural',    css: '#ff5a4e' },
+  { min: 340, letter: 'SSS', label: '¡Estilo Demoníaco!', css: '#ff4fd8' },
+];
 
 export interface GameRefs {
   container: HTMLElement;

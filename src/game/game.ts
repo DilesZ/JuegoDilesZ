@@ -5,13 +5,13 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, ENEMY_NAMES } from './core';
+import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, ENEMY_NAMES, STYLE_RANKS } from './core';
 import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, type EquipSlot, type ItemDef } from './items';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
 import { World } from './world';
 import { DayNightCycle } from './daynight';
-import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
+import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
 import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, monsterAttackTimings, type CharacterPack, type EnemyVariant } from './characters';
@@ -56,39 +56,49 @@ const GradeShader = {
     }`,
 };
 
-/* Onda expansiva en el suelo para impactos pesados (DMC) */
-class Shockwave {
-  mesh: THREE.Mesh;
-  private t = 0;
-  private maxR: number;
-  private mat: THREE.MeshBasicMaterial;
-  constructor(scene: THREE.Scene, pos: THREE.Vector3, color = 0xffd9a0, maxR = 3.4) {
-    this.maxR = maxR;
-    const geo = new THREE.RingGeometry(0.42, 0.62, 36);
-    geo.rotateX(-Math.PI / 2);
-    this.mat = new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0.85,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    this.mesh = new THREE.Mesh(geo, this.mat);
-    this.mesh.position.copy(pos);
-    this.mesh.position.y += 0.12;
-    this.mesh.renderOrder = 8;
-    scene.add(this.mesh);
+/* Onda expansiva en el suelo para impactos pesados (DMC) — POOL reutilizable */
+class ShockwavePool {
+  private items: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; t: number; active: boolean; maxR: number }[] = [];
+  constructor(scene: THREE.Scene, size = 6) {
+    for (let i = 0; i < size; i++) {
+      const geo = new THREE.RingGeometry(0.42, 0.62, 36);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffd9a0, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.y = 0.12;
+      mesh.renderOrder = 8;
+      mesh.visible = false;
+      scene.add(mesh);
+      this.items.push({ mesh, mat, t: 0, active: false, maxR: 3.4 });
+    }
   }
-  update(dt: number): boolean {
-    this.t += dt;
-    const k = this.t / 0.42;
-    if (k >= 1) return false;
-    const r = 0.4 + (this.maxR - 0.4) * (1 - Math.pow(1 - k, 2.4));
-    this.mesh.scale.setScalar(r);
-    this.mat.opacity = 0.85 * (1 - k) * (1 - k);
-    return true;
+  spawn(pos: THREE.Vector3, color = 0xffd9a0, maxR = 3.4) {
+    // LRU: toma la primera libre o recicla la más antigua
+    let it = this.items.find(i => !i.active);
+    if (!it) it = this.items[0];
+    it.active = true; it.t = 0; it.maxR = maxR;
+    it.mat.color.setHex(color);
+    it.mat.opacity = 0.85;
+    it.mesh.position.copy(pos);
+    it.mesh.position.y += 0.12;
+    it.mesh.scale.setScalar(0.4);
+    it.mesh.visible = true;
+    this.items.splice(this.items.indexOf(it), 1);
+    this.items.push(it);
   }
-  dispose(scene: THREE.Scene) {
-    scene.remove(this.mesh);
-    this.mesh.geometry.dispose();
-    this.mat.dispose();
+  update(dt: number) {
+    for (const it of this.items) {
+      if (!it.active) continue;
+      it.t += dt;
+      const k = it.t / 0.42;
+      if (k >= 1) { it.active = false; it.mesh.visible = false; continue; }
+      const r = 0.4 + (it.maxR - 0.4) * (1 - Math.pow(1 - k, 2.4));
+      it.mesh.scale.setScalar(r);
+      it.mat.opacity = 0.85 * (1 - k) * (1 - k);
+    }
   }
 }
 
@@ -177,11 +187,18 @@ export class Game {
   private camPos = new THREE.Vector3();
   private shakeAmt = 0;
   private hitStopT = 0;
+  private hitStopScale = 0.06;
+  private hitStopGap = 0;        // guarda: evita hit-stops encadenados por multi-golpe
   private timeScale = 1;
   private slowmoT = 0;
   private baseFov = 65;
   private fovKickAmt = 0;
-  private shockwaves: Shockwave[] = [];
+  private shockwaves!: ShockwavePool;
+
+  // medidor de estilo (DMC): puntos por golpe, decaimiento y rangos D→SSS
+  private stylePts = 0;
+  private comboHits = 0;
+  private comboHitsTimer = 0;
 
   // estado de juego
   phase: GamePhase = 'playing';
@@ -204,6 +221,12 @@ export class Game {
   // números de daño (DOM pool)
   private dmgPool: DamageNumber[] = [];
   private dmgLayer: HTMLDivElement;
+
+  // cachés de vistas HUD (evita serializar mochila/tienda 12 veces por segundo)
+  private invCache: InvView | null = null;
+  private shopCache: ShopView | null = null;
+  private invDirty = true;
+  private shopDirty = true;
 
   private onHud: (s: HudState) => void;
   private ctx: GameCtx;
@@ -259,6 +282,7 @@ export class Game {
     if (this.chars) this.player.attachGlb(createHeroCharacter(this.chars));
     this.scene.add(this.player.root);
     this.trail = new SwordTrail(this.scene);
+    this.shockwaves = new ShockwavePool(this.scene, 6);
 
     // IBL fotográfico (HDRIs CC0 de Poly Haven vía three.js)
     void this.world.loadHDRI();
@@ -363,16 +387,12 @@ export class Game {
       hitStop: (d) => { this.hitStopT = Math.max(this.hitStopT, d); },
       spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
       onEnemyDied: (e) => this.handleEnemyDied(e),
-      playerHurt: () => { this.hurtFlash = 1; },
+      playerHurt: () => { this.hurtFlash = 1; this.comboHits = 0; this.stylePts *= 0.35; },
       gainItem: (def) => this.gainItem(def),
       nightFactor: 0,
       fovKick: (deg) => { this.fovKickAmt = Math.min(7, this.fovKickAmt + deg); },
       shockwave: (pos, color = 0xffd9a0, maxR = 3.4) => {
-        this.shockwaves.push(new Shockwave(this.scene, pos, color, maxR));
-        if (this.shockwaves.length > 8) {
-          const old = this.shockwaves.shift();
-          old?.dispose(this.scene);
-        }
+        this.shockwaves.spawn(pos, color, maxR);
       },
     };
 
@@ -411,6 +431,8 @@ export class Game {
   /** Recogida de objetos (llamada desde Pickup vía ctx) */
   private gainItem(def: ItemDef) {
     const ok = this.inventory.addItem(def);
+    this.invDirty = true;
+    this.shopDirty = true;
     if (!ok) {
       // mochila llena: se convierte en oro
       const gold = 20;
@@ -456,18 +478,20 @@ export class Game {
     const res = this.inventory.equipFromBag(i);
     if (!res.ok) return;
     if (res.swapped) this.inventory.addItem(res.swapped);
+    this.invDirty = true;
     this.refreshEquipStats();
   }
 
   unequipSlot(slot: EquipSlot) {
     if (!this.uiOpen) return;
-    if (this.inventory.unequip(slot)) this.refreshEquipStats();
+    if (this.inventory.unequip(slot)) { this.invDirty = true; this.refreshEquipStats(); }
   }
 
   useBagItem(i: number) {
     if (!this.uiOpen) return;
     const def = this.inventory.useConsumable(i);
     if (!def) return;
+    this.invDirty = true;
     const p = this.player;
     switch (def.id) {
       case 'elixir_vida':
@@ -558,6 +582,8 @@ export class Game {
       return;
     }
     p.gold -= price;
+    this.invDirty = true;
+    this.shopDirty = true;
     this.audio.coin();
     this.addDamageNumber(head, `- ${price} ◈  ${def.icon} ${def.name}`, RARITY_INFO[def.rarity].css);
     this.emitHud();
@@ -571,6 +597,8 @@ export class Game {
     const gold = sellPrice(e.def);
     this.inventory.removeAt(i);
     this.player.gold += gold;
+    this.invDirty = true;
+    this.shopDirty = true;
     this.audio.coin();
     const p = this.player;
     this.addDamageNumber(new THREE.Vector3(p.pos.x, p.pos.y + 2.15, p.pos.z), `+ ${gold} ◈  ${e.def.icon} ${e.def.name}`, '#ffc84a');
@@ -711,7 +739,16 @@ export class Game {
     const cfg = ENEMY_CFG[e.type];
     const gold = randInt(cfg.gold[0], cfg.gold[1]);
     this.player.gold += gold;
+    this.shopDirty = true;
     this.audio.coin();
+    // jugosa recompensa de estilo por rematar (DMC)
+    this.addStyle(22);
+    this.ctx.fovKick(1.8);
+    if (!e.isBoss && this.hitStopGap <= 0) {
+      this.hitStopT = Math.max(this.hitStopT, 0.055);
+      this.hitStopScale = 0.12;
+      this.hitStopGap = 0.16;
+    }
     this.player.gainXp(cfg.xp, this.ctx);
     // REAPARICIÓN ESTILO MMORPG: el punto de spawn repuebla tras un tiempo
     if (!e.isBoss) {
@@ -907,6 +944,7 @@ export class Game {
       // ciclo día/noche (los enemigos son más rápidos de noche)
       this.cycle.update(dt);
       this.ctx.nightFactor = this.cycle.nightFactor;
+      this.hitStopGap = Math.max(0, this.hitStopGap - dt);
       if (this.noticeT > 0) { this.noticeT -= dt; if (this.noticeT <= 0) this.notice = ''; }
       // pasos del jugador sobre el terreno
       const stepDx = this.player.pos.x - this.lastStepPos.x;
@@ -934,9 +972,9 @@ export class Game {
         // inventario abierto: mundo congelado, escena viva
         this.updateWorld(0.0001, true);
       } else if (this.hitStopT > 0) {
-        // hit-stop y cámara lenta
+        // hit-stop cinematográfico (escala suave, no un congelado brusco)
         this.hitStopT -= dt;
-        this.updateWorld(dt * 0.06);
+        this.updateWorld(dt * this.hitStopScale);
       } else if (this.slowmoT > 0) {
         this.slowmoT -= dt;
         if (this.slowmoT <= 0) this.timeScale = 1;
@@ -960,13 +998,16 @@ export class Game {
 
   /* ---------- Escena cinemática del menú ---------- */
 
-  private updateMenuScene(dt: number) {
-    this.world.update(dt, this.camera, (x, y, z) => {
-      this.particles.spawn({
-        x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
-        color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
-      });
+  /** callback reutilizado (sin closures nuevas por frame) para las llamas de hogueras */
+  private emitFireParticles = (x: number, y: number, z: number) => {
+    this.particles.spawn({
+      x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
+      color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
     });
+  };
+
+  private updateMenuScene(dt: number) {
+    this.world.update(dt, this.camera, this.emitFireParticles);
     this.particles.update(dt, this.camera.position);
     // el mercader vive también en la escena del menú (mira a la cámara)
     this.merchant.update(dt, this.cycle.nightFactor, this.camera.position);
@@ -1037,8 +1078,12 @@ export class Game {
         this.worldClamp(e.pos, e.radius);
       }
     }
-    // separación entre enemigos
-    const live = this.enemies.filter(e => e.alive && e.state !== 'spawn');
+    // separación entre enemigos (array reutilizado, sin allocations)
+    const live = this._liveEnemies;
+    live.length = 0;
+    for (const e of this.enemies) {
+      if (e.alive && e.state !== 'spawn') live.push(e);
+    }
     for (let i = 0; i < live.length; i++) {
       for (let j = i + 1; j < live.length; j++) {
         const a = live[i], b = live[j];
@@ -1072,28 +1117,21 @@ export class Game {
       this.enemies = this.enemies.filter(e => !e.removable);
     }
 
-    // proyectiles y drops
-    for (const pr of this.projectiles) pr.update(dt, this.ctx);
-    this.projectiles = this.projectiles.filter(pr => {
-      if (pr.dead) { this.scene.remove(pr.root); return false; }
-      return true;
-    });
-    for (const pk of this.pickups) {
+    // proyectiles y drops (borrado en sitio, sin filter)
+    for (let i = this.projectiles.length - 1; i >= 0; i--) {
+      const pr = this.projectiles[i];
+      pr.update(dt, this.ctx);
+      if (pr.dead) { this.scene.remove(pr.root); this.projectiles.splice(i, 1); }
+    }
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const pk = this.pickups[i];
       pk.update(dt, this.ctx);
       this.world.resolve(pk.pos, 0.3);
+      if (pk.dead) { this.scene.remove(pk.root); this.pickups.splice(i, 1); }
     }
-    this.pickups = this.pickups.filter(pk => {
-      if (pk.dead) { this.scene.remove(pk.root); return false; }
-      return true;
-    });
 
     // mundo visual
-    this.world.update(dt, this.camera, (x, y, z) => {
-      this.particles.spawn({
-        x, y, z, vx: rand(-0.3, 0.3), vy: rand(1, 2.2), vz: rand(-0.3, 0.3),
-        color: 0xff7a2a, size: rand(0.1, 0.2), life: rand(0.8, 1.6), glow: 2.2, drag: 0.5,
-      });
-    });
+    this.world.update(dt, this.camera, this.emitFireParticles);
 
     // mercader: animación, mirada, saludo y farol nocturno
     const greeted = this.merchant.update(dt, this.cycle.nightFactor, this.player.pos);
@@ -1105,13 +1143,19 @@ export class Game {
 
     if (frozen) return;
 
+    // ESTILO (DMC): decaimiento de la cadena y de los puntos
+    this.comboHitsTimer = Math.max(0, this.comboHitsTimer - dt);
+    if (this.comboHitsTimer <= 0) {
+      if (this.comboHits > 0) this.comboHits = 0;
+      if (this.stylePts > 0) this.stylePts = Math.max(0, this.stylePts - 16 * dt);
+    }
+
     // estela de espada (solo durante la ventana activa del tajo)
     if (this.player.state === 'attack' && this.player.currentAttack) {
       const prog = this.player.stateT / this.player.currentAttack.dur;
       if (prog > 0.16 && prog < 0.85) {
-        const b = new THREE.Vector3(), ti = new THREE.Vector3();
-        this.player.swordPoints(b, ti);
-        this.trail.emit(b, ti);
+        this.player.swordPoints(this._trailB, this._trailT);
+        this.trail.emit(this._trailB, this._trailT);
       }
     }
     this.trail.update(dt, this.player.state === 'attack');
@@ -1153,6 +1197,7 @@ export class Game {
     if (this.cycle.day !== this.restockDay) {
       this.restockDay = this.cycle.day;
       this.shopStock = merchantStock(this.player.level);
+      this.shopDirty = true;
       this.notice = `${MERCHANT_NAME} ha reabastecido su tienda`;
       this.noticeT = 6;
       this.emitHud();
@@ -1199,33 +1244,43 @@ export class Game {
     consumeRoll: () => false, consumePotion: () => false,
   };
 
+  /* Scratches del bucle principal (cero allocations por frame) */
+  private _gV1 = new THREE.Vector3();
+  private _gV2 = new THREE.Vector3();
+  private _gV3 = new THREE.Vector3();
+  private _gV4 = new THREE.Vector3();
+  private _trailB = new THREE.Vector3();
+  private _trailT = new THREE.Vector3();
+  private _liveEnemies: Enemy[] = [];
+
   private resolvePlayerStrike(def: AttackDef) {
     const p = this.player;
-    const heavy = def === PLAYER_HEAVY;
-    let hitAny = false;
+    const kind = def.kind;
+    let hitCount = 0;
+    const to = this._gV1;
     for (const e of this.enemies) {
       if (!e.alive || e.state === 'spawn') continue;
-      const to = new THREE.Vector3().subVectors(e.pos, p.pos).setY(0);
+      to.subVectors(e.pos, p.pos).setY(0);
       const d = to.length() - e.radius;
       if (d > def.range) continue;
       const ang = Math.atan2(to.x, to.z);
       let diff = Math.abs(((ang - p.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
       if (diff <= def.arc / 2) {
         const dmg = def.dmg * p.dmgMul;
-        e.takeDamage(dmg, p.pos, this.ctx, heavy);
-        hitAny = true;
+        e.takeDamage(dmg, p.pos, this.ctx, kind !== 'light');
+        hitCount++;
         // chispas direccionales del impacto (DMC)
-        const hitPos = new THREE.Vector3(
+        const hitPos = this._gV2.set(
           e.pos.x - to.x * 0.3,
           e.pos.y + e.rig.height * 0.55,
           e.pos.z - to.z * 0.3,
         );
         this.particles.burst({
           x: hitPos.x, y: hitPos.y, z: hitPos.z,
-          count: heavy ? 22 : 10, speed: heavy ? 7 : 5, color: 0xffd9a0,
-          size: heavy ? 0.26 : 0.2, life: 0.38, drag: 2, glow: 2.6, gravity: 4,
+          count: kind === 'light' ? 10 : 22, speed: kind === 'light' ? 5 : 7, color: 0xffd9a0,
+          size: kind === 'light' ? 0.2 : 0.26, life: 0.38, drag: 2, glow: 2.6, gravity: 4,
         });
-        if (heavy) {
+        if (kind !== 'light') {
           this.particles.burst({
             x: hitPos.x, y: hitPos.y, z: hitPos.z,
             count: 12, speed: 4.5, color: 0xff8848, size: 0.3, life: 0.5, drag: 1.6, glow: 2.2, gravity: 2,
@@ -1233,19 +1288,46 @@ export class Game {
         }
       }
     }
-    if (hitAny) {
-      this.hitStopT = Math.max(this.hitStopT, heavy ? 0.13 : 0.07);
-      this.shakeAmt = Math.min(1.2, this.shakeAmt + (heavy ? 0.5 : 0.16));
-      if (heavy) {
-        this.audio.heavyHit();
-        this.fovKickAmt = Math.min(7, this.fovKickAmt + 4.5);
-        const impact = p.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(p.yaw), 0, Math.cos(p.yaw)), 1.7);
-        impact.y = terrainHeight(impact.x, impact.z);
-        this.ctx.shockwave(impact, 0xffc87d, 3.6);
-      } else {
-        this.audio.hitMetal();
+    if (hitCount === 0) return;
+
+    // ESTILO: puntos por golpe conectado (bonus por multi-impacto)
+    this.stylePts = Math.min(420, this.stylePts + def.style + (hitCount - 1) * 5);
+    this.comboHits += hitCount;
+    this.comboHitsTimer = 2.1;
+
+    if (kind === 'light') {
+      // hit-stop corto con guarda (no congela en cadena → se siente ágil, no laggy)
+      if (this.hitStopGap <= 0) {
+        this.hitStopT = Math.max(this.hitStopT, 0.05);
+        this.hitStopScale = 0.14;
+        this.hitStopGap = 0.14;
+      }
+      this.shakeAmt = Math.min(1.2, this.shakeAmt + 0.14);
+      this.audio.hitMetal();
+    } else {
+      // pesado / remate: onda expansiva + sacudida + golpe de FOV
+      this.hitStopT = Math.max(this.hitStopT, kind === 'finisher' ? 0.11 : 0.095);
+      this.hitStopScale = 0.09;
+      this.hitStopGap = 0.2;
+      this.shakeAmt = Math.min(1.2, this.shakeAmt + (kind === 'finisher' ? 0.6 : 0.5));
+      this.audio.heavyHit();
+      this.fovKickAmt = Math.min(7, this.fovKickAmt + (kind === 'finisher' ? 6 : 4.5));
+      const impact = this._gV3.copy(p.pos).addScaledVector(this._gV4.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)), 1.7);
+      impact.y = terrainHeight(impact.x, impact.z);
+      this.ctx.shockwave(impact, 0xffc87d, kind === 'finisher' ? 4.4 : 3.6);
+      if (kind === 'finisher') {
+        // anillo extra de chispas del remate
+        this.particles.burst({
+          x: impact.x, y: impact.y + 0.35, z: impact.z,
+          count: 26, speed: 8.5, color: 0xffd9a0, size: 0.3, life: 0.55, drag: 1.8, glow: 2.9, gravity: 5,
+        });
       }
     }
+  }
+
+  /** Añade puntos de estilo y recalcula el rango (D→SSS) */
+  private addStyle(n: number) {
+    this.stylePts = Math.min(420, this.stylePts + n);
   }
 
   private worldClamp(pos: THREE.Vector3, radius: number) {
@@ -1269,7 +1351,7 @@ export class Game {
     this.mouseDX = 0; this.mouseDY = 0;
 
     const target = this.player.pos;
-    const head = new THREE.Vector3(target.x, target.y + 1.55, target.z);
+    const head = this._gV1.set(target.x, target.y + 1.55, target.z);
 
     if (this.lockEnemy && this.lockEnemy.alive) {
       // cámara de objetivo fijado
@@ -1282,10 +1364,10 @@ export class Game {
     this.camDist = damp(this.camDist, this.camDistTarget, 9, dt);
     const dist = this.camDist;
     const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
-    const off = new THREE.Vector3(Math.sin(this.camYaw) * cp, sp, Math.cos(this.camYaw) * cp);
-    const desiredPos = head.clone().addScaledVector(off, dist);
+    const off = this._gV2.set(Math.sin(this.camYaw) * cp, sp, Math.cos(this.camYaw) * cp);
+    const desiredPos = this._gV3.copy(head).addScaledVector(off, dist);
     // hombro
-    const right = new THREE.Vector3(-Math.cos(this.camYaw), 0, Math.sin(this.camYaw));
+    const right = this._gV4.set(-Math.cos(this.camYaw), 0, Math.sin(this.camYaw));
     desiredPos.addScaledVector(right, 0.55);
     // colisión con terreno
     const groundH = terrainHeight(desiredPos.x, desiredPos.z) + 0.5;
@@ -1302,9 +1384,9 @@ export class Game {
       this.camera.position.z += rand(-1, 1) * sh * 0.18;
       this.shakeAmt = Math.max(0, sh - dt * 2.4);
     }
-    const lookAt = head.clone();
+    const lookAt = this._gV2.copy(head);
     if (this.lockEnemy && this.lockEnemy.alive) {
-      lookAt.lerp(new THREE.Vector3(this.lockEnemy.pos.x, this.lockEnemy.pos.y + 1.2, this.lockEnemy.pos.z), 0.22);
+      lookAt.lerp(this._gV3.set(this.lockEnemy.pos.x, this.lockEnemy.pos.y + 1.2, this.lockEnemy.pos.z), 0.22);
     }
     this.camera.lookAt(lookAt);
 
@@ -1319,14 +1401,11 @@ export class Game {
 
   private updateEffects(dt: number) {
     this.particles.update(dt, this.camera.position);
-    // ondas expansivas
-    for (const sw of this.shockwaves) {
-      if (!sw.update(dt)) sw.dispose(this.scene);
-    }
-    this.shockwaves = this.shockwaves.filter(sw => sw.mesh.parent !== null);
+    // ondas expansivas (pool)
+    this.shockwaves.update(dt);
     // números de daño
     const w = window.innerWidth, h = window.innerHeight;
-    const v = new THREE.Vector3();
+    const v = this._gV4;
     for (const d of this.dmgPool) {
       if (!d.active) continue;
       d.life -= dt;
@@ -1398,6 +1477,21 @@ export class Game {
 
   private emitHud() {
     const boss = this.boss;
+    // vistas cacheadas: solo se reconstruyen cuando cambia el inventario/tienda
+    if (this.invDirty || !this.invCache) { this.invCache = this.invView(); this.invDirty = false; }
+    this.invCache.open = this.uiPanel === 'inv';
+    if (this.shopDirty || !this.shopCache) { this.shopCache = this.shopView(); this.shopDirty = false; }
+    this.shopCache.open = this.uiPanel === 'shop';
+    // rango de estilo actual (D→SSS)
+    let rankIdx = 0;
+    for (let i = STYLE_RANKS.length - 1; i >= 0; i--) {
+      if (this.stylePts >= STYLE_RANKS[i].min) { rankIdx = i; break; }
+    }
+    const rk = STYLE_RANKS[rankIdx];
+    const next = STYLE_RANKS[rankIdx + 1];
+    const progress = next ? clamp((this.stylePts - rk.min) / (next.min - rk.min), 0, 1) : 1;
+    let enemiesAlive = 0;
+    for (const e of this.enemies) if (e.alive) enemiesAlive++;
     this.onHud({
       phase: this.phase,
       hp: this.player.hp, maxHp: this.player.maxHp,
@@ -1406,7 +1500,7 @@ export class Game {
       gold: this.player.gold, potions: this.player.potions, maxPotions: this.player.maxPotions,
       shrinesCleansed: this.shrinesCleansed, shrinesTotal: 3,
       objective: this.objective(),
-      enemiesAlive: this.enemies.filter(e => e.alive).length,
+      enemiesAlive,
       bossActive: this.bossActive && !!boss?.alive,
       bossName: ENEMY_NAMES.boss,
       bossHp: boss?.hp ?? 0, bossMaxHp: boss?.maxHp ?? 1, bossPhase: boss?.phase ?? 1,
@@ -1420,8 +1514,14 @@ export class Game {
       dayNum: this.cycle.day,
       night: this.cycle.nightFactor > 0.5,
       notice: this.notice,
-      inv: this.invView(),
-      shop: this.shopView(),
+      styleLetter: rk.letter,
+      styleLabel: rk.label,
+      styleCss: rk.css,
+      styleProgress: progress,
+      comboHits: this.comboHits,
+      comboActive: this.comboHitsTimer > 0 && this.comboHits > 1,
+      inv: this.invCache,
+      shop: this.shopCache,
     });
   }
 

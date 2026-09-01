@@ -73,6 +73,12 @@ export const ENEMY_CFG: Record<EnemyType, EnemyCfg> = {
 
 type AiState = 'spawn' | 'idle' | 'wander' | 'chase' | 'strafe' | 'windup' | 'recover' | 'hurt' | 'dead';
 
+/* Scratches reutilizables (cero allocations por enemigo y frame) */
+const _eTmpA = new THREE.Vector3();
+const _eTmpB = new THREE.Vector3();
+const _eTmpC = new THREE.Vector3();
+const _eTmpD = new THREE.Vector3();
+
 export class Enemy extends Entity {
   type: EnemyType;
   cfg: EnemyCfg;
@@ -164,6 +170,14 @@ export class Enemy extends Entity {
     this.glb?.animator.play(name, opts);
   }
 
+  /** Dispara el clip de ataque UNA vez al entrar en windup, sincronizado con atk.dur */
+  private playWindup(atk: EnemyAttackDef) {
+    if (!this.glb) return;
+    const baked = this.glb.animator.clipDur(atk.clip);
+    const ts = baked > 0.01 && atk.dur > 0.01 ? baked / atk.dur : 1;
+    this.glb.animator.play(atk.clip, { once: true, restart: true, fade: 0.1, timeScale: ts });
+  }
+
   /** timeScale del clip locomotor para casar el paso con la velocidad */
   private glbTime(clip: string): number {
     return this.glb ? monsterTimeScale(this.type as EnemyVariant, clip) : 1;
@@ -215,8 +229,8 @@ export class Enemy extends Entity {
       x: this.pos.x, y: this.pos.y + this.rig.height * 0.55, z: this.pos.z,
       count: crit ? 16 : 10, speed: 3.4, color: 0xd8323c, size: 0.22, life: 0.6, gravity: 6, drag: 1.2,
     });
-    // empuje
-    const d = this.pos.clone().sub(srcPos).setY(0);
+    // empuje (sin allocations)
+    const d = _eTmpD.copy(this.pos).sub(srcPos).setY(0);
     if (d.lengthSq() > 0.001) {
       d.normalize();
       this.knock.add(d.multiplyScalar(heavy ? 5 : 2.2));
@@ -230,6 +244,7 @@ export class Enemy extends Entity {
     if (Math.random() < staggerChance && this.state !== 'hurt') {
       this.state = 'hurt'; this.stateT = 0;
       this.attack = null;
+      this.anim('hurt', { once: true, restart: true, fade: 0.06 });
     }
     // fases del jefe
     if (this.isBoss) {
@@ -264,7 +279,7 @@ export class Enemy extends Entity {
     this.animT += dt;
     this.updateFlash(dt);
     const p = ctx.player;
-    const toPlayer = new THREE.Vector3().subVectors(p.pos, this.pos).setY(0);
+    const toPlayer = _eTmpA.copy(p.pos).sub(this.pos).setY(0);
     const dist = toPlayer.length();
     const cfg = this.cfg;
 
@@ -332,13 +347,13 @@ export class Enemy extends Entity {
           this.stateT += dt;
           if (this.stateT > rand(1.5, 3)) {
             this.state = 'wander'; this.stateT = 0;
-            this.wanderTarget.copy(this.home).add(new THREE.Vector3(rand(-6, 6), 0, rand(-6, 6)));
+            this.wanderTarget.copy(this.home).add(_eTmpB.set(rand(-6, 6), 0, rand(-6, 6)));
           }
           if (this.glb) this.anim('idle', { fade: 0.35 });
           else this.applier.apply(idlePose(this.animT), dt);
           this.moving = false;
         } else {
-          const toT = new THREE.Vector3().subVectors(this.wanderTarget, this.pos).setY(0);
+          const toT = _eTmpB.copy(this.wanderTarget).sub(this.pos).setY(0);
           if (toT.length() < 1) { this.state = 'idle'; this.stateT = 0; }
           else {
             toT.normalize();
@@ -361,12 +376,13 @@ export class Enemy extends Entity {
           const atk = this.pickAttack(dist);
           if (atk) {
             this.attack = atk; this.state = 'windup'; this.stateT = 0; this.didHit = false;
+            this.playWindup(atk);
             // encarar
             this.yaw = Math.atan2(toPlayer.x, toPlayer.z);
             break;
           }
         }
-        const dir = toPlayer.clone().normalize();
+        const dir = _eTmpB.copy(toPlayer).normalize();
         const stopDist = cfg.attacks[0].range * 0.85;
         if (dist > stopDist) {
           const nightBoost = 1 + 0.12 * ctx.nightFactor; // de noche los enemigos aceleran
@@ -389,13 +405,13 @@ export class Enemy extends Entity {
         if (dist > cfg.aggro * 2.6 || p.state === 'dead') { this.aggroed = false; this.state = 'wander'; this.stateT = 0; break; }
         this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 10, dt);
         const pref = cfg.preferredRange!;
-        const dir = toPlayer.clone().normalize();
-        let move = new THREE.Vector3();
+        const dir = _eTmpB.copy(toPlayer).normalize();
+        const move = _eTmpC.set(0, 0, 0);
         if (dist > pref + 3) move.add(dir);
         else if (dist < pref - 4) move.sub(dir);
         // circlear
         const side = Math.sin(this.animT * 0.7) > 0 ? 1 : -1;
-        move.add(new THREE.Vector3(-dir.z * side * 0.7, 0, dir.x * side * 0.7));
+        move.add(_eTmpD.set(-dir.z * side * 0.7, 0, dir.x * side * 0.7));
         if (move.lengthSq() > 0.01) {
           move.normalize();
           this.pos.addScaledVector(move, cfg.speed * dt);
@@ -411,6 +427,7 @@ export class Enemy extends Entity {
         if (this.cd <= 0 && dist < 28) {
           const atk = this.cfg.attacks[0];
           this.attack = atk; this.state = 'windup'; this.stateT = 0; this.didHit = false;
+          this.playWindup(atk);
         }
         break;
       }
@@ -425,7 +442,7 @@ export class Enemy extends Entity {
           this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 6, dt);
         }
         if (this.glb) {
-          this.anim(atk.clip, { once: true, restart: true });
+          // (el clip de ataque se dispara UNA vez al entrar en windup)
           this.glb.animator.update(dt * (speed - 1)); // aceleración del jefe en fase 3
         } else {
           this.applier.snap(sampleClip(clip, Math.min(localT, clip.dur)), dt);
@@ -468,7 +485,7 @@ export class Enemy extends Entity {
     if (!this.isBoss && !this.aggroed) {
       const dh = Math.hypot(this.pos.x - this.home.x, this.pos.z - this.home.z);
       if (dh > 16) {
-        const back = new THREE.Vector3().subVectors(this.home, this.pos).setY(0).normalize();
+        const back = _eTmpB.copy(this.home).sub(this.pos).setY(0).normalize();
         this.pos.addScaledVector(back, dt * 3);
       }
     }

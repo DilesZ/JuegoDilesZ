@@ -1,0 +1,736 @@
+     1→import * as THREE from 'three';
+     2→import { clamp, damp, dampAngle, rand, terrainHeight, WORLD, lerp } from './core';
+     3→import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type HumanoidRig, type VisualRig, type CharMat } from './models';
+     4→import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS, ZERO_POSE } from './animations';
+     5→import type { GlbCharacter } from './characters';
+     6→import type { Particles } from './particles';
+     7→import type { AudioEngine } from './audio';
+     8→import { NEUTRAL_STATS, RARITY_INFO, type EquipStats, type ItemDef } from './items';
+     9→
+    10→/* ============================================================
+    11→   ENTIDADES: base, jugador, estela de espada, proyectiles, drops
+    12→   ============================================================ */
+    13→
+    14→export interface InputState {
+    15→  fwd: boolean; back: boolean; left: boolean; right: boolean;
+    16→  sprint: boolean;
+    17→  // eventos de un solo disparo (consumidos al leerse)
+    18→  consumeAttack(): boolean;
+    19→  consumeHeavy(): boolean;
+    20→  consumeRoll(): boolean;
+    21→  consumePotion(): boolean;
+    22→}
+    23→
+    24→export interface WorldApi {
+    25→  height(x: number, z: number): number;
+    26→  resolve(pos: THREE.Vector3, radius: number): void;
+    27→}
+    28→
+    29→export interface GameCtx {
+    30→  scene: THREE.Scene;
+    31→  particles: Particles;
+    32→  audio: AudioEngine;
+    33→  world: WorldApi;
+    34→  player: Player;
+    35→  enemies: { pos: THREE.Vector3; alive: boolean; radius: number }[];
+    36→  camera: THREE.Camera;
+    37→  input: InputState;
+    38→  camYaw: number;
+    39→  addDamageNumber(pos: THREE.Vector3, text: string, cssColor: string, big?: boolean): void;
+    40→  shake(a: number): void;
+    41→  hitStop(d: number): void;
+    42→  spawnProjectile(o: { pos: THREE.Vector3; dir: THREE.Vector3; speed: number; dmg: number; kind: 'arrow' | 'orb' }): void;
+    43→  onEnemyDied(e: import('./enemies').Enemy): void;
+    44→  playerHurt(): void;
+    45→  /** Recoge un objeto de equipo/consumible del suelo */
+    46→  gainItem(def: ItemDef): void;
+    47→  /** 0 = pleno día, 1 = noche cerrada (los enemigos se vuelven más rápidos) */
+    48→  nightFactor: number;
+    49→  /** Golpe de FOV cinematográfico (DMC): +grados que decaen solos */
+    50→  fovKick(deg: number): void;
+    51→  /** Onda expansiva en el suelo (impactos pesados, slams) */
+    52→  shockwave(pos: THREE.Vector3, color?: number, maxR?: number): void;
+    53→}
+    54→
+    55→export abstract class Entity {
+    56→  root = new THREE.Group();
+    57→  pos = new THREE.Vector3();
+    58→  yaw = 0;
+    59→  hp = 1; maxHp = 1;
+    60→  radius = 0.5;
+    61→  height = 1.8;
+    62→  alive = true;
+    63→  removable = false;
+    64→  knock = new THREE.Vector3();
+    65→  protected mats: CharMat[] = [];
+    66→  protected flashT = 0;
+    67→
+    68→  protected collectMats() {
+    69→    const set = new Set<CharMat>();
+    70→    this.root.traverse(o => {
+    71→      if (o instanceof THREE.Mesh) {
+    72→        const m = o.material as CharMat;
+    73→        if (m && ((m as THREE.MeshStandardMaterial).isMeshStandardMaterial || (m as THREE.MeshToonMaterial).isMeshToonMaterial)) {
+    74→          set.add(m);
+    75→        }
+    76→      }
+    77→    });
+    78→    this.mats = [...set];
+    79→    this.originals = this.mats.map(m => ({ e: m.emissive.clone(), i: m.emissiveIntensity }));
+    80→  }
+    81→  private originals: { e: THREE.Color; i: number }[] = [];
+    82→
+    83→  flash(intensity = 2.2, time = 0.12) {
+    84→    this.flashT = time;
+    85→    for (let i = 0; i < this.mats.length; i++) {
+    86→      this.mats[i].emissive.setRGB(1, 0.9, 0.8);
+    87→      this.mats[i].emissiveIntensity = intensity;
+    88→    }
+    89→  }
+    90→  protected updateFlash(dt: number) {
+    91→    if (this.flashT > 0) {
+    92→      this.flashT -= dt;
+    93→      if (this.flashT <= 0) {
+    94→        for (let i = 0; i < this.mats.length; i++) {
+    95→          this.mats[i].emissive.copy(this.originals[i].e);
+    96→          this.mats[i].emissiveIntensity = this.originals[i].i;
+    97→        }
+    98→      }
+    99→    }
+   100→  }
+   101→  abstract update(dt: number, ctx: GameCtx): void;
+   102→}
+   103→
+   104→/* ---------- Estela de espada (cinta aditiva) ---------- */
+   105→
+   106→export class SwordTrail {
+   107→  private segs = 16;
+   108→  private geo: THREE.BufferGeometry;
+   109→  private posAttr: Float32Array;
+   110→  private alphaAttr: Float32Array;
+   111→  mesh: THREE.Mesh;
+   112→  private strength = 0;
+   113→  private ring: { b: THREE.Vector3; t: THREE.Vector3 }[] = [];
+   114→
+   115→  constructor(scene: THREE.Scene, color = 0xffd9a0) {
+   116→    this.geo = new THREE.BufferGeometry();
+   117→    this.posAttr = new Float32Array(this.segs * 2 * 3);
+   118→    this.alphaAttr = new Float32Array(this.segs * 2);
+   119→    this.geo.setAttribute('position', new THREE.BufferAttribute(this.posAttr, 3));
+   120→    this.geo.setAttribute('aAlpha', new THREE.BufferAttribute(this.alphaAttr, 1));
+   121→    const idx: number[] = [];
+   122→    for (let i = 0; i < this.segs - 1; i++) {
+   123→      const a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1;
+   124→      idx.push(a, b, c, b, d, c);
+   125→    }
+   126→    this.geo.setIndex(idx);
+   127→    const mat = new THREE.ShaderMaterial({
+   128→      uniforms: { uColor: { value: new THREE.Color(color) } },
+   129→      vertexShader: `attribute float aAlpha; varying float vA;
+   130→        void main(){ vA = aAlpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+   131→      fragmentShader: `uniform vec3 uColor; varying float vA;
+   132→        void main(){ if (vA <= 0.003) discard; gl_FragColor = vec4(uColor * (0.6 + vA), vA * 0.85); }`,
+   133→      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+   134→    });
+   135→    this.mesh = new THREE.Mesh(this.geo, mat);
+   136→    this.mesh.frustumCulled = false;
+   137→    this.mesh.renderOrder = 9;
+   138→    scene.add(this.mesh);
+   139→  }
+   140→
+   141→  emit(base: THREE.Vector3, tip: THREE.Vector3) {
+   142→    this.ring.push({ b: base.clone(), t: tip.clone() });
+   143→    if (this.ring.length > this.segs) this.ring.shift();
+   144→    this.strength = 1;
+   145→  }
+   146→
+   147→  update(dt: number, active: boolean) {
+   148→    if (!active) {
+   149→      this.strength -= dt * 4;
+   150→      if (this.strength < 0 && this.ring.length) this.ring.shift();
+   151→      if (this.strength < -1) this.strength = -1;
+   152→    }
+   153→    const n = this.ring.length;
+   154→    for (let i = 0; i < this.segs; i++) {
+   155→      const src = this.ring[Math.min(i, n - 1)] ?? { b: new THREE.Vector3(0, -999, 0), t: new THREE.Vector3(0, -999, 0) };
+   156→      const o = i * 6;
+   157→      this.posAttr[o] = src.b.x; this.posAttr[o + 1] = src.b.y; this.posAttr[o + 2] = src.b.z;
+   158→      this.posAttr[o + 3] = src.t.x; this.posAttr[o + 4] = src.t.y; this.posAttr[o + 5] = src.t.z;
+   159→      const a = n > 1 ? (i / (n - 1)) : 0;
+   160→      const fade = this.strength > 0 ? 1 : Math.max(0, 1 + this.strength);
+   161→      this.alphaAttr[i * 2] = a * a * Math.max(0, fade) * 0.9;
+   162→      this.alphaAttr[i * 2 + 1] = a * a * Math.max(0, fade) * 0.9;
+   163→    }
+   164→    (this.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+   165→    (this.geo.getAttribute('aAlpha') as THREE.BufferAttribute).needsUpdate = true;
+   166→  }
+   167→}
+   168→
+   169→/* ---------- Jugador ---------- */
+   170→
+   171→export interface AttackDef {
+   172→  clip: string; dur: number; hitAt: number; dmg: number; range: number; arc: number;
+   173→  stam: number; impulse: number; soundPitch: number;
+   174→}
+   175→
+   176→export const PLAYER_ATTACKS: AttackDef[] = [
+   177→  { clip: 'slash1', dur: 0.52, hitAt: 0.4, dmg: 15, range: 2.8, arc: 1.6, stam: 13, impulse: 3.6, soundPitch: 1 },
+   178→  { clip: 'slash2', dur: 0.5, hitAt: 0.38, dmg: 17, range: 2.8, arc: 1.6, stam: 13, impulse: 3.6, soundPitch: 1.12 },
+   179→  { clip: 'slash3', dur: 0.68, hitAt: 0.48, dmg: 26, range: 3.0, arc: 1.9, stam: 17, impulse: 5, soundPitch: 0.9 },
+   180→];
+   181→export const PLAYER_HEAVY: AttackDef = { clip: 'heavy', dur: 0.95, hitAt: 0.6, dmg: 44, range: 3.2, arc: 2.0, stam: 30, impulse: 6, soundPitch: 0.72 };
+   182→
+   183→export class Player extends Entity {
+   184→  /** rig visual activo (GLB real o procedural de respaldo) */
+   185→  rig: VisualRig;
+   186→  private procRig: HumanoidRig;
+   187→  glb: GlbCharacter | null = null;
+   188→  applier: PoseApplier;
+   189→  stamina = 100; maxStamina = 100;
+   190→  potions = 4; maxPotions = 6;
+   191→  xp = 0; xpNext = 70; level = 1;
+   192→  gold = 0; kills = 0;
+   193→  baseDmg = 1;
+   194→  // estadísticas de equipo (recalculadas por Game al cambiar el inventario)
+   195→  equip: EquipStats = { ...NEUTRAL_STATS };
+   196→  // bonos permanentes de consumibles
+   197→  perm = { hp: 0, dmg: 0, stam: 0 };
+   198→  state: 'idle' | 'roll' | 'attack' | 'hurt' | 'potion' | 'dead' = 'idle';
+   199→  stateT = 0;
+   200→  attackIdx = 0;
+   201→  currentAttack: AttackDef | null = null;
+   202→  heavy = false;
+   203→  didHit = false;
+   204→  buffered = false;
+   205→  comboTimer = 0;
+   206→  iFrames = 0;
+   207→  staminaDelay = 0;
+   208→  rollDir = new THREE.Vector3();
+   209→  lockTarget: { pos: THREE.Vector3; alive: boolean; pos3?: THREE.Vector3 } | null = null;
+   210→  animT = 0;
+   211→  runPhase = 0;
+   212→  moving = false;
+   213→  sprinting = false;
+   214→  invulnHit = false;
+   215→
+   216→  constructor() {
+   217→    super();
+   218→    this.procRig = buildPlayerRig();
+   219→    this.rig = this.procRig;
+   220→    this.root.add(this.procRig.root);
+   221→    this.maxHp = 100; this.hp = 100;
+   222→    this.radius = 0.55;
+   223→    this.height = 1.85;
+   224→    this.applier = new PoseApplier(this.procRig, 16);
+   225→    this.collectMats();
+   226→  }
+   227→
+   228→  /** Sustituye el rig procedural por un personaje GLB real (si hay pack) */
+   229→  attachGlb(char: GlbCharacter) {
+   230→    if (this.glb) return;
+   231→    this.root.remove(this.procRig.root);
+   232→    this.glb = char;
+   233→    this.rig = char.rig;
+   234→    this.root.add(char.root);
+   235→    this.collectMats();
+   236→  }
+   237→
+   238→  /** Reproduce un clip del animador GLB (no-op con rig procedural) */
+   239→  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number; timeScale?: number } = {}) {
+   240→    this.glb?.animator.play(name, opts);
+   241→  }
+   242→
+   243→  /** Idle del menú cinemático (GLB o procedural) */
+   244→  updateMenu(dt: number, t: number) {
+   245→    if (this.glb) {
+   246→      this.glb.animator.play('idle', { fade: 0.6 });
+   247→      this.glb.animator.update(dt);
+   248→    } else {
+   249→      this.applier.apply(idlePose(t), dt, 6);
+   250→    }
+   251→  }
+   252→
+   253→  /** Vida base por nivel + equipo + permanentes */
+   254→  private recomputeMaxHp() {
+   255→    const levelHp = 100 + 14 * (this.level - 1);
+   256→    const newMax = levelHp + this.equip.hp + this.perm.hp;
+   257→    const diff = newMax - this.maxHp;
+   258→    this.maxHp = newMax;
+   259→    if (diff > 0) this.hp += diff; // equipar armadura también cura la diferencia
+   260→    this.hp = clamp(this.hp, 0, this.maxHp);
+   261→  }
+   262→
+   263→  /** Game lo llama cada vez que cambia el equipamiento */
+   264→  applyEquipStats(s: EquipStats) {
+   265→    this.equip = s;
+   266→    this.recomputeMaxHp();
+   267→  }
+   268→
+   269→  get dmgMul() {
+   270→    return this.baseDmg * (1 + 0.09 * (this.level - 1)) * (1 + this.equip.dmg + this.perm.dmg);
+   271→  }
+   272→  get moveSpeedMul() { return 1 + this.equip.speed; }
+   273→  get critChance() { return clamp(this.equip.crit, 0, 0.75); }
+   274→  get damageReduction() { return this.equip.def / (this.equip.def + 90); }
+   275→  get xpProgress() { return this.xp / this.xpNext; }
+   276→
+   277→  gainXp(amount: number, ctx: GameCtx) {
+   278→    this.xp += amount;
+   279→    while (this.xp >= this.xpNext) {
+   280→      this.xp -= this.xpNext;
+   281→      this.level++;
+   282→      this.xpNext = Math.round(70 * Math.pow(this.level, 1.35));
+   283→      this.maxStamina += 4;
+   284→      this.recomputeMaxHp();
+   285→      this.stamina = this.maxStamina;
+   286→      ctx.audio.levelUp();
+   287→      ctx.particles.burst({
+   288→        x: this.pos.x, y: this.pos.y + 1, z: this.pos.z,
+   289→        count: 40, speed: 5, color: 0xffc84a, size: 0.35, life: 1.2, gravity: -2, drag: 1.2, glow: 2.2,
+   290→      });
+   291→      ctx.addDamageNumber(new THREE.Vector3(this.pos.x, this.pos.y + 2.2, this.pos.z), `¡NIVEL ${this.level}!`, '#ffc84a', true);
+   292→      ctx.shake(0.25);
+   293→    }
+   294→  }
+   295→
+   296→  healPotion(ctx: GameCtx): boolean {
+   297→    if (this.potions <= 0 || this.hp >= this.maxHp || this.state === 'dead') return false;
+   298→    this.potions--;
+   299→    this.hp = Math.min(this.maxHp, this.hp + this.maxHp * 0.45);
+   300→    this.state = 'potion'; this.stateT = 0;
+   301→    ctx.audio.potion();
+   302→    ctx.particles.burst({
+   303→      x: this.pos.x, y: this.pos.y + 1.2, z: this.pos.z,
+   304→      count: 22, speed: 2.4, color: 0x51e07c, size: 0.22, life: 0.9, gravity: -3, drag: 2, glow: 1.8,
+   305→    });
+   306→    ctx.addDamageNumber(new THREE.Vector3(this.pos.x, this.pos.y + 2, this.pos.z), `+${Math.round(this.maxHp * 0.45)}`, '#51e07c');
+   307→    return true;
+   308→  }
+   309→
+   310→  canAct(): boolean {
+   311→    return this.state === 'idle' || (this.state === 'attack' && !!this.currentAttack && this.stateT > this.currentAttack.dur * 0.72);
+   312→  }
+   313→
+   314→  tryAttack(heavy: boolean, ctx: GameCtx, fwd: THREE.Vector3): boolean {
+   315→    const def = heavy ? PLAYER_HEAVY : PLAYER_ATTACKS[0];
+   316→    const cost = def.stam;
+   317→    if (this.stamina <= 0) return false;
+   318→    const isChain = this.state === 'attack';
+   319→    const idx = isChain ? Math.min(this.attackIdx + 1, 2) : 0;
+   320→    const use = heavy ? def : PLAYER_ATTACKS[idx];
+   321→    if (!heavy && this.stamina < use.stam * 0.5) return false;
+   322→    this.stamina = Math.max(0, this.stamina - use.stam);
+   323→    this.staminaDelay = 0.75;
+   324→    this.state = 'attack';
+   325→    this.stateT = 0;
+   326→    this.heavy = heavy;
+   327→    this.attackIdx = heavy ? 0 : idx;
+   328→    this.currentAttack = use;
+   329→    this.didHit = false;
+   330→    this.buffered = false;
+   331→    // impulso inicial
+   332→    this.knock.add(fwd.clone().multiplyScalar(use.impulse * 0.6));
+   333→    ctx.audio.swing(use.soundPitch);
+   334→    return true;
+   335→  }
+   336→
+   337→  tryRoll(ctx: GameCtx, dir: THREE.Vector3): boolean {
+   338→    if (this.stamina <= 0) return false;
+   339→    if (this.state === 'roll' || this.state === 'dead') return false;
+   340→    if (this.state === 'attack' && this.stateT < this.currentAttack!.dur * 0.5) return false;
+   341→    this.stamina = Math.max(0, this.stamina - 22);
+   342→    this.staminaDelay = 0.75;
+   343→    this.state = 'roll'; this.stateT = 0;
+   344→    this.rollDir.copy(dir.lengthSq() > 0.01 ? dir : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)));
+   345→    this.iFrames = 0.42;
+   346→    ctx.audio.roll();
+   347→    ctx.particles.burst({
+   348→      x: this.pos.x, y: this.pos.y + 0.15, z: this.pos.z,
+   349→      count: 10, speed: 2.2, color: 0x8a7a5e, size: 0.3, life: 0.55, gravity: 1.5, drag: 2.4, glow: 0.7,
+   350→    });
+   351→    return true;
+   352→  }
+   353→
+   354→  takeDamage(dmg: number, srcPos: THREE.Vector3, ctx: GameCtx): boolean {
+   355→    if (this.iFrames > 0 || this.state === 'dead') return false;
+   356→    // la defensa de la armadura reduce el daño entrante
+   357→    const final = dmg * (1 - this.damageReduction);
+   358→    this.hp -= final;
+   359→    this.iFrames = 0.28;
+   360→    ctx.audio.hurt();
+   361→    ctx.playerHurt();
+   362→    ctx.addDamageNumber(new THREE.Vector3(this.pos.x + rand(-0.3, 0.3), this.pos.y + 2.1, this.pos.z), `-${Math.round(final)}`, '#ff5a4e');
+   363→    ctx.particles.burst({
+   364→      x: this.pos.x, y: this.pos.y + 1.2, z: this.pos.z,
+   365→      count: 14, speed: 3.2, color: 0xd8323c, size: 0.24, life: 0.7, gravity: 5, drag: 1.5,
+   366→    });
+   367→    // knockback
+   368→    const d = this.pos.clone().sub(srcPos).setY(0);
+   369→    if (d.lengthSq() > 0.001) d.normalize();
+   370→    this.knock.add(d.multiplyScalar(4));
+   371→    if (this.hp <= 0) {
+   372→      this.hp = 0;
+   373→      this.state = 'dead'; this.stateT = 0;
+   374→      this.alive = false;
+   375→      ctx.audio.die();
+   376→      ctx.shake(0.8);
+   377→      return true;
+   378→    }
+   379→    if (this.state !== 'roll') {
+   380→      this.state = 'hurt'; this.stateT = 0;
+   381→    }
+   382→    ctx.shake(0.45);
+   383→    return true;
+   384→  }
+   385→
+   386→  update(dt: number, ctx: GameCtx) {
+   387→    const input = ctx.input;
+   388→    const camYaw = ctx.camYaw;
+   389→    this.animT += dt;
+   390→    this.updateFlash(dt);
+   391→    this.iFrames = Math.max(0, this.iFrames - dt);
+   392→    this.comboTimer = Math.max(0, this.comboTimer - dt);
+   393→    if (this.comboTimer === 0 && this.state !== 'attack') this.attackIdx = 0;
+   394→
+   395→    // regeneración de aguante (mejorada por equipo y consumibles)
+   396→    this.staminaDelay = Math.max(0, this.staminaDelay - dt);
+   397→    if (this.staminaDelay === 0 && this.state !== 'dead') {
+   398→      const regen = 26 * (1 + this.equip.stam + this.perm.stam);
+   399→      this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
+   400→    }
+   401→
+   402→    // dirección de movimiento relativa a cámara
+   403→    const ix = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+   404→    const iz = (input.fwd ? 1 : 0) - (input.back ? 1 : 0);
+   405→    const fwd = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw)).multiplyScalar(-1);
+   406→    const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+   407→    const moveDir = new THREE.Vector3().addScaledVector(fwd, iz).addScaledVector(right, ix);
+   408→    const hasMove = moveDir.lengthSq() > 0.001;
+   409→    if (hasMove) moveDir.normalize();
+   410→
+   411→    const locked = !!(this.lockTarget && this.lockTarget.alive);
+   412→    const targetPos = locked ? this.lockTarget!.pos : null;
+   413→
+   414→    switch (this.state) {
+   415→      case 'dead': {
+   416→        this.stateT += dt;
+   417→        if (this.glb) {
+   418→          this.anim('death', { once: true });
+   419→        } else {
+   420→          const clip = CLIPS.death;
+   421→          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+   422→          this.applier.snap(p, dt);
+   423→        }
+   424→        this.root.rotation.y = this.yaw;
+   425→        this.pos.addScaledVector(this.knock, dt);
+   426→        this.knock.multiplyScalar(Math.max(0, 1 - 6 * dt));
+   427→        this.applyTransform(ctx, dt);
+   428→        return;
+   429→      }
+   430→      case 'hurt': {
+   431→        this.stateT += dt;
+   432→        if (this.glb) {
+   433→          this.anim('hurt');
+   434→          if (this.stateT >= CLIPS.hurt.dur) this.state = 'idle';
+   435→        } else {
+   436→          const clip = CLIPS.hurt;
+   437→          this.applier.snap(sampleClip(clip, Math.min(this.stateT, clip.dur)), dt);
+   438→          if (this.stateT >= clip.dur) this.state = 'idle';
+   439→        }
+   440→        break;
+   441→      }
+   442→      case 'potion': {
+   443→        this.stateT += dt;
+   444→        if (this.glb) this.anim('potion', { once: true });
+   445→        else this.applier.apply(idlePose(this.animT), dt, 14);
+   446→        if (this.stateT > 0.45) this.state = 'idle';
+   447→        break;
+   448→      }
+   449→      case 'roll': {
+   450→        this.stateT += dt;
+   451→        if (this.glb) {
+   452→          this.anim('roll', { once: true, restart: true });
+   453→        } else {
+   454→          const clip = CLIPS.roll;
+   455→          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+   456→          this.applier.snap(p, dt);
+   457→        }
+   458→        this.pos.addScaledVector(this.rollDir, 10.5 * dt);
+   459→        if (Math.random() < 0.4) {
+   460→          ctx.particles.spawn({
+   461→            x: this.pos.x, y: this.pos.y + 0.1, z: this.pos.z,
+   462→            vx: rand(-1, 1), vy: rand(0.5, 1.5), vz: rand(-1, 1),
+   463→            color: 0x8a7a5e, size: 0.25, life: 0.4, gravity: 1, drag: 2, glow: 0.6,
+   464→          });
+   465→        }
+   466→        if (this.stateT >= CLIPS.roll.dur) { this.state = 'idle'; this.applier.apply(ZERO_POSE, dt, 20); }
+   467→        break;
+   468→      }
+   469→      case 'attack': {
+   470→        this.stateT += dt;
+   471→        const def = this.currentAttack!;
+   472→        const clip = CLIPS[def.clip];
+   473→        // buffer de combo: un clic durante el ataque encadena el siguiente
+   474→        if (input.consumeAttack()) this.buffered = true;
+   475→        // seguimiento del objetivo
+   476→        if (targetPos) {
+   477→          const ty = Math.atan2(targetPos.x - this.pos.x, targetPos.z - this.pos.z);
+   478→          this.yaw = dampAngle(this.yaw, ty, 10, dt);
+   479→        } else {
+   480→          this.yaw = dampAngle(this.yaw, Math.atan2(fwd.x, fwd.z), 8, dt);
+   481→        }
+   482→        // impulso hacia delante durante la fase activa
+   483→        const prog = this.stateT / def.dur;
+   484→        if (prog > 0.35 && prog < 0.75) {
+   485→          this.pos.addScaledVector(new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), def.impulse * dt);
+   486→        }
+   487→        if (this.glb) {
+   488→          this.anim(def.clip, { once: true, restart: true });
+   489→        } else {
+   490→          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+   491→          this.applier.snap(p, dt);
+   492→        }
+   493→        // momento del golpe
+   494→        if (!this.didHit && this.stateT >= def.hitAt) {
+   495→          this.didHit = true;
+   496→          this.strike(ctx, def);
+   497→        }
+   498→        if (this.stateT >= def.dur) {
+   499→          if (this.buffered && !this.heavy && this.attackIdx < 2 && this.stamina > 8) {
+   500→            this.tryAttack(false, ctx, fwd); // encadena el siguiente
+   501→          } else {
+   502→            this.state = 'idle';
+   503→            this.comboTimer = 0.85;
+   504→          }
+   505→        }
+   506→        break;
+   507→      }
+   508→      case 'idle': {
+   509→        // acciones nuevas
+   510→        if (input.consumePotion()) {
+   511→          if (this.healPotion(ctx)) break;
+   512→        }
+   513→        if (input.consumeRoll()) {
+   514→          const dir = hasMove ? moveDir : new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+   515→          this.yaw = Math.atan2(dir.x, dir.z);
+   516→          if (this.tryRoll(ctx, dir)) break;
+   517→        }
+   518→        const wantHeavy = input.consumeHeavy();
+   519→        const wantLight = input.consumeAttack();
+   520→        if (wantHeavy || wantLight) {
+   521→          const faceDir = targetPos
+   522→            ? new THREE.Vector3(targetPos.x - this.pos.x, 0, targetPos.z - this.pos.z).normalize()
+   523→            : (hasMove ? moveDir : fwd);
+   524→          this.yaw = Math.atan2(faceDir.x, faceDir.z);
+   525→          this.tryAttack(wantHeavy, ctx, faceDir);
+   526→        }
+   527→        break;
+   528→      }
+   529→    }
+   530→
+   531→    // movimiento normal (solo fuera de acciones que bloquean)
+   532→    if (this.state === 'idle') {
+   533→      this.sprinting = input.sprint && hasMove;
+   534→      const speed = (this.sprinting ? 9.2 : 6.2) * this.moveSpeedMul;
+   535→      if (hasMove) {
+   536→        this.pos.addScaledVector(moveDir, speed * dt);
+   537→        if (!locked) {
+   538→          this.yaw = dampAngle(this.yaw, Math.atan2(moveDir.x, moveDir.z), 14, dt);
+   539→        } else {
+   540→          this.yaw = dampAngle(this.yaw, Math.atan2(targetPos!.x - this.pos.x, targetPos!.z - this.pos.z), 12, dt);
+   541→        }
+   542→      }
+   543→      this.moving = hasMove;
+   544→      // pose (mocap GLB con crossfade o procedural)
+   545→      if (this.glb) {
+   546→        if (hasMove) {
+   547→          if (this.sprinting) {
+   548→            // esprintar: ciclo de carrera siempre orientado al avance
+   549→            this.anim('run', { fade: 0.22, timeScale: 1.32 });
+   550→          } else if (locked) {
+   551→            // lock-on: strafes/backpedal reales según dirección relativa
+   552→            const facing = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+   553→            const dot = moveDir.dot(facing);
+   554→            const side = moveDir.dot(new THREE.Vector3(-facing.z, 0, facing.x));
+   555→            if (dot > 0.45) this.anim('walk', { fade: 0.22, timeScale: 1.42 });
+   556→            else if (dot < -0.45) this.anim('back', { fade: 0.22, timeScale: 1.35 });
+   557→            else if (side > 0) this.anim('strafeR', { fade: 0.25, timeScale: 1.3 });
+   558→            else this.anim('strafeL', { fade: 0.25, timeScale: 1.3 });
+   559→          } else {
+   560→            this.anim('walk', { fade: 0.22, timeScale: 1.42 });
+   561→          }
+   562→        } else {
+   563→          this.anim('idle', { fade: 0.3 });
+   564→        }
+   565→      } else if (hasMove) {
+   566→        this.runPhase += dt * (this.sprinting ? 1.3 : 1);
+   567→        this.applier.apply(runPose(this.runPhase, this.sprinting ? 1.15 : 1), dt, 12);
+   568→      } else if (locked) {
+   569→        this.applier.apply(strafePose(this.animT, false), dt, 10);
+   570→      } else {
+   571→        this.applier.apply(idlePose(this.animT), dt, 8);
+   572→      }
+   573→    }
+   574→
+   575→    this.glb?.animator.update(dt);
+   576→
+   577→    // knockback decay
+   578→    this.pos.addScaledVector(this.knock, dt);
+   579→    this.knock.multiplyScalar(Math.max(0, 1 - 7 * dt));
+   580→
+   581→    this.applyTransform(ctx, dt);
+   582→  }
+   583→
+   584→  private strike(ctx: GameCtx, def: AttackDef) {
+   585→    // (la resolución de impactos la hace Game mediante pendingStrike)
+   586→    this.pendingStrike = def;
+   587→  }
+   588→  pendingStrike: AttackDef | null = null;
+   589→
+   590→  private applyTransform(ctx: GameCtx, dt: number) {
+   591→    const h = ctx.world.height(this.pos.x, this.pos.z);
+   592→    this.pos.y = damp(this.pos.y, h, 25, dt);
+   593→    this.root.position.copy(this.pos);
+   594→    this.root.rotation.y = this.yaw;
+   595→  }
+   596→
+   597→  /** Ancla de la punta/base de la espada para la estela */
+   598→  swordPoints(outBase: THREE.Vector3, outTip: THREE.Vector3) {
+   599→    const w = this.rig.weapon;
+   600→    if (!w) return;
+   601→    outBase.set(0, 0.15, 0);
+   602→    outTip.set(0, 1.05, 0);
+   603→    w.updateWorldMatrix(true, false);
+   604→    outBase.applyMatrix4(w.matrixWorld);
+   605→    outTip.applyMatrix4(w.matrixWorld);
+   606→  }
+   607→}
+   608→
+   609→/* ---------- Proyectiles ---------- */
+   610→
+   611→export class Projectile {
+   612→  root = new THREE.Group();
+   613→  pos = new THREE.Vector3();
+   614→  vel = new THREE.Vector3();
+   615→  dmg: number;
+   616→  kind: 'arrow' | 'orb';
+   617→  life = 4;
+   618→  dead = false;
+   619→  gravity: number;
+   620→
+   621→  constructor(o: { pos: THREE.Vector3; dir: THREE.Vector3; speed: number; dmg: number; kind: 'arrow' | 'orb' }) {
+   622→    this.pos.copy(o.pos);
+   623→    this.vel.copy(o.dir).normalize().multiplyScalar(o.speed);
+   624→    this.dmg = o.dmg;
+   625→    this.kind = o.kind;
+   626→    this.gravity = o.kind === 'arrow' ? 4.5 : 0;
+   627→    if (o.kind === 'arrow') {
+   628→      this.root.add(buildArrowMesh());
+   629→    } else {
+   630→      const core = new THREE.Mesh(
+   631→        new THREE.IcosahedronGeometry(0.22, 0),
+   632→        new THREE.MeshStandardMaterial({ color: 0x2a0a0a, emissive: 0xff2211, emissiveIntensity: 2.6, roughness: 0.5 })
+   633→      );
+   634→      this.root.add(core);
+   635→      const halo = new THREE.Mesh(
+   636→        new THREE.SphereGeometry(0.4, 8, 6),
+   637→        new THREE.MeshBasicMaterial({ color: 0xff3a22, transparent: true, opacity: 0.3 })
+   638→      );
+   639→      this.root.add(halo);
+   640→    }
+   641→    this.root.position.copy(this.pos);
+   642→  }
+   643→
+   644→  update(dt: number, ctx: GameCtx) {
+   645→    this.life -= dt;
+   646→    if (this.life <= 0) { this.dead = true; return; }
+   647→    this.vel.y -= this.gravity * dt;
+   648→    if (this.kind === 'orb') {
+   649→      // ligero homing
+   650→      const to = ctx.player.pos.clone().setY(ctx.player.pos.y + 1.1).sub(this.pos).normalize().multiplyScalar(this.vel.length());
+   651→      this.vel.lerp(to, 1 - Math.exp(-1.6 * dt));
+   652→    }
+   653→    this.pos.addScaledVector(this.vel, dt);
+   654→    this.root.position.copy(this.pos);
+   655→    if (this.kind === 'arrow') {
+   656→      this.root.lookAt(this.pos.clone().add(this.vel));
+   657→      this.root.rotateX(Math.PI / 2);
+   658→    } else {
+   659→      this.root.rotation.y += dt * 6;
+   660→      if (Math.random() < 0.6) ctx.particles.spawn({
+   661→        x: this.pos.x, y: this.pos.y, z: this.pos.z,
+   662→        color: 0xff3a22, size: 0.22, life: 0.4, glow: 2.2, shrink: false,
+   663→        vx: rand(-0.5, 0.5), vy: rand(-0.5, 0.5), vz: rand(-0.5, 0.5),
+   664→      });
+   665→    }
+   666→    // impacto con el jugador
+   667→    const p = ctx.player.pos;
+   668→    const dx = p.x - this.pos.x, dy = (p.y + 1.1) - this.pos.y, dz = p.z - this.pos.z;
+   669→    if (dx * dx + dy * dy + dz * dz < 0.9 * 0.9) {
+   670→      if (ctx.player.takeDamage(this.dmg, this.pos, ctx)) {
+   671→        if (this.kind === 'orb') ctx.particles.burst({ x: this.pos.x, y: this.pos.y, z: this.pos.z, count: 18, speed: 4, color: 0xff3a22, size: 0.28, life: 0.6, glow: 2 });
+   672→      }
+   673→      this.dead = true;
+   674→      return;
+   675→    }
+   676→    // impacto con el suelo
+   677→    if (this.pos.y <= ctx.world.height(this.pos.x, this.pos.z) + 0.05) {
+   678→      this.dead = true;
+   679→      ctx.particles.burst({ x: this.pos.x, y: this.pos.y, z: this.pos.z, count: 6, speed: 1.5, color: 0x8a7a5e, size: 0.18, life: 0.4, gravity: 3 });
+   680→    }
+   681→  }
+   682→}
+   683→
+   684→/* ---------- Drops (pociones y objetos de equipo) ---------- */
+   685→
+   686→export class Pickup {
+   687→  root: THREE.Group;
+   688→  pos = new THREE.Vector3();
+   689→  life = 40;
+   690→  dead = false;
+   691→  kind: 'potion' | 'item';
+   692→  item: ItemDef | null = null;
+   693→  private core: THREE.Mesh;
+   694→  private t = Math.random() * 10;
+   695→
+   696→  constructor(pos: THREE.Vector3, kind: 'potion' | 'item', item?: ItemDef) {
+   697→    this.kind = kind;
+   698→    const color = kind === 'item' && item ? RARITY_INFO[item.rarity].hex : 0xff4a4a;
+   699→    const { group, core } = buildPickupOrb(color);
+   700→    this.root = group;
+   701→    this.core = core;
+   702→    this.item = item ?? null;
+   703→    if (kind === 'item') {
+   704→      // los objetos flotan un poco más alto y giran una cartera de destellos
+   705→      this.root.scale.setScalar(1.25);
+   706→    }
+   707→    this.pos.copy(pos);
+   708→    this.pos.y = terrainHeight(pos.x, pos.z) + (kind === 'item' ? 0.7 : 0.5);
+   709→    this.root.position.copy(this.pos);
+   710→  }
+   711→
+   712→  update(dt: number, ctx: GameCtx) {
+   713→    this.t += dt;
+   714→    this.life -= dt;
+   715→    if (this.life <= 0) { this.dead = true; return; }
+   716→    this.root.position.y = this.pos.y + Math.sin(this.t * 2.4) * 0.12;
+   717→    this.core.rotation.y += dt * 2.5;
+   718→    this.core.rotation.x += dt * 1.2;
+   719→    const p = ctx.player.pos;
+   720→    const d = Math.hypot(p.x - this.pos.x, p.z - this.pos.z);
+   721→    if (d < 1.5 && Math.abs(p.y - this.pos.y) < 2.5 && !ctx.player.invulnHit) {
+   722→      if (this.kind === 'item' && this.item) {
+   723→        ctx.gainItem(this.item);
+   724→        this.dead = true;
+   725→        return;
+   726→      }
+   727→      if (ctx.player.potions < ctx.player.maxPotions) {
+   728→        ctx.player.potions++;
+   729→        ctx.audio.potion();
+   730→        ctx.addDamageNumber(this.root.position.clone(), '+1 POCIÓN', '#ff8a8a');
+   731→        this.dead = true;
+   732→      }
+   733→    }
+   734→  }
+   735→}
+   736→

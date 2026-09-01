@@ -30,6 +30,12 @@ const INITIAL_HUD: HudState = {
   dayNum: 1,
   night: false,
   notice: '',
+  styleLetter: 'D',
+  styleLabel: 'Descuidado',
+  styleCss: '#9aa0a6',
+  styleProgress: 0,
+  comboHits: 0,
+  comboActive: false,
   inv: {
     open: false,
     bag: [], bagSize: 24,
@@ -117,9 +123,9 @@ const CONTROLS: [string, string][] = [
   ['W A S D', 'Moverse'],
   ['Ratón', 'Cámara'],
   ['Rueda', 'Zoom de cámara'],
-  ['Clic izq.', 'Ataque ligero (combo ×3)'],
-  ['Clic der.', 'Ataque cargado'],
-  ['Espacio', 'Esquiva rodando (invulnerable)'],
+  ['Clic izq.', 'Combo de 4 golpes (canc. con el siguiente)'],
+  ['Clic der.', 'Mandoble cargado (o remate en la cadena)'],
+  ['Espacio', 'Esquiva rodando — cancela ataques (invulnerable)'],
   ['Tab', 'Fijar objetivo'],
   ['F', 'Beber poción'],
   ['E', 'Interactuar'],
@@ -612,6 +618,31 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Medidor de ESTILO (DMC): rango D→SSS + cadena de golpes */}
+          <div className={`absolute top-[218px] right-4 w-40 text-right transition-opacity duration-300 ${inGame && hud.phase === 'playing' ? 'opacity-100' : 'opacity-0'}`}>
+            <div
+              key={hud.styleLetter}
+              className="aetheria-style-pop font-gothic leading-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]"
+              style={{ color: hud.styleCss, fontSize: hud.styleLetter === 'SSS' ? '44px' : '36px', textShadow: `0 0 18px ${hud.styleCss}66, 0 2px 0 rgba(0,0,0,0.85)` }}
+            >
+              {hud.styleLetter}
+            </div>
+            <div className="font-display text-[10px] tracking-[0.2em] uppercase -mt-0.5" style={{ color: hud.styleCss }}>
+              {hud.styleLabel}
+            </div>
+            <div className="mt-1 h-1 rounded-full bg-black/60 border border-black/70 overflow-hidden">
+              <div
+                className="h-full transition-[width] duration-200 ease-out"
+                style={{ width: `${Math.round(hud.styleProgress * 100)}%`, background: `linear-gradient(90deg, ${hud.styleCss}55, ${hud.styleCss})`, boxShadow: `0 0 8px ${hud.styleCss}` }}
+              />
+            </div>
+            {hud.comboActive && (
+              <div key={hud.comboHits} className="aetheria-style-pop mt-1.5 font-display text-sm font-extrabold text-white/95 tracking-wider drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
+                {hud.comboHits} <span className="text-[10px] text-stone-300 tracking-[0.25em]">HITS</span>
+              </div>
+            )}
+          </div>
+
           {/* Objetivo + reloj del mundo (arriba-centro) */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 text-center max-w-md">
             <div className="text-[13px] tracking-[0.18em] uppercase text-amber-200/90 font-display bg-black/45 border border-amber-900/40 rounded px-4 py-1.5">
@@ -686,9 +717,9 @@ export default function Home() {
 
           {/* Ayuda de controles (abajo-derecha) */}
           <div className="absolute bottom-4 right-4 text-right text-[10px] leading-relaxed text-stone-500">
-            <div>Clic izq. atacar · Clic der. cargado · Espacio esquivar</div>
+            <div>Clic izq. combo ×4 (remate final) · Clic der. cargado · Espacio esquiva-cancel</div>
             <div>Tab objetivo · F poción · E interactuar / comerciar · Esc pausa</div>
-            <div>Rueda zoom · I mochila · Ferran comercia junto a la hoguera</div>
+            <div>Rueda zoom · I mochila · Ferran comercia junto a la hoguera · ¡encadena sin parar para subir el ESTILO!</div>
           </div>
         </div>
       )}
