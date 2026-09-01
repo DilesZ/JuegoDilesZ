@@ -2,26 +2,29 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
   barkMaps, metalMaps, stoneMaps, woodMaps, grassBladeTexture,
-  toonRamp3, toonRamp4,
+  foliageTexture, pineFoliageTexture,
 } from './textures';
 
 /* ============================================================
-   MODELOS PROCEDURALES — ESTILO ANIME
-   - Materiales TOON (cel shading por rampa de bandas).
-   - Contornos de tinta (inverted hull) para personajes y props.
-   - Humanoides con rasgos anime: ojos grandes, pelo, orejas, colmillos.
+   MODELOS PROCEDURALES — PIPELINE PBR REALISTA (DMC-style)
+   - Materiales MeshStandardMaterial fotográficos (metal/rough).
+   - Vegetación con tarjetas alpha de follaje (SpeedTree-style).
+   - Los rigs humanoides de respaldo siguen aquí (fallback sin GLB).
    ============================================================ */
 
-export type ToonMat = THREE.MeshToonMaterial;
+export type ToonMat = THREE.MeshStandardMaterial; // (nombre histórico)
 export type CharMat = THREE.MeshStandardMaterial | THREE.MeshToonMaterial;
 
-/** Material toon con rampa compartida */
-export function toonMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}): THREE.MeshToonMaterial {
-  return new THREE.MeshToonMaterial({
+/** Material estándar PBR (antes toon): rugoso mate por defecto */
+export function toonMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}): THREE.MeshStandardMaterial {
+  const { gradientMap: _drop, ...rest } = opts as Record<string, unknown>;
+  void _drop;
+  return new THREE.MeshStandardMaterial({
     color,
-    gradientMap: toonRamp3(),
-    ...opts,
-  });
+    roughness: 0.86,
+    metalness: 0.02,
+    ...rest,
+  } as THREE.MeshStandardMaterialParameters);
 }
 
 /* ---------- Registro de viento y llamas (animados por World) ---------- */
@@ -108,51 +111,52 @@ export function flameGeometry(w: number, h: number): THREE.BufferGeometry {
   return mergeGeometries([p1, p2])!;
 }
 
-/* ---------- Materiales compartidos texturizados ---------- */
+/* ---------- Materiales compartidos texturizados (PBR) ---------- */
 
-let _bark: THREE.MeshToonMaterial | null = null;
-export function barkMat(): THREE.MeshToonMaterial {
+let _bark: THREE.MeshStandardMaterial | null = null;
+export function barkMat(): THREE.MeshStandardMaterial {
   if (!_bark) {
-    const { map } = barkMaps();
-    _bark = toonMat(0xffffff, { map });
+    const { map, normalMap } = barkMaps();
+    _bark = toonMat(0xffffff, { map, normalMap, roughness: 0.92, metalness: 0 });
   }
   return _bark;
 }
 
-let _stone: THREE.MeshToonMaterial | null = null;
-export function stoneMat(): THREE.MeshToonMaterial {
+let _stone: THREE.MeshStandardMaterial | null = null;
+export function stoneMat(): THREE.MeshStandardMaterial {
   if (!_stone) {
-    const { map } = stoneMaps();
-    _stone = toonMat(0xffffff, { map });
+    const { map, normalMap } = stoneMaps();
+    _stone = toonMat(0x9b948c, { map, normalMap, roughness: 0.95, metalness: 0 });
   }
   return _stone;
 }
 
-let _wood: THREE.MeshToonMaterial | null = null;
-export function woodMat(): THREE.MeshToonMaterial {
+let _wood: THREE.MeshStandardMaterial | null = null;
+export function woodMat(): THREE.MeshStandardMaterial {
   if (!_wood) {
-    const { map } = woodMaps();
-    _wood = toonMat(0xffffff, { map });
+    const { map, normalMap } = woodMaps();
+    _wood = toonMat(0xffffff, { map, normalMap, roughness: 0.9, metalness: 0 });
   }
   return _wood;
 }
 
-export function forgedMat(color = 0xdfe8f4): THREE.MeshToonMaterial {
-  const { map } = metalMaps();
-  return toonMat(color, { map });
+export function forgedMat(color = 0xdfe8f4): THREE.MeshStandardMaterial {
+  const { map, normalMap, roughnessMap } = metalMaps();
+  return toonMat(color, { map, normalMap, roughnessMap, roughness: 0.42, metalness: 0.85 });
 }
 
 /* ---------- Materiales básicos (compat API) ---------- */
 
-export function stdMat(color: number, opts: Partial<THREE.MeshToonMaterialParameters> = {}) {
+export function stdMat(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
   return toonMat(color, opts);
 }
 export function metalMat(color: number) {
-  return toonMat(color);
+  return toonMat(color, { roughness: 0.38, metalness: 0.85 });
 }
 export function emisMat(color: number, intensity = 1.6) {
-  return new THREE.MeshToonMaterial({
-    color, emissive: color, emissiveIntensity: intensity, gradientMap: toonRamp3(),
+  return new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: intensity,
+    roughness: 0.5, metalness: 0,
   });
 }
 
@@ -406,7 +410,7 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   const root = new THREE.Group();
 
   const mkBody = (color: number) => {
-    const m = toonMat(color, { gradientMap: toonRamp4() });
+    const m = toonMat(color);
     if (o.rim) addRim(m, o.rim.color, o.rim.strength);
     return m;
   };
@@ -522,7 +526,7 @@ export function buildHumanoid(o: HumanoidOpts): HumanoidRig {
   }
   // pelo puntiagudo anime (las puntas sobresalen claramente del cráneo)
   if (o.hair) {
-    const hairMat = toonMat(o.hair, { gradientMap: toonRamp4() });
+    const hairMat = toonMat(o.hair);
     const spikes: [number, number, number, number, number][] = [
       // [x, y, z, tiltZ, tiltX]
       [0, headR * 1.62, -0.02, 0, 0.05],
@@ -740,7 +744,6 @@ export function buildObelisk(cleansed: boolean): {
     g.add(sh);
     shards.push(sh);
   }
-  addOutlines(g, 0.045);
   return { group: g, crystal, runes, shards };
 }
 
@@ -805,7 +808,6 @@ export function buildRuinedPillar(h = 2.4): THREE.Group {
   const cap = mesh(new THREE.BoxGeometry(0.78, 0.22, 0.78), st, 0.08, h + 0.3, 0.05);
   cap.rotation.set(0.1, 0.4, -0.12);
   g.add(cap);
-  addOutlines(g, 0.035);
   return g;
 }
 
@@ -818,7 +820,6 @@ export function buildBrokenArch(): THREE.Group {
   const top = mesh(new THREE.BoxGeometry(3.8, 0.5, 0.6), st, -0.2, 3.55, 0);
   top.rotation.z = -0.1;
   g.add(l, r, top);
-  addOutlines(g, 0.04);
   return g;
 }
 
@@ -944,20 +945,17 @@ export function buildMerchantStall(): { group: THREE.Group; lantern: THREE.Point
   emblem.userData.noOutline = true;
   g.add(emblem);
 
-  // contornos de tinta del puesto (se excluyen los planos marcados)
-  addOutlines(g, 0.03);
-
   return { group: g, lantern, lanternCore: core };
 }
 
 
-/* ---------- Hierba: mata de 3 hojas curvadas (textura alpha) ---------- */
+/* ---------- Hierba: mata de 5 hojas curvadas (textura alpha, PBR) ---------- */
 
 export function grassGeometry(): THREE.BufferGeometry {
   const blades: THREE.BufferGeometry[] = [];
-  const H = 0.6;
-  for (let i = 0; i < 3; i++) {
-    const p = new THREE.PlaneGeometry(0.2, H, 1, 3);
+  const H = 0.68;
+  for (let i = 0; i < 5; i++) {
+    const p = new THREE.PlaneGeometry(0.16, H, 1, 3);
     p.translate(0, H / 2, 0);
     // curvatura de la hoja
     const pos = p.getAttribute('position') as THREE.BufferAttribute;
@@ -967,8 +965,9 @@ export function grassGeometry(): THREE.BufferGeometry {
       pos.setZ(v, k * 0.16);
       pos.setX(v, pos.getX(v) * (1 - k * 0.35));
     }
-    p.rotateY((i / 3) * Math.PI + 0.3);
+    p.rotateY((i / 5) * Math.PI + 0.25);
     p.rotateX(((i * 37) % 10 - 5) * 0.02);
+    p.translate((i % 2 ? 0.05 : -0.05) * (i % 3), 0, ((i * 7) % 5 - 2) * 0.035);
     blades.push(p);
   }
   const merged = mergeGeometries(blades)!;
@@ -976,23 +975,185 @@ export function grassGeometry(): THREE.BufferGeometry {
   return merged;
 }
 
-export function grassMaterial(): THREE.MeshToonMaterial {
-  const mat = new THREE.MeshToonMaterial({
+export function grassMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
     map: grassBladeTexture(),
-    alphaTest: 0.42,
+    alphaTest: 0.4,
     side: THREE.DoubleSide,
     color: 0xffffff,
-    gradientMap: toonRamp3(),
+    roughness: 0.95,
+    metalness: 0,
   });
-  registerWind(mat, 0.09);
+  registerWind(mat, 0.1);
   return mat;
 }
 
-/** Material de copa de pino (dos tonos) con viento — anime saturado */
-export function canopyMat(color: number): THREE.MeshToonMaterial {
-  const m = toonMat(color);
-  registerWind(m, 0.06);
+/**
+ * Material de follaje por tarjetas alpha (caducifolio): recibe el tinte
+ * por instancia vía instanceColor; viento en shader. PBR con alphaTest.
+ */
+export function canopyMat(color: number): THREE.MeshStandardMaterial {
+  const m = new THREE.MeshStandardMaterial({
+    map: foliageTexture(1),
+    color,
+    alphaTest: 0.42,
+    side: THREE.DoubleSide,
+    roughness: 0.9,
+    metalness: 0,
+  });
+  registerWind(m, 0.055);
+  m.customProgramCacheKey = () => 'canopyCard';
   return m;
+}
+
+/** Material de follaje de pino (acículas) */
+export function pineCanopyMat(color: number): THREE.MeshStandardMaterial {
+  const m = new THREE.MeshStandardMaterial({
+    map: pineFoliageTexture(3),
+    color,
+    alphaTest: 0.4,
+    side: THREE.DoubleSide,
+    roughness: 0.92,
+    metalness: 0,
+  });
+  registerWind(m, 0.035);
+  m.customProgramCacheKey = () => 'pineCard';
+  return m;
+}
+
+/**
+ * GEOMETRÍA DE ROBLE REALISTA: tronco cónico curvado + 3 ramas.
+ * Unidad: árbol de ~7.5 m de alto con el origen en la base.
+ */
+export function buildOakGeos(): { trunk: THREE.BufferGeometry; canopy: THREE.BufferGeometry } {
+  // --- tronco con curvatura y estrechamiento ---
+  const trunk = new THREE.CylinderGeometry(0.16, 0.42, 4.6, 9, 6);
+  trunk.translate(0, 2.3, 0);
+  {
+    const p = trunk.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < p.count; i++) {
+      const y = p.getY(i);
+      const k = Math.pow(Math.max(0, y / 4.6), 1.6);
+      p.setZ(i, p.getZ(i) + k * 0.55);          // curva hacia +Z
+      p.setX(i, p.getX(i) * (1 - k * 0.25));
+    }
+    trunk.computeVertexNormals();
+  }
+  // --- ramas ---
+  const parts: THREE.BufferGeometry[] = [trunk.toNonIndexed()];
+  const branchDefs: [number, number, number, number][] = [
+    // [y, ang, len, radius]
+    [2.9, 0.4, 1.7, 0.12], [3.4, 2.4, 1.9, 0.11], [3.9, 4.3, 1.5, 0.09], [4.4, 5.6, 1.3, 0.08],
+  ];
+  for (const [y, ang, len, r] of branchDefs) {
+    const b = new THREE.CylinderGeometry(r * 0.4, r, len, 6, 1);
+    b.translate(0, len / 2, 0);
+    b.rotateZ(0.62 + Math.sin(ang) * 0.18);
+    b.rotateY(ang);
+    b.translate(Math.sin(ang * 1.7) * 0.2, y, Math.cos(ang * 1.3) * 0.2);
+    parts.push(b.toNonIndexed());
+  }
+  const trunkMerged = mergeGeometries(parts)!;
+
+  // --- copa: 3 racimos de tarjetas cruzadas con follaje ---
+  const cards: THREE.BufferGeometry[] = [];
+  const clusters: [number, number, number, number][] = [
+    // [x, y, z, radio]
+    [0.15, 5.4, 0.55, 2.15], [1.15, 4.9, -0.5, 1.75], [-0.95, 5.0, -0.35, 1.65],
+  ];
+  for (const [cx, cy, cz, R] of clusters) {
+    const n = 9;
+    for (let i = 0; i < n; i++) {
+      const card = new THREE.PlaneGeometry(R * 1.5, R * 1.5, 1, 1);
+      const a = (i / n) * Math.PI * 2;
+      const rr = R * 0.32;
+      card.translate(0, R * 0.42, 0); // pivote abajo
+      card.rotateX((Math.sin(a * 3.1) * 0.5) - 0.25);
+      card.rotateY(a);
+      card.translate(cx + Math.cos(a) * rr, cy + (i % 3) * R * 0.34, cz + Math.sin(a) * rr);
+      cards.push(card.toNonIndexed());
+    }
+  }
+  const canopy = mergeGeometries(cards)!;
+  canopy.computeVertexNormals();
+  return { trunk: trunkMerged, canopy };
+}
+
+/**
+ * GEOMETRÍA DE PINO REALISTA: tronco fino + 4 pisos de tarjetas de
+ * acículas en silueta cónica. Altura ~8 m.
+ */
+export function buildPineGeos(): { trunk: THREE.BufferGeometry; canopy: THREE.BufferGeometry } {
+  const trunk = new THREE.CylinderGeometry(0.1, 0.3, 5.2, 8, 3);
+  trunk.translate(0, 2.6, 0);
+  const cards: THREE.BufferGeometry[] = [];
+  const tiers: [number, number, number][] = [
+    // [y, radio, cards]
+    [2.6, 2.0, 7], [3.9, 1.65, 7], [5.1, 1.3, 6], [6.2, 0.92, 5], [7.1, 0.55, 4],
+  ];
+  let idx = 0;
+  for (const [y, R, n] of tiers) {
+    for (let i = 0; i < n; i++) {
+      const a = ((i + idx * 0.35) / n) * Math.PI * 2;
+      const card = new THREE.PlaneGeometry(R * 1.7, R * 1.15, 1, 1);
+      card.translate(0, 0, 0);
+      card.rotateX(-0.42 - (idx % 2) * 0.16); // inclinación hacia abajo
+      card.translate(0, R * 0.18, 0);
+      card.rotateY(a);
+      card.translate(0, y, 0);
+      cards.push(card.toNonIndexed());
+    }
+    idx++;
+  }
+  const canopy = mergeGeometries(cards)!;
+  canopy.computeVertexNormals();
+  return { trunk: trunk.toNonIndexed(), canopy };
+}
+
+/** Arbusto: mata baja de tarjetas de follaje (~1.1 m) */
+export function bushGeo(): THREE.BufferGeometry {
+  const cards: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2 + Math.sin(i * 3.7);
+    const card = new THREE.PlaneGeometry(1.05, 0.85, 1, 1);
+    card.translate(0, 0.36, 0);
+    card.rotateX(-0.2 + Math.sin(i * 2.3) * 0.3);
+    card.rotateY(a);
+    card.translate(Math.cos(a) * 0.22, 0, Math.sin(a) * 0.22);
+    cards.push(card.toNonIndexed());
+  }
+  const g = mergeGeometries(cards)!;
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Tronco caído (leño) con corteza PBR, ~2.4 m en el suelo */
+export function logGeo(): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(0.21, 0.28, 2.4, 9, 2);
+  g.rotateZ(Math.PI / 2);
+  g.translate(0, 0.24, 0);
+  // extremo superior irregular
+  const p = g.getAttribute('position') as THREE.BufferAttribute;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    if (x > 1.0) { p.setY(i, p.getY(i) + 0.02 * Math.sin(p.getZ(i) * 9)); }
+  }
+  g.computeVertexNormals();
+  return g.toNonIndexed();
+}
+
+/** Roca realista: icosaedro desplazado con ruido (irregular) */
+export function rockRealGeo(): THREE.BufferGeometry {
+  const g = new THREE.IcosahedronGeometry(1, 1).toNonIndexed();
+  const p = g.getAttribute('position') as THREE.BufferAttribute;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const n = Math.sin(x * 5.3 + z * 3.1) * Math.cos(y * 4.7 - x * 2.3);
+    const k = 1 + n * 0.16;
+    p.setXYZ(i, x * k, y * (k * 0.78), z * k);
+  }
+  g.computeVertexNormals();
+  return g;
 }
 
 /** Seta luminosa (para instanciar en grupos) */

@@ -94,7 +94,7 @@ export function terrainHeight(x: number, z: number): number {
   }
   // Borde del mundo: muralla natural
   const r = Math.hypot(x, z);
-  if (r > WORLD.radius - 10) h += ((r - (WORLD.radius - 10)) / 10) * 14;
+  if (r > WORLD.radius - 10) h += ((r - (WORLD.radius - 10)) / 10) * 9;
   return h;
 }
 
@@ -188,8 +188,8 @@ export interface GameRefs {
 }
 
 export const ENEMY_NAMES: Record<string, string> = {
-  goblin: 'Goblin Saqueador',
-  archer: 'Arquero Esquelético',
+  goblin: 'Bruto Tribal',
+  archer: 'Espectro Errante',
   orc: 'Orco Brutal',
-  boss: "Bel'Zaroth, el Caballero Caído",
+  boss: "Bel'Zaroth, el Señor Caído",
 };

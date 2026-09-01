@@ -14,21 +14,21 @@ import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
-import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, type CharacterPack } from './characters';
+import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, monsterAttackTimings, type CharacterPack, type EnemyVariant } from './characters';
 import { drawMinimap } from './minimap';
 
 export type QualityTier = 'bajo' | 'medio' | 'alto';
 
-/* Grading final estilo anime: limpio, saturado, sin grano notable */
+/* Grading final cinematográfico: contraste S suave, viñeta, grano, CA */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
-    uVignette: { value: 0.30 },
-    uGrain: { value: 0.012 },
-    uCA: { value: 0.0006 },
-    uSat: { value: 1.06 },
-    uCon: { value: 1.04 },
+    uVignette: { value: 0.34 },
+    uGrain: { value: 0.013 },
+    uCA: { value: 0.0009 },
+    uSat: { value: 1.04 },
+    uCon: { value: 1.06 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
@@ -47,12 +47,50 @@ const GradeShader = {
       col.b = texture2D(tDiffuse, uv - off).b;
       float l = dot(col, vec3(0.299, 0.587, 0.114));
       col = mix(vec3(l), col, uSat);
+      // curva S suave (sombras densas, altas luces limpias)
+      col = col * col * (3.0 - 2.0 * col) * 0.28 + col * 0.72;
       col = (col - 0.5) * uCon + 0.5;
       col *= 1.0 - uVignette * smoothstep(0.12, 0.72, r2);
       col += (hash(uv * vec2(1287.0, 731.0) + fract(uTime) * 43.7) - 0.5) * uGrain;
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`,
 };
+
+/* Onda expansiva en el suelo para impactos pesados (DMC) */
+class Shockwave {
+  mesh: THREE.Mesh;
+  private t = 0;
+  private maxR: number;
+  private mat: THREE.MeshBasicMaterial;
+  constructor(scene: THREE.Scene, pos: THREE.Vector3, color = 0xffd9a0, maxR = 3.4) {
+    this.maxR = maxR;
+    const geo = new THREE.RingGeometry(0.42, 0.62, 36);
+    geo.rotateX(-Math.PI / 2);
+    this.mat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    this.mesh = new THREE.Mesh(geo, this.mat);
+    this.mesh.position.copy(pos);
+    this.mesh.position.y += 0.12;
+    this.mesh.renderOrder = 8;
+    scene.add(this.mesh);
+  }
+  update(dt: number): boolean {
+    this.t += dt;
+    const k = this.t / 0.42;
+    if (k >= 1) return false;
+    const r = 0.4 + (this.maxR - 0.4) * (1 - Math.pow(1 - k, 2.4));
+    this.mesh.scale.setScalar(r);
+    this.mat.opacity = 0.85 * (1 - k) * (1 - k);
+    return true;
+  }
+  dispose(scene: THREE.Scene) {
+    scene.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    this.mat.dispose();
+  }
+}
 
 /* ============================================================
    GAME: orquestador principal (render, input, cámara, combate, fases)
@@ -142,6 +180,8 @@ export class Game {
   private timeScale = 1;
   private slowmoT = 0;
   private baseFov = 65;
+  private fovKickAmt = 0;
+  private shockwaves: Shockwave[] = [];
 
   // estado de juego
   phase: GamePhase = 'playing';
@@ -220,6 +260,17 @@ export class Game {
     this.scene.add(this.player.root);
     this.trail = new SwordTrail(this.scene);
 
+    // IBL fotográfico (HDRIs CC0 de Poly Haven vía three.js)
+    void this.world.loadHDRI();
+
+    // sincroniza dur/hitAt de los ataques enemigos con los clips reales
+    if (this.chars) {
+      for (const t of monsterAttackTimings(this.chars)) {
+        const atk = ENEMY_CFG[t.type as EnemyType]?.attacks[t.idx];
+        if (atk) { atk.dur = t.dur; atk.hitAt = t.hitAt; }
+      }
+    }
+
     // jugador frente a la hoguera
     const bx = WORLD.bonfire.x, bz = WORLD.bonfire.z + 3.4;
     this.player.pos.set(bx, terrainHeight(bx, bz), bz);
@@ -249,30 +300,39 @@ export class Game {
     }
 
     // post-procesado: MSAA + GTAO + bloom + tono + grading
+    // ?lite=1: pipeline mínimo para diagnóstico en entornos lentos
+    const lite = typeof location !== 'undefined' && new URLSearchParams(location.search).get('lite') === '1';
     const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
       type: THREE.HalfFloatType,
-      samples: 4,
+      samples: lite ? 0 : 4,
     });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    try {
-      const gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
-      if (typeof gtao.updateGtaoMaterial === 'function') {
-        gtao.updateGtaoMaterial({
-          radius: 0.4, distanceExponent: 1.2, thickness: 1.4,
-          scale: 0.85, samples: 12, screenSpaceRadius: false,
-          distanceFallOff: 1,
-        });
-      }
-      gtao.output = GTAOPass.OUTPUT.Default;
-      this.composer.addPass(gtao);
-      this.gtao = gtao;
-    } catch { this.gtao = null; }
+    if (!lite) {
+      try {
+        const gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
+        if (typeof gtao.updateGtaoMaterial === 'function') {
+          gtao.updateGtaoMaterial({
+            radius: 0.4, distanceExponent: 1.2, thickness: 1.4,
+            scale: 0.85, samples: 12, screenSpaceRadius: false,
+            distanceFallOff: 1,
+          });
+        }
+        gtao.output = GTAOPass.OUTPUT.Default;
+        this.composer.addPass(gtao);
+        this.gtao = gtao;
+      } catch { this.gtao = null; }
+    }
     const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.55, 0.9);
     this.composer.addPass(bloom);
     this.composer.addPass(new OutputPass());
     this.grade = new ShaderPass(GradeShader);
     this.composer.addPass(this.grade);
+    if (lite) {
+      this.renderer.setPixelRatio(0.7);
+      this.composer.setPixelRatio(0.7);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
+    }
 
     // capa de números de daño
     this.dmgLayer = document.createElement('div');
@@ -306,6 +366,14 @@ export class Game {
       playerHurt: () => { this.hurtFlash = 1; },
       gainItem: (def) => this.gainItem(def),
       nightFactor: 0,
+      fovKick: (deg) => { this.fovKickAmt = Math.min(7, this.fovKickAmt + deg); },
+      shockwave: (pos, color = 0xffd9a0, maxR = 3.4) => {
+        this.shockwaves.push(new Shockwave(this.scene, pos, color, maxR));
+        if (this.shockwaves.length > 8) {
+          const old = this.shockwaves.shift();
+          old?.dispose(this.scene);
+        }
+      },
     };
 
     this.phase = 'menu';
@@ -514,7 +582,7 @@ export class Game {
   private pixelRatioFor(q: QualityTier): number {
     if (q === 'bajo') return 0.85;
     if (q === 'medio') return 1.2;
-    return Math.min(window.devicePixelRatio, 1.75);
+    return Math.min(window.devicePixelRatio, 1.5);
   }
 
   setQuality(q: QualityTier) {
@@ -530,7 +598,8 @@ export class Game {
   private autoQuality(dt: number) {
     this.qualityTimer -= dt;
     if (this.qualityTimer > 0) return;
-    this.qualityTimer = 2.5;
+    // primer sondeo rápido para salir de arranques lentos (headless/GPU débil)
+    this.qualityTimer = this.fps < 30 && this.quality === 'alto' ? 1.2 : 2.5;
     if (this.fps < 42) {
       if (this.quality === 'alto') this.setQuality('medio');
       else if (this.quality === 'medio') this.setQuality('bajo');
@@ -564,7 +633,9 @@ export class Game {
   private spawnEnemy(type: EnemyType, x: number, z: number, guardianOf = -1): Enemy {
     const s = this.scaling();
     const e = new Enemy(type, new THREE.Vector3(x, 0, z), guardianOf, s.hp, s.dmg);
-    if (this.chars) e.attachGlb(createEnemyCharacter(this.chars, type));
+    if (this.chars?.monsters?.[type as EnemyVariant]) {
+      e.attachGlb(createEnemyCharacter(this.chars, type as EnemyVariant));
+    }
     this.enemies.push(e);
     this.scene.add(e.root);
     return e;
@@ -845,6 +916,19 @@ export class Game {
       if (this.stepDist > 2.2 && this.player.state !== 'roll' && this.player.state !== 'dead') {
         this.stepDist = 0;
         this.audio.footstep();
+        // polvo al correr (más denso esprintando)
+        if (this.player.moving) {
+          const n = this.player.sprinting ? 3 : 1;
+          for (let i = 0; i < n; i++) {
+            this.particles.spawn({
+              x: this.player.pos.x + rand(-0.25, 0.25),
+              y: this.player.pos.y + 0.08,
+              z: this.player.pos.z + rand(-0.25, 0.25),
+              vx: rand(-0.6, 0.6), vy: rand(0.3, 1.0), vz: rand(-0.6, 0.6),
+              color: 0x9a8a6a, size: rand(0.16, 0.3), life: 0.5, gravity: 0.5, drag: 2.2, glow: 0.35,
+            });
+          }
+        }
       }
       if (this.uiOpen) {
         // inventario abierto: mundo congelado, escena viva
@@ -1021,11 +1105,14 @@ export class Game {
 
     if (frozen) return;
 
-    // estela de espada
-    if (this.player.state === 'attack') {
-      const b = new THREE.Vector3(), ti = new THREE.Vector3();
-      this.player.swordPoints(b, ti);
-      this.trail.emit(b, ti);
+    // estela de espada (solo durante la ventana activa del tajo)
+    if (this.player.state === 'attack' && this.player.currentAttack) {
+      const prog = this.player.stateT / this.player.currentAttack.dur;
+      if (prog > 0.16 && prog < 0.85) {
+        const b = new THREE.Vector3(), ti = new THREE.Vector3();
+        this.player.swordPoints(b, ti);
+        this.trail.emit(b, ti);
+      }
     }
     this.trail.update(dt, this.player.state === 'attack');
 
@@ -1127,17 +1214,37 @@ export class Game {
         const dmg = def.dmg * p.dmgMul;
         e.takeDamage(dmg, p.pos, this.ctx, heavy);
         hitAny = true;
+        // chispas direccionales del impacto (DMC)
+        const hitPos = new THREE.Vector3(
+          e.pos.x - to.x * 0.3,
+          e.pos.y + e.rig.height * 0.55,
+          e.pos.z - to.z * 0.3,
+        );
         this.particles.burst({
-          x: e.pos.x - to.x * 0.3, y: e.pos.y + e.rig.height * 0.55, z: e.pos.z - to.z * 0.3,
-          count: heavy ? 14 : 8, speed: 5, color: 0xffd9a0, size: 0.2, life: 0.35, drag: 2, glow: 2.4, gravity: 4,
+          x: hitPos.x, y: hitPos.y, z: hitPos.z,
+          count: heavy ? 22 : 10, speed: heavy ? 7 : 5, color: 0xffd9a0,
+          size: heavy ? 0.26 : 0.2, life: 0.38, drag: 2, glow: 2.6, gravity: 4,
         });
+        if (heavy) {
+          this.particles.burst({
+            x: hitPos.x, y: hitPos.y, z: hitPos.z,
+            count: 12, speed: 4.5, color: 0xff8848, size: 0.3, life: 0.5, drag: 1.6, glow: 2.2, gravity: 2,
+          });
+        }
       }
     }
     if (hitAny) {
-      this.hitStopT = Math.max(this.hitStopT, heavy ? 0.11 : 0.07);
-      this.shakeAmt = Math.min(1.2, this.shakeAmt + (heavy ? 0.4 : 0.16));
-      if (heavy) this.audio.heavyHit();
-      else this.audio.hitMetal();
+      this.hitStopT = Math.max(this.hitStopT, heavy ? 0.13 : 0.07);
+      this.shakeAmt = Math.min(1.2, this.shakeAmt + (heavy ? 0.5 : 0.16));
+      if (heavy) {
+        this.audio.heavyHit();
+        this.fovKickAmt = Math.min(7, this.fovKickAmt + 4.5);
+        const impact = p.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(p.yaw), 0, Math.cos(p.yaw)), 1.7);
+        impact.y = terrainHeight(impact.x, impact.z);
+        this.ctx.shockwave(impact, 0xffc87d, 3.6);
+      } else {
+        this.audio.hitMetal();
+      }
     }
   }
 
@@ -1201,16 +1308,22 @@ export class Game {
     }
     this.camera.lookAt(lookAt);
 
-    // FOV dinámico al esprintar
-    const targetFov = this.baseFov + (this.player.sprinting ? 5 : 0);
+    // FOV dinámico: esprintar + golpes cinematográficos (DMC)
+    this.fovKickAmt = Math.max(0, this.fovKickAmt - dt * 22);
+    const targetFov = this.baseFov + (this.player.sprinting ? 5 : 0) + this.fovKickAmt;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov = damp(this.camera.fov, targetFov, 6, dt);
+      this.camera.fov = damp(this.camera.fov, targetFov, this.fovKickAmt > 0.5 ? 26 : 6, dt);
       this.camera.updateProjectionMatrix();
     }
   }
 
   private updateEffects(dt: number) {
     this.particles.update(dt, this.camera.position);
+    // ondas expansivas
+    for (const sw of this.shockwaves) {
+      if (!sw.update(dt)) sw.dispose(this.scene);
+    }
+    this.shockwaves = this.shockwaves.filter(sw => sw.mesh.parent !== null);
     // números de daño
     const w = window.innerWidth, h = window.innerHeight;
     const v = new THREE.Vector3();

@@ -3,7 +3,8 @@ import { clamp, dampAngle, damp, rand, randInt, terrainHeight, WORLD, ENEMY_NAME
 import { buildGoblinRig, buildArcherRig, buildOrcRig, buildBossRig, type HumanoidRig, type VisualRig } from './models';
 import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS } from './animations';
 import { Entity, type GameCtx } from './entities';
-import type { GlbCharacter } from './characters';
+import type { GlbCharacter, EnemyVariant } from './characters';
+import { monsterTimeScale } from './characters';
 
 /* ============================================================
    ENEMIGOS: IA por máquina de estados + jefe con fases
@@ -45,27 +46,27 @@ export const ENEMY_CFG: Record<EnemyType, EnemyCfg> = {
   goblin: {
     make: buildGoblinRig, hp: 36, dmg: 9, speed: 4.5, aggro: 15, radius: 0.5,
     xp: 22, gold: [4, 9], potionChance: 0.07, cooldown: 1.15, scale: 0.72,
-    attacks: [{ clip: 'enemySlash', dur: 0.85, hitAt: 0.66, dmg: 9, range: 2.1, arc: 2.0, impulse: 1.6, weight: 1 }],
+    attacks: [{ clip: 'attack1', dur: 0.85, hitAt: 0.53, dmg: 9, range: 2.1, arc: 2.0, impulse: 1.6, weight: 1 }],
   },
   archer: {
     make: buildArcherRig, hp: 30, dmg: 11, speed: 3.8, aggro: 26, radius: 0.5,
     xp: 26, gold: [5, 11], potionChance: 0.11, cooldown: 2.3, scale: 0.95,
     strafe: true, preferredRange: 14,
-    attacks: [{ clip: 'bowShot', dur: 0.9, hitAt: 0.45, dmg: 11, range: 30, arc: 6.3, impulse: 0, special: 'orbs', weight: 1 }],
+    attacks: [{ clip: 'cast', dur: 0.9, hitAt: 0.45, dmg: 11, range: 30, arc: 6.3, impulse: 0, special: 'orbs', weight: 1 }],
   },
   orc: {
     make: buildOrcRig, hp: 100, dmg: 21, speed: 2.8, aggro: 14, radius: 0.9,
     xp: 55, gold: [11, 20], potionChance: 0.22, cooldown: 1.8, scale: 1.42,
-    attacks: [{ clip: 'enemyOverhead', dur: 1.05, hitAt: 0.72, dmg: 21, range: 2.8, arc: 2.2, impulse: 2.4, weight: 1 }],
+    attacks: [{ clip: 'attack2', dur: 1.05, hitAt: 0.65, dmg: 21, range: 2.8, arc: 2.2, impulse: 2.4, weight: 1 }],
   },
   boss: {
     make: buildBossRig, hp: 780, dmg: 20, speed: 3.6, aggro: 40, radius: 1.15,
     xp: 420, gold: [120, 180], potionChance: 1, cooldown: 1.4, scale: 1.95,
     attacks: [
-      { clip: 'enemySlash', dur: 0.8, hitAt: 0.6, dmg: 20, range: 4.0, arc: 2.4, impulse: 2, weight: 3 },
-      { clip: 'bossSlam', dur: 1.25, hitAt: 0.75, dmg: 28, range: 5.0, arc: 6.3, impulse: 2.5, special: 'aoe', weight: 2 },
-      { clip: 'bossSpin', dur: 1.0, hitAt: 0.5, dmg: 22, range: 4.6, arc: 6.3, impulse: 2, special: 'spin', weight: 2, minPhase: 2 },
-      { clip: 'enemyOverhead', dur: 1.0, hitAt: 0.55, dmg: 14, range: 40, arc: 0, impulse: 0, special: 'orbs', weight: 2, minPhase: 2 },
+      { clip: 'attack1', dur: 0.8, hitAt: 0.46, dmg: 20, range: 4.0, arc: 2.4, impulse: 2, weight: 3 },
+      { clip: 'attack2', dur: 1.25, hitAt: 0.78, dmg: 28, range: 5.0, arc: 6.3, impulse: 2.5, special: 'aoe', weight: 2 },
+      { clip: 'attack1', dur: 1.0, hitAt: 0.45, dmg: 22, range: 4.6, arc: 6.3, impulse: 2, special: 'spin', weight: 2, minPhase: 2 },
+      { clip: 'cast', dur: 1.0, hitAt: 0.5, dmg: 14, range: 40, arc: 0, impulse: 0, special: 'orbs', weight: 2, minPhase: 2 },
     ],
   },
 };
@@ -159,8 +160,13 @@ export class Enemy extends Entity {
     this.bar.position.y = char.height + 0.45;
   }
 
-  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number } = {}) {
+  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number; timeScale?: number } = {}) {
     this.glb?.animator.play(name, opts);
+  }
+
+  /** timeScale del clip locomotor para casar el paso con la velocidad */
+  private glbTime(clip: string): number {
+    return this.glb ? monsterTimeScale(this.type as EnemyVariant, clip) : 1;
   }
 
   private rebuildFadeMats() {
@@ -278,12 +284,12 @@ export class Enemy extends Entity {
       }
       case 'dead': {
         this.stateT += dt;
-        const clip = CLIPS.death;
-        const k = clamp(this.stateT / clip.dur, 0, 1);
+        const deathDur = this.glb ? Math.max(0.9, this.glb.animator.clipDur('death') || 1.4) : CLIPS.death.dur;
+        const k = clamp(this.stateT / deathDur, 0, 1);
         if (this.glb) {
           this.anim('death', { once: true });
         } else {
-          this.applier.snap(sampleClip(clip, this.stateT), dt);
+          this.applier.snap(sampleClip(CLIPS.death, this.stateT), dt);
         }
         if (k >= 1) {
           // hundirse y desaparecer
@@ -292,7 +298,7 @@ export class Enemy extends Entity {
             m.transparent = true;
             m.opacity = Math.max(0, m.opacity - dt * 0.8);
           }
-          if (this.stateT > clip.dur + 2.2) this.removable = true;
+          if (this.stateT > deathDur + 2.2) this.removable = true;
         }
         return;
       }
@@ -300,10 +306,12 @@ export class Enemy extends Entity {
         this.stateT += dt;
         if (this.glb) {
           this.anim('hurt');
+          const hurtDur = Math.max(0.45, Math.min(0.85, this.glb.animator.clipDur('hurt') || 0.7));
+          if (this.stateT >= hurtDur) { this.state = 'chase'; this.stateT = 0; }
         } else {
           this.applier.snap(sampleClip(CLIPS.hurt, Math.min(this.stateT, CLIPS.hurt.dur)), dt);
+          if (this.stateT >= CLIPS.hurt.dur) { this.state = 'chase'; this.stateT = 0; }
         }
-        if (this.stateT >= CLIPS.hurt.dur) { this.state = 'chase'; this.stateT = 0; }
         break;
       }
       case 'idle':
@@ -337,7 +345,7 @@ export class Enemy extends Entity {
             this.pos.addScaledVector(toT, cfg.speed * 0.4 * dt);
             this.yaw = dampAngle(this.yaw, Math.atan2(toT.x, toT.z), 6, dt);
             this.runPhase += dt * 0.5;
-            if (this.glb) this.anim('walk', { fade: 0.3 });
+            if (this.glb) this.anim('walk', { fade: 0.3, timeScale: this.glbTime('walk') });
             else this.applier.apply(runPose(this.runPhase, 0.5), dt);
             this.moving = true;
           }
@@ -364,7 +372,7 @@ export class Enemy extends Entity {
           const nightBoost = 1 + 0.12 * ctx.nightFactor; // de noche los enemigos aceleran
           this.pos.addScaledVector(dir, cfg.speed * nightBoost * (this.phase === 3 ? 1.2 : 1) * dt);
           this.runPhase += dt * (cfg.speed / 5);
-          if (this.glb) this.anim('run', { fade: 0.22 });
+          if (this.glb) this.anim('run', { fade: 0.22, timeScale: this.glbTime('run') });
           else this.applier.apply(runPose(this.runPhase, 1), dt);
           this.moving = true;
         } else {
@@ -392,7 +400,7 @@ export class Enemy extends Entity {
           move.normalize();
           this.pos.addScaledVector(move, cfg.speed * dt);
           this.runPhase += dt;
-          if (this.glb) this.anim('walk', { fade: 0.25 });
+          if (this.glb) this.anim('walk', { fade: 0.25, timeScale: this.glbTime('walk') });
           else this.applier.apply(runPose(this.runPhase, 0.8), dt);
           this.moving = true;
         } else {

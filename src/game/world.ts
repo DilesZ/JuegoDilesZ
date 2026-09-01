@@ -1,35 +1,28 @@
 import * as THREE from 'three';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { mulberry32, terrainHeight, WORLD, fbm, lerp } from './core';
 import {
   buildObelisk, buildBonfire, buildTorch, buildRuinedPillar, buildBrokenArch,
-  buildSigil, grassGeometry, grassMaterial, canopyMat, barkMat, stoneMat,
-  woodMat, emisMat, stdMat, mushroomGeos, toonMat, addOutlines,
+  buildSigil, grassGeometry, grassMaterial, canopyMat, pineCanopyMat,
+  buildOakGeos, buildPineGeos, bushGeo, logGeo, rockRealGeo,
+  barkMat, stoneMat, woodMat, emisMat, stdMat, mushroomGeos, toonMat,
   updateWindAndFlames, registerWind, type ToonMat,
 } from './models';
 import { Particles } from './particles';
 import {
-  terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex,
+  terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex, cloudPuffTexture,
   waterNormal, arenaFloorTexture, bannerTexture,
 } from './textures';
 import type { DayNightSample } from './daynight';
 
 /* ============================================================
-   MUNDO: cielo con aurora, terreno con senderos, vegetación con
-   viento, niebla rasante, luciérnagas, fuente lunar, santuarios
-   con haz de purificación y arena del jefe con estandartes.
+   MUNDO REALISTA: HDRI de PolyHaven/three.js para IBL, árboles con
+   tarjetas de follaje fotográficas, rocas PBR irregulares, nubes
+   billboard suaves, niebla exponencial y hoguera/santuarios/arena.
    ============================================================ */
 
 interface Collider { x: number; z: number; r: number }
-
-let _backMat: THREE.MeshBasicMaterial | null = null;
-/** Material de contorno de tinta para mallas instanciadas del mundo */
-function outlineBackMat(): THREE.MeshBasicMaterial {
-  if (!_backMat) {
-    _backMat = new THREE.MeshBasicMaterial({ color: 0x191322, side: THREE.BackSide });
-  }
-  return _backMat;
-}
 
 export interface ShrineState {
   idx: number;
@@ -114,11 +107,18 @@ export class World {
   private mistMul = 1.2; // multiplicador de niebla rasante
   private terrainMat: THREE.MeshStandardMaterial | null = null;
 
-  /* ---- nubes estilo anime (Ghibli) ---- */
-  private clouds: { mesh: THREE.Mesh; mat: ToonMat; speed: number; baseY: number }[] = [];
+  /* ---- nubes billboard fotorrealistas ---- */
+  private clouds: { sprite: THREE.Sprite; mat: THREE.SpriteMaterial; speed: number; baseY: number }[] = [];
+
+  /* ---- entornos HDRI (IBL) ---- */
+  private envDay: THREE.Texture | null = null;
+  private envDusk: THREE.Texture | null = null;
+  private envBucket = '';
+  private rendererRef: THREE.WebGLRenderer | null = null;
 
   constructor(scene: THREE.Scene, renderer?: THREE.WebGLRenderer) {
     this.scene = scene;
+    this.rendererRef = renderer ?? null;
     this.smoke = new Particles(scene, 420, 'alpha');
     this.fx = new Particles(scene, 500, 'additive');
     this.buildSky();
@@ -310,40 +310,45 @@ export class World {
     this.sunMat = mkSunSprite(64, 0.8, 0xfff3d0);
   }
 
-  /* ---------- Nubes cumulus estilo anime ---------- */
+  /* ---------- Nubes: billboards suaves con luz del sol ---------- */
 
   private buildClouds() {
     const rng = mulberry32(3141);
-    const puff = (r: number, sx: number, sy: number, x: number, y: number, z: number) => {
-      const s = new THREE.SphereGeometry(r, 10, 8);
-      s.scale(sx, sy, 1);
-      s.translate(x, y, z);
-      return s;
-    };
-    for (let i = 0; i < 11; i++) {
-      const parts: THREE.BufferGeometry[] = [];
-      const w = 7 + rng() * 9;
-      // base plana + bultos redondeados
-      parts.push(puff(w, 1.5, 0.55, 0, 0, 0));
-      const lobes = 3 + ((rng() * 3) | 0);
-      for (let k = 0; k < lobes; k++) {
-        const lx = (k / (lobes - 1) - 0.5) * w * 1.6;
-        const lr = w * (0.42 + rng() * 0.3);
-        parts.push(puff(lr, 1, 0.9, lx, lr * 0.42, (rng() - 0.5) * 2.4));
+    const tex = cloudPuffTexture();
+    for (let i = 0; i < 12; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: tex, color: 0xffffff, transparent: true, opacity: 0.9,
+        depthWrite: false, fog: false,
+      });
+      const group = new THREE.Group();
+      const puffs = 5 + ((rng() * 4) | 0);
+      const w = 26 + rng() * 30;
+      for (let p = 0; p < puffs; p++) {
+        const s = new THREE.Sprite(mat);
+        const sz = w * (0.42 + rng() * 0.4);
+        s.scale.set(sz, sz * (0.52 + rng() * 0.2), 1);
+        s.position.set(
+          (p / (puffs - 1) - 0.5) * w + (rng() - 0.5) * 6,
+          (rng() - 0.3) * w * 0.16,
+          (rng() - 0.5) * w * 0.22,
+        );
+        s.center.set(0.5, 0.28); // ancla abajo: base plana de nube
+        group.add(s);
       }
-      const geo = mergeGeometries(parts)!;
-      const mat = toonMat(0xffffff, { fog: false });
-      const mesh = new THREE.Mesh(geo, mat);
       const a = rng() * Math.PI * 2;
-      const r = 165 + rng() * 150;
-      const baseY = 72 + rng() * 30;
-      mesh.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
-      mesh.scale.setScalar(1.35 + rng() * 1.0);
-      mesh.rotation.y = rng() * Math.PI * 2;
-      this.scene.add(mesh);
-      this.clouds.push({ mesh, mat, speed: 0.5 + rng() * 0.9, baseY });
+      const r = 175 + rng() * 150;
+      const baseY = 78 + rng() * 34;
+      group.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
+      this.scene.add(group);
+      // guardamos el primer sprite para el tinte (material compartido por nube)
+      this.clouds.push({ sprite: group.children[0] as THREE.Sprite, mat, speed: 0.5 + rng() * 0.9, baseY });
+      (group as unknown as { userData: { speed: number } }).userData.speed = 0.5 + rng() * 0.9;
+      void group;
     }
+    // referencia a los grupos para deriva: reconstruimos con grupos almacenados
+    this.cloudGroups = this.clouds.map((c) => c.sprite.parent!);
   }
+  private cloudGroups: THREE.Object3D[] = [];
 
   /* ---------- Luces ---------- */
 
@@ -424,7 +429,7 @@ export class World {
       this.scene.fog.density = s.fogDensity;
     }
 
-    // nubes Ghibli: tinte según hora del día
+    // nubes billboard: tinte según hora del día
     for (const c of this.clouds) c.mat.color.copy(s.cloudTint);
 
     // agua de la Fuente Lunar
@@ -438,6 +443,11 @@ export class World {
     this.envIntensityTarget = s.envIntensity;
     const sc = this.scene as THREE.Scene & { environmentIntensity?: number };
     if (sc.environmentIntensity !== undefined) sc.environmentIntensity = s.envIntensity;
+    // IBL fotográfico por franja horaria (no-op si el HDRI no llegó)
+    this.pickEnvBucket(s.t, s.night);
+    // rotación del entorno para casar el sol del HDRI con el cielo
+    const envRot = this.scene as THREE.Scene & { environmentRotation?: THREE.Euler };
+    if (envRot.environmentRotation) envRot.environmentRotation.set(0, 2.4, 0);
   }
 
   /* ---------- Terreno con splat y senderos ---------- */
@@ -453,21 +463,22 @@ export class World {
       const x = pos.getX(i), z = pos.getZ(i);
       const h = terrainHeight(x, z);
       pos.setY(i, h);
-      // sombreado por pendiente + variación
+      // sombreado por pendiente + variación (contraste suave: evita facetas bajo luz rasante)
       const n = fbm(x * 0.11, z * 0.11, 3) * 0.5 + 0.5;
       const slope = 1 - Math.min(1, Math.abs(fbm(x * 0.05 + 31, z * 0.05 - 12, 2)) * 1.4);
-      const shade = (0.86 + n * 0.22) * lerp(0.82, 1, slope);
+      const shade = (0.93 + n * 0.12) * lerp(0.9, 1, slope);
       c.setRGB(shade, shade, shade);
       colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    // Terreno PBR moderno: splat con base fotográfica CC0 + normal de detalle
+    // Terreno PBR moderno: splat con base fotográfica CC0 + normal + roughness
     const mat = new THREE.MeshStandardMaterial({
       map: terrainSplat(),
       normalMap: pbrTex('grass_normal.jpg', { srgb: false, repeat: 46 }),
-      normalScale: new THREE.Vector2(0.6, 0.6),
-      roughness: 0.94,
+      roughnessMap: pbrTex('grass_rough.jpg', { srgb: false, repeat: 46 }),
+      normalScale: new THREE.Vector2(0.42, 0.42),
+      roughness: 1.0,
       metalness: 0,
       vertexColors: true,
     });
@@ -484,147 +495,120 @@ export class World {
     const rng = mulberry32(1337);
     const dummy = new THREE.Object3D();
     const tint = new THREE.Color();
+    const treeSpots: [number, number, number][] = []; // x, z, escala
 
-    // ==== Pinos: tronco + copa fusionada de 3 conos ====
-    const canopyGeo = (() => {
-      const parts: THREE.BufferGeometry[] = [];
-      const defs: [number, number, number][] = [ // [radio, alto, y]
-        [1.95, 3.1, 3.0], [1.5, 2.7, 4.7], [1.0, 2.3, 6.2],
-      ];
-      defs.forEach(([r, h, y], i) => {
-        const cone = new THREE.ConeGeometry(r, h, 8);
-        cone.rotateZ(((i * 53) % 7 - 3) * 0.03);
-        cone.translate(((i * 31) % 5 - 2) * 0.06, y, ((i * 17) % 5 - 2) * 0.06);
-        parts.push(cone);
-      });
-      return mergeGeometries(parts)!;
-    })();
-    const trunkGeo = new THREE.CylinderGeometry(0.2, 0.38, 3.2, 8);
-    trunkGeo.translate(0, 1.5, 0);
+    // ==== ROBLES reales: tronco PBR + copa de tarjetas de follaje ====
+    const oak = buildOakGeos();
+    const OAKS = 52;
+    const oakTrunks = new THREE.InstancedMesh(oak.trunk, barkMat(), OAKS);
+    const oakCanopy = new THREE.InstancedMesh(oak.canopy, canopyMat(0xffffff), OAKS);
+    oakTrunks.castShadow = oakCanopy.castShadow = true;
+    oakTrunks.receiveShadow = oakCanopy.receiveShadow = true;
 
-    const treeCount = 135;
-    const canopyM = canopyMat(0xffffff); // tono por instancia
-    const trunks = new THREE.InstancedMesh(trunkGeo, barkMat(), treeCount);
-    const canopies = new THREE.InstancedMesh(canopyGeo, canopyM, treeCount);
-    trunks.castShadow = canopies.castShadow = true;
-    trunks.receiveShadow = canopies.receiveShadow = true;
+    // ==== PINOS reales: acículas por pisos cónicos ====
+    const pine = buildPineGeos();
+    const PINES = 82;
+    const pineTrunks = new THREE.InstancedMesh(pine.trunk, barkMat(), PINES);
+    const pineCanopy = new THREE.InstancedMesh(pine.canopy, pineCanopyMat(0xffffff), PINES);
+    pineTrunks.castShadow = pineCanopy.castShadow = true;
+    pineTrunks.receiveShadow = pineCanopy.receiveShadow = true;
 
-    // contornos de tinta instanciados (siguen las mismas matrices)
-    const canopyOutlineGeo = (() => {
-      const g = canopyGeo.clone();
-      const pos = g.getAttribute('position') as THREE.BufferAttribute;
-      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.09, pos.getY(i) + nor.getY(i) * 0.09, pos.getZ(i) + nor.getZ(i) * 0.09);
-      }
-      g.computeBoundingSphere();
-      return g;
-    })();
-    const trunkOutlineGeo = (() => {
-      const g = trunkGeo.clone();
-      const pos = g.getAttribute('position') as THREE.BufferAttribute;
-      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.05, pos.getY(i) + nor.getY(i) * 0.05, pos.getZ(i) + nor.getZ(i) * 0.05);
-      }
-      g.computeBoundingSphere();
-      return g;
-    })();
-    const canopyOutlines = new THREE.InstancedMesh(canopyOutlineGeo, outlineBackMat(), treeCount);
-    const trunkOutlines = new THREE.InstancedMesh(trunkOutlineGeo, outlineBackMat(), treeCount);
-    canopyOutlines.frustumCulled = trunkOutlines.frustumCulled = false;
-
-    // ==== Árboles muertos (cerca de ruinas/santuarios) ====
-    const deadGeo = (() => {
-      const parts: THREE.BufferGeometry[] = [];
-      const trunk = new THREE.CylinderGeometry(0.14, 0.3, 3.6, 7);
-      trunk.translate(0, 1.8, 0);
-      parts.push(trunk);
-      for (let i = 0; i < 4; i++) {
-        const b = new THREE.CylinderGeometry(0.05, 0.09, 1.5 + (i % 2) * 0.5, 5);
-        b.translate(0, 0.7, 0);
-        b.rotateZ(0.7 + (i % 2) * 0.5);
-        b.rotateY(i * 1.65);
-        b.translate(0, 2.2 + (i % 3) * 0.45, 0);
-        parts.push(b);
-      }
-      return mergeGeometries(parts)!;
-    })();
-    const deadMat = toonMat(0x6e5a48);
-    const deadCount = 34;
-    const dead = new THREE.InstancedMesh(deadGeo, deadMat, deadCount);
-    dead.castShadow = true; dead.receiveShadow = true;
-
-    // ==== Rocas ====
-    const rockCount = 95;
-    const rockGeo = new THREE.DodecahedronGeometry(1, 0);
-    const rocks = new THREE.InstancedMesh(rockGeo, stoneMat(), rockCount);
-    rocks.castShadow = rocks.receiveShadow = true;
-    const rockOutlineGeo = (() => {
-      const g = rockGeo.clone();
-      const pos = g.getAttribute('position') as THREE.BufferAttribute;
-      const nor = g.getAttribute('normal') as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        pos.setXYZ(i, pos.getX(i) + nor.getX(i) * 0.06, pos.getY(i) + nor.getY(i) * 0.06, pos.getZ(i) + nor.getZ(i) * 0.06);
-      }
-      g.computeBoundingSphere();
-      return g;
-    })();
-    const rockOutlines = new THREE.InstancedMesh(rockOutlineGeo, outlineBackMat(), rockCount);
-    rockOutlines.frustumCulled = false;
-
-    // colocación de árboles/rocas
-    let placed = 0, deadPlaced = 0, guard = 0;
-    const deadSpots: [number, number][] = [];
-    while (placed < treeCount && guard++ < 6000) {
+    let oakPlaced = 0, pinePlaced = 0, guard = 0;
+    while ((oakPlaced < OAKS || pinePlaced < PINES) && guard++ < 9000) {
       const a = rng() * Math.PI * 2;
       const r = 18 + rng() * (WORLD.radius - 24);
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       if (this.nearCamp(x, z, 14)) continue;
       const h = terrainHeight(x, z);
       if (h > 7.5) continue;
-      const s = 0.8 + rng() * 1.15;
-      dummy.position.set(x, h - 0.1, z);
-      dummy.scale.set(s, s * (0.92 + rng() * 0.2), s);
-      dummy.rotation.y = rng() * Math.PI * 2;
-      dummy.updateMatrix();
-      trunks.setMatrixAt(placed, dummy.matrix);
-      canopies.setMatrixAt(placed, dummy.matrix);
-      const tone = 0.8 + rng() * 0.4;
-      // verde anime vivo con variación (sin llegar a neón)
-      tint.setRGB(0.34 + rng() * 0.18, 0.78 + rng() * 0.16, 0.40 + rng() * 0.16);
-      canopies.setColorAt(placed, tint);
-      tint.setRGB(tone * 0.78, tone * 0.58, tone * 0.42);
-      trunks.setColorAt(placed, tint);
-      this.colliders.push({ x, z, r: 0.55 * s });
-      // algunos árboles muertos acompañando
-      if (deadPlaced < deadCount && rng() < 0.22) {
-        const dx = x + (rng() - 0.5) * 7, dz = z + (rng() - 0.5) * 7;
-        if (!this.nearCamp(dx, dz, 12)) {
-          const dh = terrainHeight(dx, dz);
-          if (dh < 8) {
-            dummy.position.set(dx, dh - 0.05, dz);
-            dummy.scale.setScalar(0.8 + rng() * 0.9);
-            dummy.rotation.set((rng() - 0.5) * 0.14, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
-            dummy.updateMatrix();
-            dead.setMatrixAt(deadPlaced, dummy.matrix);
-            deadSpots.push([dx, dz]);
-            this.colliders.push({ x: dx, z: dz, r: 0.4 });
-            deadPlaced++;
-          }
-        }
+      const s = 0.85 + rng() * 0.55;
+      // los pinos toleran altura y pendientes; robles prefieren valle
+      const wantPine = h > 4.2 || rng() < 0.55;
+      if (wantPine && pinePlaced < PINES) {
+        dummy.position.set(x, h - 0.12, z);
+        dummy.scale.set(s, s * (0.95 + rng() * 0.35), s);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.updateMatrix();
+        pineTrunks.setMatrixAt(pinePlaced, dummy.matrix);
+        pineCanopy.setMatrixAt(pinePlaced, dummy.matrix);
+        // verde de acícula con variación natural
+        tint.setRGB(0.95 + rng() * 0.35, 1.05 + rng() * 0.3, 0.9 + rng() * 0.28);
+        pineCanopy.setColorAt(pinePlaced, tint);
+        pinePlaced++;
+      } else if (oakPlaced < OAKS) {
+        dummy.position.set(x, h - 0.1, z);
+        dummy.scale.set(s, s * (0.92 + rng() * 0.22), s);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.updateMatrix();
+        oakTrunks.setMatrixAt(oakPlaced, dummy.matrix);
+        oakCanopy.setMatrixAt(oakPlaced, dummy.matrix);
+        // verde de hoja caduca, variación amarillenta
+        const warm = rng();
+        tint.setRGB(1.05 + warm * 0.35, 1.12 + rng() * 0.28, 0.85 + rng() * 0.3);
+        oakCanopy.setColorAt(oakPlaced, tint);
+        oakPlaced++;
       }
-      placed++;
+      treeSpots.push([x, z, s]);
+      this.colliders.push({ x, z, r: 0.55 * s });
     }
-    trunks.count = canopies.count = placed;
-    dead.count = deadPlaced;
-    canopyOutlines.count = trunkOutlines.count = placed;
-    // los contornos copian las matrices ya colocadas
-    canopyOutlines.instanceMatrix.copy(canopies.instanceMatrix);
-    trunkOutlines.instanceMatrix.copy(trunks.instanceMatrix);
-    this.scene.add(trunks, canopies, dead, canopyOutlines, trunkOutlines);
+    oakTrunks.count = oakPlaced; oakCanopy.count = oakPlaced;
+    pineTrunks.count = pinePlaced; pineCanopy.count = pinePlaced;
+    if (oakCanopy.instanceColor) oakCanopy.instanceColor.needsUpdate = true;
+    if (pineCanopy.instanceColor) pineCanopy.instanceColor.needsUpdate = true;
+    this.scene.add(oakTrunks, oakCanopy, pineTrunks, pineCanopy);
 
-    // rocas
+    // ==== ARBUSTOS cerca de árboles ====
+    const BUSHES = 74;
+    const bushMesh = new THREE.InstancedMesh(bushGeo(), canopyMat(0xffffff), BUSHES);
+    bushMesh.castShadow = true; bushMesh.receiveShadow = true;
+    let b = 0; guard = 0;
+    while (b < BUSHES && guard++ < 4000) {
+      const spot = treeSpots[(rng() * treeSpots.length) | 0];
+      if (!spot) break;
+      const x = spot[0] + (rng() - 0.5) * 9, z = spot[1] + (rng() - 0.5) * 9;
+      if (this.nearCamp(x, z, 9)) continue;
+      const h = terrainHeight(x, z);
+      if (h > 7) continue;
+      const s = 0.6 + rng() * 0.85;
+      dummy.position.set(x, h - 0.03, z);
+      dummy.scale.set(s * (0.9 + rng() * 0.3), s, s * (0.9 + rng() * 0.3));
+      dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+      dummy.updateMatrix();
+      bushMesh.setMatrixAt(b, dummy.matrix);
+      tint.setRGB(1.0 + rng() * 0.3, 1.08 + rng() * 0.22, 0.88 + rng() * 0.26);
+      bushMesh.setColorAt(b, tint);
+      b++;
+    }
+    bushMesh.count = b;
+    if (bushMesh.instanceColor) bushMesh.instanceColor.needsUpdate = true;
+    this.scene.add(bushMesh);
+
+    // ==== TRONCOS CAÍDOS ====
+    const LOGS = 14;
+    const logs = new THREE.InstancedMesh(logGeo(), barkMat(), LOGS);
+    logs.castShadow = logs.receiveShadow = true;
+    let l = 0; guard = 0;
+    while (l < LOGS && guard++ < 2000) {
+      const a = rng() * Math.PI * 2;
+      const r = 16 + rng() * (WORLD.radius - 22);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (this.nearCamp(x, z, 12)) continue;
+      const h = terrainHeight(x, z);
+      if (h > 6.5) continue;
+      dummy.position.set(x, h, z);
+      dummy.rotation.set(0, rng() * Math.PI * 2, (rng() - 0.5) * 0.16);
+      dummy.scale.setScalar(0.8 + rng() * 0.7);
+      dummy.updateMatrix();
+      logs.setMatrixAt(l, dummy.matrix);
+      l++;
+    }
+    logs.count = l;
+    this.scene.add(logs);
+
+    // ==== Rocas PBR irregulares ====
+    const rockCount = 92;
+    const rocks = new THREE.InstancedMesh(rockRealGeo(), stoneMat(), rockCount);
+    rocks.castShadow = rocks.receiveShadow = true;
     let rocksPlaced = 0; guard = 0;
     while (rocksPlaced < rockCount && guard++ < 4000) {
       const a = rng() * Math.PI * 2;
@@ -632,27 +616,26 @@ export class World {
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       if (this.nearCamp(x, z, 10)) continue;
       const s = 0.4 + rng() * 1.7;
-      dummy.position.set(x, terrainHeight(x, z) + s * 0.22, z);
+      dummy.position.set(x, terrainHeight(x, z) + s * 0.2, z);
       dummy.scale.set(s * (0.9 + rng() * 0.4), s * 0.72, s * (0.9 + rng() * 0.4));
       dummy.rotation.set(rng() * 0.4, rng() * Math.PI * 2, rng() * 0.4);
       dummy.updateMatrix();
       rocks.setMatrixAt(rocksPlaced, dummy.matrix);
-      const tone = 0.86 + rng() * 0.22;
-      tint.setRGB(tone, tone * 1.0, tone * 1.12);
+      const tone = 1.05 + rng() * 0.32;
+      tint.setRGB(tone, tone * 0.99, tone * 1.05);
       rocks.setColorAt(rocksPlaced, tint);
-      rockOutlines.setMatrixAt(rocksPlaced, dummy.matrix);
       if (s > 0.9) this.colliders.push({ x, z, r: s * 0.9 });
       rocksPlaced++;
     }
     rocks.count = rocksPlaced;
-    rockOutlines.count = rocksPlaced;
-    this.scene.add(rocks, rockOutlines);
+    if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
+    this.scene.add(rocks);
 
-    // ==== Hierba instanciada con viento ====
-    const grassCount = 9000;
+    // ==== Hierba instanciada con viento + variación de tono ====
+    const grassCount = 16000;
     const grass = new THREE.InstancedMesh(grassGeometry(), grassMaterial(), grassCount);
     let gPlaced = 0; guard = 0;
-    while (gPlaced < grassCount && guard++ < 60000) {
+    while (gPlaced < grassCount && guard++ < 90000) {
       const a = rng() * Math.PI * 2;
       const r = Math.sqrt(rng()) * (WORLD.radius - 6);
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
@@ -660,14 +643,56 @@ export class World {
       if (h > 6.5) continue;
       if (this.nearCamp(x, z, 4.5)) continue;
       dummy.position.set(x, h - 0.02, z);
-      dummy.scale.setScalar(0.75 + rng() * 0.9);
+      dummy.scale.set(0.85 + rng() * 0.95, 0.9 + rng() * 1.05, 0.85 + rng() * 0.95);
       dummy.rotation.set(0, rng() * Math.PI * 2, 0);
       dummy.updateMatrix();
       grass.setMatrixAt(gPlaced, dummy.matrix);
+      const dry = rng();
+      tint.setRGB(0.85 + dry * 0.3, 0.95 + rng() * 0.12, 0.7 + dry * 0.28);
+      grass.setColorAt(gPlaced, tint);
       gPlaced++;
     }
     grass.count = gPlaced;
+    if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
     this.scene.add(grass);
+
+    // ==== Árboles muertos (silueta gótica cerca de ruinas) ====
+    const deadGeo = (() => {
+      const parts: THREE.BufferGeometry[] = [];
+      const trunk = new THREE.CylinderGeometry(0.14, 0.3, 3.6, 7);
+      trunk.translate(0, 1.8, 0);
+      parts.push(trunk.toNonIndexed());
+      for (let i = 0; i < 4; i++) {
+        const b = new THREE.CylinderGeometry(0.05, 0.09, 1.5 + (i % 2) * 0.5, 5);
+        b.translate(0, 0.7, 0);
+        b.rotateZ(0.7 + (i % 2) * 0.5);
+        b.rotateY(i * 1.65);
+        b.translate(0, 2.2 + (i % 3) * 0.45, 0);
+        parts.push(b.toNonIndexed());
+      }
+      return mergeGeometries(parts)!;
+    })();
+    const deadMat = toonMat(0x584a3c, { roughness: 0.95 });
+    const deadCount = 22;
+    const dead = new THREE.InstancedMesh(deadGeo, deadMat, deadCount);
+    dead.castShadow = true; dead.receiveShadow = true;
+    let deadPlaced = 0; guard = 0;
+    while (deadPlaced < deadCount && guard++ < 3000) {
+      const a = rng() * Math.PI * 2;
+      const r = 22 + rng() * (WORLD.radius - 30);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (this.nearCamp(x, z, 12)) continue;
+      const dh = terrainHeight(x, z);
+      if (dh > 8) continue;
+      dummy.position.set(x, dh - 0.05, z);
+      dummy.scale.setScalar(0.8 + rng() * 0.9);
+      dummy.rotation.set((rng() - 0.5) * 0.14, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
+      dummy.updateMatrix();
+      dead.setMatrixAt(deadPlaced, dummy.matrix);
+      deadPlaced++;
+    }
+    dead.count = deadPlaced;
+    this.scene.add(dead);
 
     // ==== Setas luminosas ====
     const { stem, cap } = mushroomGeos();
@@ -748,8 +773,6 @@ export class World {
     this.addTorchRing(WORLD.arena.x, WORLD.arena.z, WORLD.arena.r - 3, 6, rng, true);
     this.addTorch(WORLD.bonfire.x + 3.4, WORLD.bonfire.z - 2.4, terrainHeight(WORLD.bonfire.x + 3.4, WORLD.bonfire.z - 2.4), false);
     this.addTorch(WORLD.bonfire.x - 3.2, WORLD.bonfire.z - 2.8, terrainHeight(WORLD.bonfire.x - 3.2, WORLD.bonfire.z - 2.8), false);
-
-    void deadSpots;
   }
 
   private nearCamp(x: number, z: number, margin: number): boolean {
@@ -1085,16 +1108,9 @@ export class World {
       this.colliders.push({ x: px, z: pz, r: 0.6 });
     }
     // estandartes raídos
-    const bannerMat = new THREE.MeshToonMaterial({
+    const bannerMat = new THREE.MeshStandardMaterial({
       map: bannerTexture(), transparent: true, alphaTest: 0.3,
-      side: THREE.DoubleSide, gradientMap: (() => {
-        const v = new Uint8Array([140, 140, 140, 255, 210, 210, 210, 255, 255, 255, 255, 255]);
-        const t = new THREE.DataTexture(v, 3, 1, THREE.RGBAFormat);
-        t.minFilter = t.magFilter = THREE.NearestFilter;
-        t.colorSpace = THREE.NoColorSpace;
-        t.needsUpdate = true;
-        return t;
-      })(),
+      side: THREE.DoubleSide, roughness: 0.9, metalness: 0,
     });
     registerWind(bannerMat, 0.09, 'bottom');
     for (let i = 0; i < 6; i++) {
@@ -1150,6 +1166,43 @@ export class World {
 
   /* ---------- Environment map para reflejos PBR ---------- */
 
+  /** Carga HDRIs (día = amanecer Blouberg, atardecer = Venice Sunset)
+   *  y genera PMREM para IBL fotorrealista. Fallback: cúpula procedural. */
+  async loadHDRI(): Promise<void> {
+    if (!this.rendererRef) return;
+    const loader = new RGBELoader();
+    const pmrem = new THREE.PMREMGenerator(this.rendererRef);
+    const grab = async (file: string): Promise<THREE.Texture | null> => {
+      try {
+        const tex = await new Promise<THREE.Texture>((res, rej) =>
+          loader.load(`/assets/env/${file}`, res, undefined, rej));
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        const rt = pmrem.fromEquirectangular(tex);
+        tex.dispose();
+        return rt.texture;
+      } catch {
+        return null;
+      }
+    };
+    this.envDay = await grab('blouberg_sunrise_2_1k.hdr');
+    this.envDusk = await grab('venice_sunset_1k.hdr');
+    pmrem.dispose();
+    this.envBucket = ''; // fuerza re-selección en el próximo applyDayNight
+    if (!this.envDay) {
+      console.warn('[AETHERIA] HDRI no disponible — se usa la cúpula procedural');
+    }
+  }
+
+  /** Selecciona el entorno IBL según hora del día (buckets: día/atardecer/noche) */
+  private pickEnvBucket(t: number, night: number) {
+    const bucket = night > 0.62 ? 'noche' : (t > 0.66 && t < 0.82) || (t > 0.22 && t < 0.33) ? 'atardecer' : 'día';
+    if (bucket === this.envBucket) return;
+    this.envBucket = bucket;
+    const env = bucket === 'noche' ? null : bucket === 'atardecer' ? (this.envDusk ?? this.envDay) : (this.envDay ?? this.envDusk);
+    if (env) this.scene.environment = env;
+    // de noche la cúpula procedural (ya asignada en buildEnvironmentMap) gobierna
+  }
+
   private buildEnvironmentMap(renderer: THREE.WebGLRenderer) {
     try {
       const env = new THREE.Scene();
@@ -1194,11 +1247,13 @@ export class World {
     this.waterTime.value = this.time;
     updateWindAndFlames(this.time);
 
-    // deriva lenta de las nubes anime
-    for (const c of this.clouds) {
-      c.mesh.position.x += c.speed * dt;
-      c.mesh.position.y = c.baseY + Math.sin(this.time * 0.11 + c.baseY) * 1.6;
-      if (c.mesh.position.x > 320) c.mesh.position.x = -320;
+    // deriva lenta de las nubes billboard
+    for (let i = 0; i < this.cloudGroups.length; i++) {
+      const g = this.cloudGroups[i];
+      const spd = this.clouds[i].speed;
+      g.position.x += spd * dt;
+      g.position.y = this.clouds[i].baseY + Math.sin(this.time * 0.11 + this.clouds[i].baseY) * 1.6;
+      if (g.position.x > 340) g.position.x = -340;
     }
 
     // la luz activa (sol de día / luna de noche) sigue al jugador

@@ -723,7 +723,7 @@ export default function Home() {
 
               <p className="font-body text-stone-400 text-[13.5px] leading-relaxed max-w-lg mx-auto">
                 La luna sangra sobre las ruinas de Aetheria. Tres santuarios corruptos alimentan
-                la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Caballero Caído.
+                la fuerza de <span className="text-red-300">Bel&apos;Zaroth</span>, el Señor Caído.
                 Purifícalos, crece en poder y derriba al señor de la noche en su arena.
               </p>
               <p className="font-body text-amber-200/70 text-[12px] leading-relaxed max-w-lg mx-auto mt-2">
@@ -768,7 +768,7 @@ export default function Home() {
                 El ciclo día y noche comienza al alba · La noche acelera a tus enemigos
               </div>
               <div className="mt-4 text-[10px] text-stone-600 leading-relaxed">
-                Arte y sonido: ambientCG (CC0) · Kenney (CC0) · Little Robot Sound Factory (CC-BY 3.0) · Cleyton Kauffman · Fuentes: Google Fonts (OFL)
+                Arte: ambientCG · Poly Haven · Quaternius Ultimate Monsters (CC0) · Ready Player Me (uso con avatar RPM) · Sonido: Kenney · Little Robot Sound Factory (CC-BY 3.0) · Cleyton Kauffman · Fuentes: Google Fonts (OFL)
               </div>
             </div>
           </div>
@@ -806,7 +806,7 @@ export default function Home() {
             <h2 className="font-gothic text-7xl text-red-500 tracking-[0.12em] drop-shadow-[0_0_40px_rgba(220,38,38,0.5)] animate-pulse">
               HAS CAÍDO
             </h2>
-            <p className="text-stone-400 mt-4 text-sm italic">La hoguera aún arde por ti, caballero…</p>
+            <p className="text-stone-400 mt-4 text-sm italic">La hoguera aún arde por ti, guerrero…</p>
             <div className="flex gap-6 justify-center mt-8 text-sm text-stone-300">
               <span>Nivel <b className="text-amber-300">{hud.level}</b></span>
               <span>Bajas <b className="text-amber-300">{hud.kills}</b></span>

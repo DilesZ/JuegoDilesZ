@@ -137,10 +137,12 @@ export function terrainSplat(): THREE.CanvasTexture {
           const jitter = (rng() - 0.5) * 12;
           let r = col[0] + jitter, g = col[1] + jitter * 1.1, b = col[2] + jitter * 0.6;
           const rr = Math.hypot(wx, wz);
-          if (rr > 78) {
-            const t = Math.min(1, (rr - 78) / 16);
+          if (rr > 70) {
+            // corona rocosa del borde: mezcla COMPLETA en la base (evita mosaico)
+            const t = Math.min(1, (rr - 70) / 8);
             const rc = n2 > 0.5 ? rock : rockDark;
-            r = r + (rc[0] - r) * t; g = g + (rc[1] - g) * t; b = b + (rc[2] - b) * t;
+            const gr = (rng() - 0.5) * 26;
+            r = r + (rc[0] + gr - r) * t; g = g + (rc[1] + gr - g) * t; b = b + (rc[2] + gr - b) * t;
           }
           ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
           ctx.fillRect(cx, cy, cell, cell);
@@ -237,21 +239,28 @@ export function terrainSplat(): THREE.CanvasTexture {
     ctx.globalAlpha = 0.62;
     const tile = (6.5) * px; // celda de ~6.5 m
     for (let y = 0; y < S; y += tile) {
-      for (let x = 0; x < S; x += tile) ctx.drawImage(img, x, y, tile + 1, tile + 1);
+      for (let x = 0; x < S; x += tile) {
+        // no estampar la foto en la corona rocosa del borde (evita mosaico visible)
+        const wx = ((x + tile / 2) / S) * WORLD_TEX_SIZE - 100;
+        const wz = ((y + tile / 2) / S) * WORLD_TEX_SIZE - 100;
+        if (Math.hypot(wx, wz) > 74) continue;
+        ctx.drawImage(img, x, y, tile + 1, tile + 1);
+      }
     }
     ctx.restore();
-    // roca en la corona del mundo (encima de la foto)
+    // roca en la corona del mundo (encima de la foto), con borde suave y grano
     const rng2 = mulberry32(99);
     ctx.save();
-    for (let cy = 0; cy < S; cy += 30) {
-      for (let cx = 0; cx < S; cx += 30) {
+    for (let cy = 0; cy < S; cy += 7) {
+      for (let cx = 0; cx < S; cx += 7) {
         const wx = (cx / S) * WORLD_TEX_SIZE - 100;
         const wz = (cy / S) * WORLD_TEX_SIZE - 100;
         const rr = Math.hypot(wx, wz);
-        if (rr > 78) {
-          const t = Math.min(1, (rr - 78) / 16);
-          ctx.fillStyle = `rgba(${rock[0]},${rock[1]},${rock[2]},${0.72 * t})`;
-          ctx.fillRect(cx + (rng2() - 0.5) * 8, cy + (rng2() - 0.5) * 8, 30, 30);
+        if (rr > 75) {
+          const t = Math.min(1, (rr - 75) / 15);
+          const shade = 0.72 + rng2() * 0.56;
+          ctx.fillStyle = `rgba(${(rock[0] * shade) | 0},${(rock[1] * shade) | 0},${(rock[2] * shade) | 0},${0.95 * t})`;
+          ctx.fillRect(cx + (rng2() - 0.5) * 9, cy + (rng2() - 0.5) * 9, 10, 10);
         }
       }
     }
@@ -454,16 +463,16 @@ export function woodMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasT
   return { map, normalMap };
 }
 
-/** Hoja de hierba con alpha (para matas instanciadas) */
+/** Hoja de hierba con alpha (para matas instanciadas) — tono natural PBR */
 export function grassBladeTexture(): THREE.CanvasTexture {
   if (cache.has('blade')) return cache.get('blade')!;
   const W = 64, H = 64;
   const [c, ctx] = makeCanvas(W, H);
   ctx.clearRect(0, 0, W, H);
   const g = ctx.createLinearGradient(0, H, 0, 0);
-  g.addColorStop(0, '#2f7a26');
-  g.addColorStop(0.55, '#58b03a');
-  g.addColorStop(1, '#98e060');
+  g.addColorStop(0, '#3a5a28');
+  g.addColorStop(0.55, '#5e7c34');
+  g.addColorStop(1, '#93a04a');
   ctx.fillStyle = g;
   // hoja curvada
   ctx.beginPath();
@@ -473,8 +482,182 @@ export function grassBladeTexture(): THREE.CanvasTexture {
   ctx.quadraticCurveTo(W * 0.5 + 6, H * 0.5, W * 0.5 + 9, H);
   ctx.closePath();
   ctx.fill();
+  // nervadura central sutil
+  ctx.strokeStyle = 'rgba(255,255,240,0.10)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(W * 0.5, H);
+  ctx.quadraticCurveTo(W * 0.5 + 2, H * 0.5, W * 0.5 + 1, 3);
+  ctx.stroke();
   const t = toTexture(c, true, false);
   cache.set('blade', t);
+  return t;
+}
+
+/* ============================================================
+   VEGETACIÓN FOTORREALISTA (tarjetas alpha para árboles reales)
+   ============================================================ */
+
+/**
+ * Tarjeta de FOLLAJE de caducifolio con alpha: racimo de decenas de
+ * hojas pequeñas con variación de tono, oclusión hacia el interior
+ * y brillos solares en el borde. Se usa en tarjetas cruzadas por copa.
+ */
+export function foliageTexture(seed = 1): THREE.CanvasTexture {
+  const key = `foliage${seed}`;
+  if (cache.has(key)) return cache.get(key)!;
+  const S = 512;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+  const rng = mulberry32(seed * 977 + 13);
+  const cx = S / 2, cy = S / 2;
+  // base oscura de interior (profundidad de copa)
+  const base = ctx.createRadialGradient(cx, cy, S * 0.08, cx, cy, S * 0.48);
+  base.addColorStop(0, 'rgba(46,70,32,0.95)');
+  base.addColorStop(0.7, 'rgba(56,84,40,0.55)');
+  base.addColorStop(1, 'rgba(56,84,40,0)');
+  ctx.fillStyle = base;
+  ctx.beginPath(); ctx.arc(cx, cy, S * 0.48, 0, Math.PI * 2); ctx.fill();
+
+  const leaf = (x: number, y: number, rot: number, sz: number, tone: number, light: number) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    // hoja = elipse puntiaguda con nervadura
+    ctx.beginPath();
+    ctx.moveTo(0, -sz);
+    ctx.bezierCurveTo(sz * 0.55, -sz * 0.45, sz * 0.5, sz * 0.45, 0, sz);
+    ctx.bezierCurveTo(-sz * 0.5, sz * 0.45, -sz * 0.55, -sz * 0.45, 0, -sz);
+    ctx.closePath();
+    const r = (58 + tone * 42) | 0, g = (102 + tone * 64 + light * 52) | 0, b = (38 + tone * 30) | 0;
+    ctx.fillStyle = `rgba(${r},${g},${b},${0.72 + light * 0.28})`;
+    ctx.fill();
+    if (light > 0.62) {
+      ctx.strokeStyle = `rgba(215,240,160,${(light - 0.62) * 0.9})`;
+      ctx.lineWidth = 1.1;
+      ctx.beginPath(); ctx.moveTo(0, -sz * 0.7); ctx.lineTo(0, sz * 0.7); ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  // capas de dentro (oscuro) → fuera (claro)
+  const layers = 5;
+  for (let l = 0; l < layers; l++) {
+    const frac = l / (layers - 1);
+    const count = 26 + l * 14;
+    const radMax = S * (0.14 + frac * 0.33);
+    for (let i = 0; i < count; i++) {
+      const a = rng() * Math.PI * 2;
+      const rr = Math.sqrt(rng()) * radMax;
+      const x = cx + Math.cos(a) * rr;
+      const y = cy + Math.sin(a) * rr * 0.92;
+      const edge = rr / Math.max(1, radMax);
+      const light = Math.min(1, frac * 0.75 + edge * 0.5 + rng() * 0.22);
+      leaf(x, y, rng() * Math.PI * 2, S * (0.028 + rng() * 0.026), rng(), light);
+    }
+  }
+  // ramitas visibles asomando
+  ctx.strokeStyle = 'rgba(52,38,26,0.8)';
+  for (let i = 0; i < 7; i++) {
+    const a = rng() * Math.PI * 2;
+    const rr = S * (0.18 + rng() * 0.26);
+    ctx.lineWidth = 2 + rng() * 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * rr * 0.3, cy + Math.sin(a) * rr * 0.3);
+    ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    ctx.stroke();
+  }
+  const t = toTexture(c, true, false);
+  cache.set(key, t);
+  return t;
+}
+
+/**
+ * Tarjeta de FOLLAJE DE PINO: ramas de acículas oscuras radiando,
+ * con puntas iluminadas. Para pinos realistas por capas.
+ */
+export function pineFoliageTexture(seed = 3): THREE.CanvasTexture {
+  const key = `pine${seed}`;
+  if (cache.has(key)) return cache.get(key)!;
+  const S = 512;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+  const rng = mulberry32(seed * 613 + 7);
+  const cx = S / 2, cy = S * 0.56;
+  // masa base de la copa (profundidad interior verde media)
+  const base = ctx.createRadialGradient(cx, cy, S * 0.06, cx, cy, S * 0.46);
+  base.addColorStop(0, 'rgba(40,64,38,0.97)');
+  base.addColorStop(0.65, 'rgba(48,76,44,0.6)');
+  base.addColorStop(1, 'rgba(48,76,44,0)');
+  ctx.fillStyle = base;
+  ctx.beginPath(); ctx.arc(cx, cy, S * 0.46, 0, Math.PI * 2); ctx.fill();
+  // rama central
+  ctx.strokeStyle = 'rgba(48,34,22,0.9)';
+  ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(cx, cy);
+  ctx.quadraticCurveTo(cx + (rng() - 0.5) * 40, cy - S * 0.3, cx, cy - S * 0.42);
+  ctx.stroke();
+  // haces de acículas (más claros y densos)
+  const needle = (x: number, y: number, a: number, len: number, light: number) => {
+    const nx = x + Math.cos(a) * len, ny = y + Math.sin(a) * len;
+    const g = 74 + light * 78;
+    ctx.strokeStyle = `rgba(${(30 + light * 30) | 0},${g | 0},${(30 + light * 22) | 0},${0.85 + light * 0.15})`;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(nx, ny); ctx.stroke();
+  };
+  for (let branch = 0; branch < 34; branch++) {
+    const ba = -Math.PI / 2 + (rng() - 0.5) * Math.PI * 1.25;
+    const bl = S * (0.12 + rng() * 0.22);
+    const bx = cx + Math.cos(ba + Math.PI / 2) * (rng() - 0.5) * 60;
+    const by = cy + Math.sin(ba + Math.PI / 2) * (rng() - 0.5) * 60;
+    const ex = bx + Math.cos(ba) * bl, ey = by + Math.sin(ba) * bl;
+    ctx.strokeStyle = 'rgba(50,36,24,0.85)';
+    ctx.lineWidth = 3.4;
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.stroke();
+    const n = 18 + (rng() * 12) | 0;
+    for (let i = 0; i < n; i++) {
+      const k = 0.2 + rng() * 0.8;
+      const px = bx + (ex - bx) * k, py = by + (ey - by) * k;
+      const side = rng() < 0.5 ? 1 : -1;
+      const na = ba + side * (0.55 + rng() * 1.0);
+      const light = Math.min(1, 0.25 + k * 0.45 + rng() * 0.45);
+      needle(px, py, na, S * (0.055 + rng() * 0.07), light);
+    }
+  }
+  const t = toTexture(c, true, false);
+  cache.set(key, t);
+  return t;
+}
+
+/** Pomponcloud suave para nubes billboard fotográficas */
+export function cloudPuffTexture(): THREE.CanvasTexture {
+  if (cache.has('puff')) return cache.get('puff')!;
+  const S = 256;
+  const [c, ctx] = makeCanvas(S, S);
+  const rng = mulberry32(4242);
+  // acumulación de blobs radiales (más densos abajo-plano)
+  for (let i = 0; i < 46; i++) {
+    const a = rng() * Math.PI * 2;
+    const rr = Math.sqrt(rng()) * S * 0.34;
+    const x = S / 2 + Math.cos(a) * rr;
+    const y = S / 2 + Math.sin(a) * rr * 0.62 - S * 0.04;
+    const r = S * (0.1 + rng() * 0.14) * (1 - rr / (S * 0.75));
+    const g = ctx.createRadialGradient(x, y, 0, x, y, Math.max(2, r));
+    const o = 0.16 + rng() * 0.13;
+    g.addColorStop(0, `rgba(255,255,255,${o})`);
+    g.addColorStop(0.65, `rgba(250,251,253,${o * 0.5})`);
+    g.addColorStop(1, 'rgba(250,251,253,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  // núcleo brillante superior
+  const core = ctx.createRadialGradient(S / 2, S * 0.4, 0, S / 2, S * 0.4, S * 0.32);
+  core.addColorStop(0, 'rgba(255,255,255,0.5)');
+  core.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = core;
+  ctx.beginPath(); ctx.arc(S / 2, S * 0.4, S * 0.32, 0, Math.PI * 2); ctx.fill();
+  const t = toTexture(c, true, false);
+  cache.set('puff', t);
   return t;
 }
 

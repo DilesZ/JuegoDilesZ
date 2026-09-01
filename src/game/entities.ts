@@ -46,6 +46,10 @@ export interface GameCtx {
   gainItem(def: ItemDef): void;
   /** 0 = pleno día, 1 = noche cerrada (los enemigos se vuelven más rápidos) */
   nightFactor: number;
+  /** Golpe de FOV cinematográfico (DMC): +grados que decaen solos */
+  fovKick(deg: number): void;
+  /** Onda expansiva en el suelo (impactos pesados, slams) */
+  shockwave(pos: THREE.Vector3, color?: number, maxR?: number): void;
 }
 
 export abstract class Entity {
@@ -232,7 +236,7 @@ export class Player extends Entity {
   }
 
   /** Reproduce un clip del animador GLB (no-op con rig procedural) */
-  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number } = {}) {
+  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number; timeScale?: number } = {}) {
     this.glb?.animator.play(name, opts);
   }
 
@@ -537,10 +541,27 @@ export class Player extends Entity {
         }
       }
       this.moving = hasMove;
-      // pose (GLB real con crossfade o procedural)
+      // pose (mocap GLB con crossfade o procedural)
       if (this.glb) {
-        if (hasMove) this.anim(this.sprinting ? 'run' : 'walk', { fade: 0.22 });
-        else this.anim(locked ? 'strafe' : 'idle', { fade: 0.3 });
+        if (hasMove) {
+          if (this.sprinting) {
+            // esprintar: ciclo de carrera siempre orientado al avance
+            this.anim('run', { fade: 0.22, timeScale: 1.32 });
+          } else if (locked) {
+            // lock-on: strafes/backpedal reales según dirección relativa
+            const facing = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+            const dot = moveDir.dot(facing);
+            const side = moveDir.dot(new THREE.Vector3(-facing.z, 0, facing.x));
+            if (dot > 0.45) this.anim('walk', { fade: 0.22, timeScale: 1.42 });
+            else if (dot < -0.45) this.anim('back', { fade: 0.22, timeScale: 1.35 });
+            else if (side > 0) this.anim('strafeR', { fade: 0.25, timeScale: 1.3 });
+            else this.anim('strafeL', { fade: 0.25, timeScale: 1.3 });
+          } else {
+            this.anim('walk', { fade: 0.22, timeScale: 1.42 });
+          }
+        } else {
+          this.anim('idle', { fade: 0.3 });
+        }
       } else if (hasMove) {
         this.runPhase += dt * (this.sprinting ? 1.3 : 1);
         this.applier.apply(runPose(this.runPhase, this.sprinting ? 1.15 : 1), dt, 12);

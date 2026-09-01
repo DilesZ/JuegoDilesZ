@@ -2,21 +2,26 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { dampAngle, rand, terrainHeight } from './core';
-import { buildSword, buildGreatsword, buildAxe, buildClub, buildBow, buildShield, stoneMat, type VisualRig } from './models';
+import { rand, terrainHeight } from './core';
+import { buildSword, buildShield, stoneMat, type VisualRig } from './models';
 import { CLIPS, sampleClip, idlePose, strafePose, type Pose } from './animations';
 
 /* ============================================================
-   PERSONAJES GLB REALES (rigged + animados, licencia libre Mixamo)
-   - Héroe: readyplayer.me.glb + locomoción retargeteada desde Soldier.glb
-   - Enemigos: Xbot.glb clonado (SkeletonUtils) con variantes de tinte
-   - Mercader: Soldier.glb clonado (Idle/Walk nativos)
+   PERSONAJES GLB REALES (rigged + animados, licencia libre)
+   - Héroe: readyplayer.me.glb + MOCAP de Ready Player Me
+     (Animation Library — mismo esqueleto, carga directa;
+      licencia RPM: uso con avatares Ready Player Me).
+   - Enemigos: Quaternius "Ultimate Monsters" (CC0):
+       goblin → Tribal · archer → Ghost_Skull (espectro)
+       orc    → Orc    · boss  → Demon (Bel'Zaroth)
+     Clips mapeados: Idle/Walk/Run/HitReact/Death/Punch/Weapon.
+   - Mercader: Soldier.glb (Idle/Walk nativos)
    - Zorros: Fox.glb (Survey/Walk/Run)
    - Ruinas: dungeon_warkarma.glb fusionado por material
 
-   Los clips de COMBATE se hornean sobre el esqueleto real a partir de
-   los mismos CLIPS procedurales del juego (mismas duraciones → los
-   tiempos de hitAt/dur de la jugabilidad se conservan exactos).
+   Los clips de COMBATE del héroe se hornean sobre el esqueleto real
+   a partir de los mismos CLIPS procedurales del juego (mismas
+   duraciones → hitAt/dur de la jugabilidad intactos).
    Si algún GLB falla, loadCharacterAssets devuelve null y el juego
    sigue con los rigs procedurales de siempre (fallback completo).
    ============================================================ */
@@ -30,6 +35,7 @@ const PROC_HEIGHT = 1.574;
 export class GlbAnimator {
   mixer: THREE.AnimationMixer;
   private actions = new Map<string, THREE.AnimationAction>();
+  private durations = new Map<string, number>();
   current = '';
   speed = 1;
 
@@ -37,15 +43,20 @@ export class GlbAnimator {
     this.mixer = new THREE.AnimationMixer(root);
     for (const [name, clip] of Object.entries(clips)) {
       this.actions.set(name, this.mixer.clipAction(clip));
+      this.durations.set(name, clip.duration);
     }
   }
 
   has(name: string) { return this.actions.has(name); }
+  clipDur(name: string) { return this.durations.get(name) ?? 0; }
 
   play(name: string, opts: { fade?: number; once?: boolean; restart?: boolean; timeScale?: number } = {}) {
     const next = this.actions.get(name);
     if (!next) return;
-    if (this.current === name && !opts.restart) return;
+    if (this.current === name && !opts.restart) {
+      if (opts.timeScale !== undefined) next.setEffectiveTimeScale(opts.timeScale);
+      return;
+    }
     const fade = opts.fade ?? 0.18;
     const prev = this.current ? this.actions.get(this.current) : null;
     next.reset();
@@ -71,18 +82,21 @@ export interface GlbCharacter {
   height: number;
 }
 
+/** Pack de un monstruo: fuente + clips ya renombrados a nombres del motor */
+export interface MonsterPack {
+  source: THREE.Object3D;
+  clips: Record<string, THREE.AnimationClip>;
+}
+
 export interface CharacterPack {
   heroSource: THREE.Object3D;
+  /** mocap RPM (idle/walk/run/back/strafeL/strafeR) — esqueleto idéntico al héroe */
+  rpmClips: Record<string, THREE.AnimationClip>;
   soldierSource: THREE.Object3D;
-  /** clips crudos del Soldier (fuente del retarget del héroe) */
-  soldierClipsRaw: THREE.AnimationClip[];
   /** clips del Soldier renombrados en minúscula (mercader) */
   soldierClips: Record<string, THREE.AnimationClip>;
-  xbotSource: THREE.Object3D;
-  /** clips nativos de Xbot renombrados (idle/walk/run...) */
-  xbotClips: Record<string, THREE.AnimationClip>;
-  /** clips de combate horneados sobre el esqueleto Xbot (compartidos) */
-  xbotCombat: Record<string, THREE.AnimationClip>;
+  /** monstruos por variante de enemigo (Quaternius CC0) */
+  monsters: Partial<Record<'goblin' | 'archer' | 'orc' | 'boss', MonsterPack>>;
   foxSource: THREE.Object3D;
   foxClips: THREE.AnimationClip[];
   dungeon: THREE.Group | null;
@@ -252,11 +266,26 @@ function normalizeModel(model: THREE.Object3D, targetH: number): number {
   return targetH;
 }
 
+/** Prepara materiales de personaje para PBR (rugosidad, sombras) */
 function enableShadows(model: THREE.Object3D) {
   model.traverse(o => {
     if (o instanceof THREE.Mesh) {
       o.castShadow = true;
       o.receiveShadow = false;
+    }
+  });
+}
+
+function tuneCharacterMaterials(model: THREE.Object3D) {
+  model.traverse(o => {
+    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+      const m = o.material as THREE.MeshStandardMaterial;
+      if (m.isMeshStandardMaterial) {
+        m.roughness = Math.min(0.95, Math.max(0.55, m.roughness));
+        m.metalness = Math.min(0.35, m.metalness);
+        if (m.map) m.map.anisotropy = 4;
+        m.envMapIntensity = 0.85;
+      }
     }
   });
 }
@@ -283,51 +312,6 @@ function lowercaseClips(clips: THREE.AnimationClip[]): Record<string, THREE.Anim
   return out;
 }
 
-/* ---------- Retarget de locomoción (Soldier → héroe) ---------- */
-
-function retargetLocomotion(
-  targetModel: THREE.Object3D,
-  sourceModel: THREE.Object3D,
-  sourceClips: THREE.AnimationClip[],
-): Record<string, THREE.AnimationClip> | null {
-  try {
-    const targetSkin = targetModel.getObjectByProperty('isSkinnedMesh', true) as THREE.SkinnedMesh | undefined;
-    const sourceSkin = sourceModel.getObjectByProperty('isSkinnedMesh', true) as THREE.SkinnedMesh | undefined;
-    if (!targetSkin || !sourceSkin) return null;
-    const sourceNames = new Set(sourceSkin.skeleton.bones.map(b => b.name));
-    // GLTFLoader sanea los nombres ('mixamorig:Hips' → 'mixamorigHips'):
-    // probamos las tres variantes al construir el mapa destino→fuente
-    const names: Record<string, string> = {};
-    for (const b of targetSkin.skeleton.bones) {
-      for (const cand of [`mixamorig:${b.name}`, `mixamorig${b.name}`, b.name]) {
-        if (sourceNames.has(cand) && cand !== b.name) { names[b.name] = cand; break; }
-      }
-    }
-    const hipName = names['Hips'] ?? 'mixamorigHips';
-    const out: Record<string, THREE.AnimationClip> = {};
-    for (const clip of sourceClips) {
-      if (!/^(idle|walk|run)$/i.test(clip.name)) continue;
-      const retargeted = SkeletonUtils.retargetClip(targetSkin, sourceSkin, clip, {
-        hip: hipName,
-        names,
-      });
-      if (retargeted && retargeted.tracks.length > 0) {
-        // retargetClip genera tracks '.bones[X].quaternion' (requieren mixer
-        // sobre el SkinnedMesh); los reescribimos a 'X.quaternion' para que
-        // convivan con los clips horneados en el mixer de la escena.
-        for (const tr of retargeted.tracks) {
-          tr.name = tr.name.replace(/^\.bones\[(.+?)\]\./, '$1.');
-        }
-        out[clip.name.toLowerCase()] = retargeted;
-      }
-    }
-    return Object.keys(out).length > 0 ? out : null;
-  } catch (err) {
-    console.warn('[AETHERIA] retarget de locomoción falló:', err);
-    return null;
-  }
-}
-
 /* ============================================================
    FÁBRICAS DE PERSONAJES
    ============================================================ */
@@ -345,15 +329,14 @@ function makeCharacter(
   let handR: THREE.Object3D | null = null;
   let handL: THREE.Object3D | null = null;
   if (weapon || shield) {
-    handR = findBone(model, 'RightHand', 'RightForeArm');
-    handL = findBone(model, 'LeftHand', 'LeftForeArm');
+    handR = findBone(model, 'RightHand', 'RightForeArm', 'Hand.R');
+    handL = findBone(model, 'LeftHand', 'LeftForeArm', 'Hand.L');
   }
   model.updateMatrixWorld(true);
   if (weapon && handR) {
     handR.add(weapon);
-    // La orientación de los huesos de mano varía por rig: fijamos la hoja
-    // en espacio mundo (arriba y ligeramente al frente) calculando
-    // q_local = q_mundo_mano⁻¹ · q_deseado, con el modelo en pose de reposo.
+    // Fija la hoja en espacio mundo (arriba y ligeramente al frente):
+    // q_local = q_mundo_mano⁻¹ · q_deseado, con el modelo en reposo.
     const handWorld = new THREE.Quaternion();
     handR.getWorldQuaternion(handWorld);
     const desired = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.5, 0, 0));
@@ -366,7 +349,6 @@ function makeCharacter(
     handL.add(sh);
     const handWorldL = new THREE.Quaternion();
     handL.getWorldQuaternion(handWorldL);
-    // cara del escudo (+Z local) hacia fuera-izquierda y algo al frente
     const desiredL = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -1.15, 0));
     sh.quaternion.copy(handWorldL.invert().multiply(desiredL));
     sh.position.set(0, -0.07, 0);
@@ -379,12 +361,38 @@ function makeCharacter(
   };
 }
 
-/** Héroe: readyplayer.me + locomoción retargeteada + combate horneado */
+/** MOCAP RPM → nombres de motor (mismo esqueleto que readyplayer.me) */
+const RPM_MAP: [string, string][] = [
+  ['idle', 'M_Standing_Idle_001'],
+  ['walk', 'M_Jog_001'],
+  ['run', 'M_Run_001'],
+  ['back', 'M_Jog_Backwards_001'],
+  ['strafeL', 'M_Jog_Strafe_Left_001'],
+  ['strafeR', 'M_Jog_Strafe_Right_001'],
+];
+
+/** Héroe: readyplayer.me + mocap RPM directo + combate horneado */
 export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
   const targetH = 1.62;
   const model = SkeletonUtils.clone(pack.heroSource);
   normalizeModel(model, targetH);
   enableShadows(model);
+  tuneCharacterMaterials(model);
+  // Vestimenta de fantasía: tiñe el chándal salmón del avatar hacia
+  // cueros/tejidos oscuros de espadachín (DMC). Piel y cara intactas.
+  model.traverse(o => {
+    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+      const m = o.material as THREE.MeshStandardMaterial;
+      if (m.name.startsWith('Wolf3D_Outfit')) {
+        m.color.lerp(new THREE.Color(0x4a4238), 0.82);   // cuero gris-pardo
+        m.roughness = 0.82;
+        m.metalness = 0.05;
+      } else if (m.name === 'Wolf3D_Body') {
+        m.color.lerp(new THREE.Color(0xc8a888), 0.18);   // piel ligeramente morena
+        m.roughness = 0.74;
+      }
+    }
+  });
   const rest = captureRest(model);
 
   const binder = new SkeletonBinder(model, true);
@@ -394,19 +402,11 @@ export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
   }
   clips.strafe = bakeLoopClip('strafe', Math.PI / 4, 12, t => strafePose(t, false), binder, targetH);
   clips.potion = bakeLoopClip('potion', 0.45, 8, t => potionPose(t), binder, targetH);
-
-  // locomoción real (mocap) retargeteada desde Soldier; el soldado queda
-  // poseído tras el retarget → se restaura su reposo para clones posteriores
-  const soldierRest = captureRest(pack.soldierSource);
-  const loco = retargetLocomotion(model, pack.soldierSource, pack.soldierClipsRaw);
-  restoreRest(pack.soldierSource, soldierRest);
-  if (loco) {
-    Object.assign(clips, loco);
-  } else {
-    console.warn('[AETHERIA] héroe sin mocap: loops horneados de respaldo');
-    clips.idle = bakeLoopClip('idle', Math.PI / 0.9, 14, t => idlePose(t), binder, targetH);
+  // locomoción REAL (mocap RPM, sin retarget: mismo esqueleto)
+  for (const [engine, raw] of RPM_MAP) {
+    const clip = pack.rpmClips[raw];
+    if (clip) clips[engine] = clip;
   }
-
   restoreRest(model, rest);
 
   const weapon = buildSword(1.05);
@@ -422,27 +422,52 @@ export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
 
 export type EnemyVariant = 'goblin' | 'archer' | 'orc' | 'boss';
 
-const ENEMY_LOOK: Record<EnemyVariant, { h: number; tint: number; emissive: number | null; weapon: 'club' | 'bow' | 'axe' | 'greatsword'; ws: number }> = {
-  goblin: { h: 1.06, tint: 0x8fae4a, emissive: null, weapon: 'club', ws: 0.75 },
-  archer: { h: 1.5, tint: 0xb8a888, emissive: null, weapon: 'bow', ws: 1.1 },
-  orc: { h: 2.14, tint: 0x9a4a3a, emissive: null, weapon: 'axe', ws: 1.45 },
-  boss: { h: 2.95, tint: 0x34303e, emissive: 0xff2a1e, weapon: 'greatsword', ws: 1.9 },
+const ENEMY_LOOK: Record<EnemyVariant, {
+  h: number; tint: number; emissive: number | null; emissiveI: number;
+}> = {
+  goblin: { h: 1.12, tint: 0xb2c48a, emissive: null, emissiveI: 0 },
+  archer: { h: 1.38, tint: 0xbadce8, emissive: 0x2ad8ff, emissiveI: 0.3 },
+  orc: { h: 2.16, tint: 0xd8a898, emissive: null, emissiveI: 0 },
+  boss: { h: 2.95, tint: 0x8a7a94, emissive: 0xff2a1e, emissiveI: 0.16 },
 };
 
-/** Enemigo: Xbot clonado + tinte por tipo + clips compartidos (nativos y horneados) */
+/** Mapeo de clips nativos del monstruo → nombres del motor */
+const MONSTER_CLIPS: Record<EnemyVariant, Record<string, string>> = {
+  goblin: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Punch' },
+  archer: { idle: 'Flying_Idle', walk: 'Fast_Flying', run: 'Fast_Flying', strafe: 'Flying_Idle', hurt: 'HitReact', death: 'Death', attack1: 'Headbutt', attack2: 'Headbutt', cast: 'Punch' },
+  orc: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Punch' },
+  boss: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Weapon' },
+};
+
+/** Velocidad de reproducción por clip (ajusta paso natural a velocidad de juego) */
+const MONSTER_TIMESCALE: Record<EnemyVariant, Record<string, number>> = {
+  goblin: { walk: 1.5, run: 1.35 },
+  archer: { walk: 0.6, run: 1.0 },
+  orc: { walk: 1.35, run: 1.25 },
+  boss: { walk: 1.1, run: 1.05 },
+};
+
+export function monsterTimeScale(type: EnemyVariant, clip: string): number {
+  return MONSTER_TIMESCALE[type]?.[clip] ?? 1;
+}
+
+/** Enemigo: monstruo Quaternius clonado + tinte por tipo + clips del motor */
 export function createEnemyCharacter(pack: CharacterPack, type: EnemyVariant): GlbCharacter {
+  const mp = pack.monsters[type];
+  if (!mp) throw new Error(`sin monstruo para ${type}`);
   const look = ENEMY_LOOK[type];
-  const model = SkeletonUtils.clone(pack.xbotSource);
+  const model = SkeletonUtils.clone(mp.source);
   // materiales propios (flash, fundido y tinte por variante)
   model.traverse(o => {
     if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
       const m = (o.material as THREE.MeshStandardMaterial).clone();
-      m.color = new THREE.Color(look.tint);
-      m.roughness = 0.62;
-      m.metalness = 0.22;
+      m.color = new THREE.Color(look.tint).multiply(m.color);
+      m.roughness = 0.66;
+      m.metalness = 0.12;
+      m.envMapIntensity = 0.8;
       if (look.emissive) {
         m.emissive = new THREE.Color(look.emissive);
-        m.emissiveIntensity = type === 'boss' ? 0.55 : 0.25;
+        m.emissiveIntensity = look.emissiveI;
       }
       o.material = m;
     }
@@ -450,25 +475,43 @@ export function createEnemyCharacter(pack: CharacterPack, type: EnemyVariant): G
   normalizeModel(model, look.h);
   enableShadows(model);
 
-  const clips: Record<string, THREE.AnimationClip> = { ...pack.xbotClips, ...pack.xbotCombat };
-  let weaponMat: THREE.Material | null = null;
-  let weapon: THREE.Group | null = null;
-  switch (look.weapon) {
-    case 'club': weapon = buildClub(); break;
-    case 'bow': weapon = buildBow(); break;
-    case 'axe': weapon = buildAxe(); break;
-    case 'greatsword': weapon = buildGreatsword(1); break;
+  // clips renombrados a nombres del motor
+  const clips: Record<string, THREE.AnimationClip> = {};
+  for (const [engine, native] of Object.entries(MONSTER_CLIPS[type])) {
+    const c = mp.clips[native];
+    if (c) clips[engine] = c;
   }
-  if (weapon) {
-    weapon.scale.setScalar(look.ws);
-    weapon.traverse(m => {
-      if (m instanceof THREE.Mesh) {
-        const mm = m.material as THREE.MeshStandardMaterial;
-        if (mm && mm.emissive && mm.emissiveIntensity > 0) weaponMat = mm;
-      }
-    });
+  // clips de combate del héroe NO aplican; los nombres usados por la IA:
+  // idle/walk/run/strafe/hurt/death + attack1/attack2/cast (ENEMY_CFG)
+  return makeCharacter(model, look.h, clips, null, null, false);
+}
+
+/**
+ * Devuelve duraciones reales de los clips de ataque de cada tipo para
+ * sincronizar ENEMY_CFG (hitAt/dur) con la animación. Game lo aplica al iniciar.
+ */
+export function monsterAttackTimings(pack: CharacterPack): {
+  type: EnemyVariant; idx: number; dur: number; hitAt: number;
+}[] {
+  const defs: { type: EnemyVariant; idx: number; clip: string; frac: number }[] = [
+    { type: 'goblin', idx: 0, clip: 'attack1', frac: 0.62 },
+    { type: 'archer', idx: 0, clip: 'cast', frac: 0.45 },
+    { type: 'orc', idx: 0, clip: 'attack2', frac: 0.62 },
+    { type: 'boss', idx: 0, clip: 'attack1', frac: 0.58 },
+    { type: 'boss', idx: 1, clip: 'attack2', frac: 0.62 },
+    { type: 'boss', idx: 2, clip: 'attack1', frac: 0.45 },
+    { type: 'boss', idx: 3, clip: 'cast', frac: 0.5 },
+  ];
+  const out: { type: EnemyVariant; idx: number; dur: number; hitAt: number }[] = [];
+  for (const d of defs) {
+    const mp = pack.monsters[d.type];
+    if (!mp) continue;
+    const native = MONSTER_CLIPS[d.type][d.clip];
+    const clip = native ? mp.clips[native] : null;
+    if (!clip || clip.duration < 0.15) continue;
+    out.push({ type: d.type, idx: d.idx, dur: clip.duration, hitAt: clip.duration * d.frac });
   }
-  return makeCharacter(model, look.h, clips, weapon, weaponMat, false);
+  return out;
 }
 
 /** Mercader: Soldier clonado (Idle/Walk nativos + saludo horneado) */
@@ -479,7 +522,7 @@ export function createMerchantCharacter(pack: CharacterPack): GlbCharacter {
     if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
       const m = (o.material as THREE.MeshStandardMaterial).clone();
       if (m.name.includes('Body')) m.color.lerp(new THREE.Color(0x7a3b52), 0.55);
-      m.roughness = 0.7;
+      m.roughness = 0.72;
       o.material = m;
     }
   });
@@ -553,7 +596,7 @@ export class Fox {
         const spd = this.state === 'run' ? 5.2 : 1.7;
         this.pos.addScaledVector(to, spd * dt);
         this.pos.y = terrainHeight(this.pos.x, this.pos.z);
-        this.yaw = dampAngle(this.yaw, Math.atan2(to.x, to.z), 6, dt);
+        this.yaw = this.yaw + (Math.atan2(to.x, to.z) - this.yaw) * (1 - Math.exp(-6 * dt));
       }
     }
     const r = Math.hypot(this.pos.x, this.pos.z);
@@ -591,8 +634,8 @@ function mergeDungeon(scene: THREE.Object3D): { group: THREE.Group; radius: numb
   });
   const group = new THREE.Group();
   let radius = 6;
-  // Material de piedra estilizada del juego: cohesiona las ruinas con
-  // obeliscos/pilares y evita materiales negros del GLB (metálicos sin IBL)
+  // Material de piedra del juego: cohesiona las ruinas y evita
+  // materiales metálicos del GLB sin IBL (salían negros)
   const stone = stoneMat();
   for (const [, geos] of byMat) {
     const merged = mergeDungeonGeos(geos);
@@ -644,8 +687,17 @@ function mergeDungeonGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | 
 
 const ASSETS: { file: string; label: string }[] = [
   { file: 'readyplayer.me.glb', label: 'el héroe' },
+  { file: 'rpm-anims/M_Standing_Idle_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Jog_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Run_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Jog_Backwards_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Jog_Strafe_Left_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Jog_Strafe_Right_001.glb', label: 'el mocap' },
   { file: 'Soldier.glb', label: 'aliados' },
-  { file: 'Xbot.glb', label: 'enemigos' },
+  { file: 'monsters/Tribal.gltf', label: 'las bestias' },
+  { file: 'monsters/Ghost_Skull.gltf', label: 'los espectros' },
+  { file: 'monsters/Orc.gltf', label: 'los orcos' },
+  { file: 'monsters/Demon.gltf', label: 'el señor de la noche' },
   { file: 'Fox.glb', label: 'criaturas' },
   { file: 'dungeon_warkarma.glb', label: 'las ruinas' },
 ];
@@ -669,24 +721,37 @@ export async function loadCharacterAssets(
 
     const heroG = loaded['readyplayer.me.glb'];
     const soldierG = loaded['Soldier.glb'];
-    const xbotG = loaded['Xbot.glb'];
     const foxG = loaded['Fox.glb'];
     const dungeonG = loaded['dungeon_warkarma.glb'];
 
-    // clips compartidos de Xbot: nativos + combate horneado UNA vez.
-    // Se hornean sobre el esqueleto SIN escalar con su altura real: al
-    // escalar después cada variante, bodyY queda proporcionalmente correcto.
-    xbotG.scene.updateMatrixWorld(true);
-    const xbBox = new THREE.Box3().setFromObject(xbotG.scene);
-    const xbH = Math.max(0.5, xbBox.max.y - xbBox.min.y);
-    const xbRest = captureRest(xbotG.scene);
-    const xbBinder = new SkeletonBinder(xbotG.scene, true);
-    const xbotCombat: Record<string, THREE.AnimationClip> = {};
-    for (const n of ['enemySlash', 'enemyOverhead', 'bossSlam', 'bossSpin', 'bowShot', 'hurt', 'death']) {
-      xbotCombat[n] = bakeActionClip(n, n, xbBinder, xbH);
+    // mocap RPM: guardado con el nombre de archivo como clave
+    const rpmClips: Record<string, THREE.AnimationClip> = {};
+    for (const [engine, raw] of RPM_MAP) {
+      const file = `rpm-anims/${raw}.glb`;
+      const gltf = loaded[file];
+      if (gltf && gltf.animations.length > 0) rpmClips[raw] = gltf.animations[0];
+      void engine;
     }
-    xbotCombat.strafe = bakeLoopClip('strafe', Math.PI / 4, 12, t => strafePose(t, false), xbBinder, xbH);
-    restoreRest(xbotG.scene, xbRest);
+
+    // monstruos: fuente + clips nativos indexados por nombre
+    const monsters: CharacterPack['monsters'] = {};
+    const monsterFiles: [EnemyVariant, string][] = [
+      ['goblin', 'monsters/Tribal.gltf'],
+      ['archer', 'monsters/Ghost_Skull.gltf'],
+      ['orc', 'monsters/Orc.gltf'],
+      ['boss', 'monsters/Demon.gltf'],
+    ];
+    for (const [variant, file] of monsterFiles) {
+      const gltf = loaded[file];
+      if (!gltf) continue;
+      const clips: Record<string, THREE.AnimationClip> = {};
+      for (const c of gltf.animations) clips[c.name] = c;
+      monsters[variant] = { source: gltf.scene, clips };
+    }
+    const monsterCount = Object.keys(monsters).length;
+    if (monsterCount === 0) {
+      console.warn('[AETHERIA] monstruos no disponibles — fallback procedural');
+    }
 
     let dungeon: THREE.Group | null = null;
     let dungeonRadius = 8;
@@ -700,12 +765,10 @@ export async function loadCharacterAssets(
 
     return {
       heroSource: heroG.scene,
+      rpmClips,
       soldierSource: soldierG.scene,
-      soldierClipsRaw: soldierG.animations,
       soldierClips: lowercaseClips(soldierG.animations),
-      xbotSource: xbotG.scene,
-      xbotClips: lowercaseClips(xbotG.animations),
-      xbotCombat,
+      monsters,
       foxSource: foxG.scene,
       foxClips: foxG.animations,
       dungeon,
