@@ -7,7 +7,6 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, ENEMY_NAMES } from './core';
 import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, type EquipSlot, type ItemDef } from './items';
-import { idlePose } from './animations';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
 import { World } from './world';
@@ -15,6 +14,7 @@ import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, PLAYER_HEAVY, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
+import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, type CharacterPack } from './characters';
 import { drawMinimap } from './minimap';
 
 export type QualityTier = 'bajo' | 'medio' | 'alto';
@@ -25,10 +25,10 @@ const GradeShader = {
     tDiffuse: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
     uVignette: { value: 0.30 },
-    uGrain: { value: 0.016 },
+    uGrain: { value: 0.012 },
     uCA: { value: 0.0006 },
-    uSat: { value: 1.18 },
-    uCon: { value: 1.03 },
+    uSat: { value: 1.06 },
+    uCon: { value: 1.04 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
@@ -125,6 +125,8 @@ export class Game {
   merchant!: Merchant;
   private shopStock: ItemDef[] = [];
   private restockDay = -1;
+  private chars: CharacterPack | null;
+  private foxes: Fox[] = [];
   /** reapariciones estilo MMORPG pendientes (punto de spawn + temporizador) */
   private respawnQueue: { type: EnemyType; x: number; z: number; guardianOf: number; t: number }[] = [];
 
@@ -139,7 +141,7 @@ export class Game {
   private hitStopT = 0;
   private timeScale = 1;
   private slowmoT = 0;
-  private baseFov = 55;
+  private baseFov = 65;
 
   // estado de juego
   phase: GamePhase = 'playing';
@@ -174,10 +176,11 @@ export class Game {
   private qualityTimer = 2.5;
   private started = false;
 
-  constructor(refs: GameRefs, onHud: (s: HudState) => void) {
+  constructor(refs: GameRefs, onHud: (s: HudState) => void, chars: CharacterPack | null = null) {
     this.refs = refs;
     this.container = refs.container;
     this.onHud = onHud;
+    this.chars = chars;
 
     // renderer
     this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
@@ -185,9 +188,9 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
-    // NeutralToneMapping conserva la saturación de los colores planos anime
-    this.renderer.toneMapping = THREE.NeutralToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    // ACES Filmic: respuesta tonal cinematográfica con modelos PBR
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.domElement.style.display = 'block';
     this.container.appendChild(this.renderer.domElement);
 
@@ -213,6 +216,7 @@ export class Game {
     };
     this.particles = new Particles(this.scene);
     this.player = new Player();
+    if (this.chars) this.player.attachGlb(createHeroCharacter(this.chars));
     this.scene.add(this.player.root);
     this.trail = new SwordTrail(this.scene);
 
@@ -223,11 +227,26 @@ export class Game {
     this.camYaw = this.player.yaw + Math.PI;
 
     // mercader con su puesto junto a la hoguera
-    this.merchant = new Merchant();
+    this.merchant = new Merchant(this.chars);
     this.scene.add(this.merchant.root);
     for (const c of this.merchant.colliderList()) this.world.colliders.push(c);
     this.shopStock = merchantStock(1);
     this.restockDay = this.cycle.day;
+
+    // zorros ambientales
+    if (this.chars) {
+      this.foxes = createFoxes(this.chars, 3);
+      for (const f of this.foxes) this.scene.add(f.root);
+    }
+
+    // ruinas de la catedral (landmark panorámico sobre la cresta del borde)
+    if (this.chars?.dungeon) {
+      const d = this.chars.dungeon;
+      const rx = 92, rz = -30;
+      d.position.set(rx, terrainHeight(rx, rz) + 0.2, rz);
+      d.rotation.y = 0.7;
+      this.scene.add(d);
+    }
 
     // post-procesado: MSAA + GTAO + bloom + tono + grading
     const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
@@ -249,7 +268,7 @@ export class Game {
       this.composer.addPass(gtao);
       this.gtao = gtao;
     } catch { this.gtao = null; }
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.38, 0.8, 0.9);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.55, 0.9);
     this.composer.addPass(bloom);
     this.composer.addPass(new OutputPass());
     this.grade = new ShaderPass(GradeShader);
@@ -545,6 +564,7 @@ export class Game {
   private spawnEnemy(type: EnemyType, x: number, z: number, guardianOf = -1): Enemy {
     const s = this.scaling();
     const e = new Enemy(type, new THREE.Vector3(x, 0, z), guardianOf, s.hp, s.dmg);
+    if (this.chars) e.attachGlb(createEnemyCharacter(this.chars, type));
     this.enemies.push(e);
     this.scene.add(e.root);
     return e;
@@ -866,8 +886,9 @@ export class Game {
     this.particles.update(dt, this.camera.position);
     // el mercader vive también en la escena del menú (mira a la cámara)
     this.merchant.update(dt, this.cycle.nightFactor, this.camera.position);
+    for (const f of this.foxes) f.update(dt, this.player.pos);
     // héroe contemplando la hoguera
-    this.player.applier.apply(idlePose(this.menuT), dt, 6);
+    this.player.updateMenu(dt, this.menuT);
     this.player.root.position.copy(this.player.pos);
     this.player.root.rotation.y = this.player.yaw;
     if (this.grade) this.grade.uniforms.uTime.value = this.menuT;
@@ -887,8 +908,8 @@ export class Game {
     this.camPos.lerp(desired, 1 - Math.exp(-2.2 * dt));
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(bx, by + 1.9, bz);
-    if (Math.abs(this.camera.fov - 52) > 0.05) {
-      this.camera.fov = damp(this.camera.fov, 52, 3, dt);
+    if (Math.abs(this.camera.fov - 58) > 0.05) {
+      this.camera.fov = damp(this.camera.fov, 58, 3, dt);
       this.camera.updateProjectionMatrix();
     }
   }
@@ -996,6 +1017,7 @@ export class Game {
       const line = pick(Merchant.greetingLines());
       this.addDamageNumber(new THREE.Vector3(this.merchant.pos.x, this.merchant.pos.y + 2.35, this.merchant.pos.z), `“${line}”`, '#ffd98a');
     }
+    for (const f of this.foxes) f.update(dt, this.player.pos);
 
     if (frozen) return;
 

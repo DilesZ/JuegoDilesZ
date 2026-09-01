@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { clamp, dampAngle, damp, rand, randInt, terrainHeight, WORLD, ENEMY_NAMES } from './core';
-import { buildGoblinRig, buildArcherRig, buildOrcRig, buildBossRig, type HumanoidRig } from './models';
+import { buildGoblinRig, buildArcherRig, buildOrcRig, buildBossRig, type HumanoidRig, type VisualRig } from './models';
 import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS } from './animations';
 import { Entity, type GameCtx } from './entities';
+import type { GlbCharacter } from './characters';
 
 /* ============================================================
    ENEMIGOS: IA por máquina de estados + jefe con fases
@@ -74,7 +75,10 @@ type AiState = 'spawn' | 'idle' | 'wander' | 'chase' | 'strafe' | 'windup' | 're
 export class Enemy extends Entity {
   type: EnemyType;
   cfg: EnemyCfg;
-  rig: HumanoidRig;
+  /** rig visual activo (GLB real o procedural de respaldo) */
+  rig: VisualRig;
+  private procRig: HumanoidRig;
+  glb: GlbCharacter | null = null;
   applier: PoseApplier;
   state: AiState = 'spawn';
   stateT = 0;
@@ -106,8 +110,9 @@ export class Enemy extends Entity {
     this.cfg = ENEMY_CFG[type];
     this.guardianOf = guardianOf;
     this.isBoss = type === 'boss';
-    this.rig = this.cfg.make();
-    this.root.add(this.rig.root);
+    this.procRig = this.cfg.make();
+    this.rig = this.procRig;
+    this.root.add(this.procRig.root);
     this.scale = this.cfg.scale;
     this.maxHp = Math.round(this.cfg.hp * hpMul);
     this.hp = this.maxHp;
@@ -117,17 +122,10 @@ export class Enemy extends Entity {
     this.pos.y = terrainHeight(pos.x, pos.z);
     this.home.copy(this.pos);
     this.root.position.copy(this.pos);
-    this.applier = new PoseApplier(this.rig, 12);
+    this.applier = new PoseApplier(this.procRig, 12);
     this.collectMats();
     // materiales para el fundido de muerte (incluye contornos de tinta)
-    const fm = new Set<THREE.Material>();
-    this.rig.root.traverse(o => {
-      if (o instanceof THREE.Mesh) {
-        const m = o.material as THREE.Material;
-        if (m && !Array.isArray(m)) fm.add(m);
-      }
-    });
-    this.fadeMats = [...fm];
+    this.rebuildFadeMats();
     // barra de vida sobre la cabeza
     this.bar = new THREE.Group();
     const w = this.isBoss ? 0 : this.cfg.radius * 2 + 0.6;
@@ -148,6 +146,34 @@ export class Enemy extends Entity {
     this.root.position.y -= 2.2;
   }
   private dmgMul: number;
+
+  /** Sustituye el rig procedural por un personaje GLB real */
+  attachGlb(char: GlbCharacter) {
+    if (this.glb) return;
+    this.root.remove(this.procRig.root);
+    this.glb = char;
+    this.rig = char.rig;
+    this.root.add(char.root);
+    this.collectMats();
+    this.rebuildFadeMats();
+    this.bar.position.y = char.height + 0.45;
+  }
+
+  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number } = {}) {
+    this.glb?.animator.play(name, opts);
+  }
+
+  private rebuildFadeMats() {
+    const fm = new Set<THREE.Material>();
+    this.root.traverse(o => {
+      if (o instanceof THREE.Mesh) {
+        const m = o.material as THREE.Material;
+        if (m && !Array.isArray(m)) fm.add(m);
+      }
+    });
+    // excluir la barra de vida (materiales basic con depthTest false)
+    this.fadeMats = [...fm].filter(m => !(m as THREE.MeshBasicMaterial).isMeshBasicMaterial);
+  }
 
   get dmg() { return this.cfg.dmg * this.dmgMul * (this.phase === 3 ? 1.15 : 1); }
 
@@ -246,14 +272,19 @@ export class Enemy extends Entity {
           color: 0x8a2ac8, size: 0.3, life: 0.8, vy: rand(1, 2.5), glow: 1.6,
         });
         if (t >= 1) { this.state = 'idle'; this.stateT = 0; }
-        this.applier.apply(idlePose(this.animT), dt);
+        if (this.glb) this.anim('idle');
+        else this.applier.apply(idlePose(this.animT), dt);
         return;
       }
       case 'dead': {
         this.stateT += dt;
         const clip = CLIPS.death;
         const k = clamp(this.stateT / clip.dur, 0, 1);
-        this.applier.snap(sampleClip(clip, this.stateT), dt);
+        if (this.glb) {
+          this.anim('death', { once: true });
+        } else {
+          this.applier.snap(sampleClip(clip, this.stateT), dt);
+        }
         if (k >= 1) {
           // hundirse y desaparecer
           this.root.position.y -= dt * 0.5;
@@ -267,7 +298,11 @@ export class Enemy extends Entity {
       }
       case 'hurt': {
         this.stateT += dt;
-        this.applier.snap(sampleClip(CLIPS.hurt, Math.min(this.stateT, CLIPS.hurt.dur)), dt);
+        if (this.glb) {
+          this.anim('hurt');
+        } else {
+          this.applier.snap(sampleClip(CLIPS.hurt, Math.min(this.stateT, CLIPS.hurt.dur)), dt);
+        }
         if (this.stateT >= CLIPS.hurt.dur) { this.state = 'chase'; this.stateT = 0; }
         break;
       }
@@ -291,7 +326,8 @@ export class Enemy extends Entity {
             this.state = 'wander'; this.stateT = 0;
             this.wanderTarget.copy(this.home).add(new THREE.Vector3(rand(-6, 6), 0, rand(-6, 6)));
           }
-          this.applier.apply(idlePose(this.animT), dt);
+          if (this.glb) this.anim('idle', { fade: 0.35 });
+          else this.applier.apply(idlePose(this.animT), dt);
           this.moving = false;
         } else {
           const toT = new THREE.Vector3().subVectors(this.wanderTarget, this.pos).setY(0);
@@ -301,7 +337,8 @@ export class Enemy extends Entity {
             this.pos.addScaledVector(toT, cfg.speed * 0.4 * dt);
             this.yaw = dampAngle(this.yaw, Math.atan2(toT.x, toT.z), 6, dt);
             this.runPhase += dt * 0.5;
-            this.applier.apply(runPose(this.runPhase, 0.5), dt);
+            if (this.glb) this.anim('walk', { fade: 0.3 });
+            else this.applier.apply(runPose(this.runPhase, 0.5), dt);
             this.moving = true;
           }
         }
@@ -327,10 +364,12 @@ export class Enemy extends Entity {
           const nightBoost = 1 + 0.12 * ctx.nightFactor; // de noche los enemigos aceleran
           this.pos.addScaledVector(dir, cfg.speed * nightBoost * (this.phase === 3 ? 1.2 : 1) * dt);
           this.runPhase += dt * (cfg.speed / 5);
-          this.applier.apply(runPose(this.runPhase, 1), dt);
+          if (this.glb) this.anim('run', { fade: 0.22 });
+          else this.applier.apply(runPose(this.runPhase, 1), dt);
           this.moving = true;
         } else {
-          this.applier.apply(strafePose(this.animT, false), dt);
+          if (this.glb) this.anim('strafe', { fade: 0.3 });
+          else this.applier.apply(strafePose(this.animT, false), dt);
           this.moving = false;
         }
         this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 8, dt);
@@ -353,10 +392,12 @@ export class Enemy extends Entity {
           move.normalize();
           this.pos.addScaledVector(move, cfg.speed * dt);
           this.runPhase += dt;
-          this.applier.apply(runPose(this.runPhase, 0.8), dt);
+          if (this.glb) this.anim('walk', { fade: 0.25 });
+          else this.applier.apply(runPose(this.runPhase, 0.8), dt);
           this.moving = true;
         } else {
-          this.applier.apply(strafePose(this.animT, false), dt);
+          if (this.glb) this.anim('strafe', { fade: 0.3 });
+          else this.applier.apply(strafePose(this.animT, false), dt);
           this.moving = false;
         }
         if (this.cd <= 0 && dist < 28) {
@@ -375,7 +416,12 @@ export class Enemy extends Entity {
         if (localT < atk.hitAt * 0.7 && !cfg.strafe && atk.special !== 'orbs') {
           this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 6, dt);
         }
-        this.applier.snap(sampleClip(clip, Math.min(localT, clip.dur)), dt);
+        if (this.glb) {
+          this.anim(atk.clip, { once: true, restart: true });
+          this.glb.animator.update(dt * (speed - 1)); // aceleración del jefe en fase 3
+        } else {
+          this.applier.snap(sampleClip(clip, Math.min(localT, clip.dur)), dt);
+        }
         // brillo del arma como telegrafía
         if (this.rig.weaponMat && localT > atk.hitAt * 0.35) {
           this.rig.weaponMat.emissiveIntensity = 1.4 + Math.sin(localT * 30) * 0.6;
@@ -393,11 +439,14 @@ export class Enemy extends Entity {
       }
       case 'recover': {
         this.stateT += dt;
-        this.applier.apply(strafePose(this.animT, false), dt, 10);
+        if (this.glb) this.anim('strafe', { fade: 0.3 });
+        else this.applier.apply(strafePose(this.animT, false), dt, 10);
         if (this.stateT > 0.25) { this.state = p.state === 'dead' ? 'wander' : (this.aggroed ? (cfg.strafe ? 'strafe' : 'chase') : 'wander'); this.stateT = 0; }
         break;
       }
     }
+
+    if (this.glb) this.glb.animator.update(dt);
 
     // knockback + separación + límites
     this.pos.addScaledVector(this.knock, dt);
@@ -437,7 +486,8 @@ export class Enemy extends Entity {
     if (atk.special === 'orbs' && this.type === 'archer') {
       // flecha del arquero
       const bowPos = new THREE.Vector3();
-      this.rig.handR.getWorldPosition(bowPos);
+      if (this.rig.handR) this.rig.handR.getWorldPosition(bowPos);
+      else bowPos.copy(this.pos).setY(this.pos.y + this.rig.height * 0.7);
       const target = p.pos.clone().add(new THREE.Vector3(0, 1.1, 0));
       // predicción simple
       target.addScaledVector(new THREE.Vector3(p.pos.x - this.pos.x, 0, p.pos.z - this.pos.z).normalize(), dist_to(this, p) * 0.06);

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { clamp, damp, dampAngle, rand, terrainHeight, WORLD, lerp } from './core';
-import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type HumanoidRig, type CharMat } from './models';
+import { buildHumanoid, buildPlayerRig, buildPickupOrb, buildArrowMesh, type HumanoidRig, type VisualRig, type CharMat } from './models';
 import { PoseApplier, idlePose, runPose, strafePose, sampleClip, CLIPS, ZERO_POSE } from './animations';
+import type { GlbCharacter } from './characters';
 import type { Particles } from './particles';
 import type { AudioEngine } from './audio';
 import { NEUTRAL_STATS, RARITY_INFO, type EquipStats, type ItemDef } from './items';
@@ -176,7 +177,10 @@ export const PLAYER_ATTACKS: AttackDef[] = [
 export const PLAYER_HEAVY: AttackDef = { clip: 'heavy', dur: 0.95, hitAt: 0.6, dmg: 44, range: 3.2, arc: 2.0, stam: 30, impulse: 6, soundPitch: 0.72 };
 
 export class Player extends Entity {
-  rig: HumanoidRig;
+  /** rig visual activo (GLB real o procedural de respaldo) */
+  rig: VisualRig;
+  private procRig: HumanoidRig;
+  glb: GlbCharacter | null = null;
   applier: PoseApplier;
   stamina = 100; maxStamina = 100;
   potions = 4; maxPotions = 6;
@@ -207,13 +211,39 @@ export class Player extends Entity {
 
   constructor() {
     super();
-    this.rig = buildPlayerRig();
-    this.root.add(this.rig.root);
+    this.procRig = buildPlayerRig();
+    this.rig = this.procRig;
+    this.root.add(this.procRig.root);
     this.maxHp = 100; this.hp = 100;
     this.radius = 0.55;
     this.height = 1.85;
-    this.applier = new PoseApplier(this.rig, 16);
+    this.applier = new PoseApplier(this.procRig, 16);
     this.collectMats();
+  }
+
+  /** Sustituye el rig procedural por un personaje GLB real (si hay pack) */
+  attachGlb(char: GlbCharacter) {
+    if (this.glb) return;
+    this.root.remove(this.procRig.root);
+    this.glb = char;
+    this.rig = char.rig;
+    this.root.add(char.root);
+    this.collectMats();
+  }
+
+  /** Reproduce un clip del animador GLB (no-op con rig procedural) */
+  private anim(name: string, opts: { once?: boolean; restart?: boolean; fade?: number } = {}) {
+    this.glb?.animator.play(name, opts);
+  }
+
+  /** Idle del menú cinemático (GLB o procedural) */
+  updateMenu(dt: number, t: number) {
+    if (this.glb) {
+      this.glb.animator.play('idle', { fade: 0.6 });
+      this.glb.animator.update(dt);
+    } else {
+      this.applier.apply(idlePose(t), dt, 6);
+    }
   }
 
   /** Vida base por nivel + equipo + permanentes */
@@ -380,9 +410,13 @@ export class Player extends Entity {
     switch (this.state) {
       case 'dead': {
         this.stateT += dt;
-        const clip = CLIPS.death;
-        const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
-        this.applier.snap(p, dt);
+        if (this.glb) {
+          this.anim('death', { once: true });
+        } else {
+          const clip = CLIPS.death;
+          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+          this.applier.snap(p, dt);
+        }
         this.root.rotation.y = this.yaw;
         this.pos.addScaledVector(this.knock, dt);
         this.knock.multiplyScalar(Math.max(0, 1 - 6 * dt));
@@ -391,22 +425,32 @@ export class Player extends Entity {
       }
       case 'hurt': {
         this.stateT += dt;
-        const clip = CLIPS.hurt;
-        this.applier.snap(sampleClip(clip, Math.min(this.stateT, clip.dur)), dt);
-        if (this.stateT >= clip.dur) this.state = 'idle';
+        if (this.glb) {
+          this.anim('hurt');
+          if (this.stateT >= CLIPS.hurt.dur) this.state = 'idle';
+        } else {
+          const clip = CLIPS.hurt;
+          this.applier.snap(sampleClip(clip, Math.min(this.stateT, clip.dur)), dt);
+          if (this.stateT >= clip.dur) this.state = 'idle';
+        }
         break;
       }
       case 'potion': {
         this.stateT += dt;
-        this.applier.apply(idlePose(this.animT), dt, 14);
+        if (this.glb) this.anim('potion', { once: true });
+        else this.applier.apply(idlePose(this.animT), dt, 14);
         if (this.stateT > 0.45) this.state = 'idle';
         break;
       }
       case 'roll': {
         this.stateT += dt;
-        const clip = CLIPS.roll;
-        const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
-        this.applier.snap(p, dt);
+        if (this.glb) {
+          this.anim('roll', { once: true, restart: true });
+        } else {
+          const clip = CLIPS.roll;
+          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+          this.applier.snap(p, dt);
+        }
         this.pos.addScaledVector(this.rollDir, 10.5 * dt);
         if (Math.random() < 0.4) {
           ctx.particles.spawn({
@@ -415,7 +459,7 @@ export class Player extends Entity {
             color: 0x8a7a5e, size: 0.25, life: 0.4, gravity: 1, drag: 2, glow: 0.6,
           });
         }
-        if (this.stateT >= clip.dur) { this.state = 'idle'; this.applier.apply(ZERO_POSE, dt, 20); }
+        if (this.stateT >= CLIPS.roll.dur) { this.state = 'idle'; this.applier.apply(ZERO_POSE, dt, 20); }
         break;
       }
       case 'attack': {
@@ -436,8 +480,12 @@ export class Player extends Entity {
         if (prog > 0.35 && prog < 0.75) {
           this.pos.addScaledVector(new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), def.impulse * dt);
         }
-        const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
-        this.applier.snap(p, dt);
+        if (this.glb) {
+          this.anim(def.clip, { once: true, restart: true });
+        } else {
+          const p = sampleClip(clip, Math.min(this.stateT, clip.dur));
+          this.applier.snap(p, dt);
+        }
         // momento del golpe
         if (!this.didHit && this.stateT >= def.hitAt) {
           this.didHit = true;
@@ -489,8 +537,11 @@ export class Player extends Entity {
         }
       }
       this.moving = hasMove;
-      // pose
-      if (hasMove) {
+      // pose (GLB real con crossfade o procedural)
+      if (this.glb) {
+        if (hasMove) this.anim(this.sprinting ? 'run' : 'walk', { fade: 0.22 });
+        else this.anim(locked ? 'strafe' : 'idle', { fade: 0.3 });
+      } else if (hasMove) {
         this.runPhase += dt * (this.sprinting ? 1.3 : 1);
         this.applier.apply(runPose(this.runPhase, this.sprinting ? 1.15 : 1), dt, 12);
       } else if (locked) {
@@ -499,6 +550,8 @@ export class Player extends Entity {
         this.applier.apply(idlePose(this.animT), dt, 8);
       }
     }
+
+    this.glb?.animator.update(dt);
 
     // knockback decay
     this.pos.addScaledVector(this.knock, dt);

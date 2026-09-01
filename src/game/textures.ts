@@ -100,29 +100,30 @@ function normalFromHeight(height: Float32Array, size: number, strength = 2): THR
 export const WORLD_TEX_SIZE = 200;
 
 /**
- * Textura grande de color para el terreno (ESTILO ANIME):
- * praderas verde vivas pintadas a mano, parches de tierra cálida,
- * roca azulada en altura y senderos claros que conectan hoguera,
- * santuarios y arena. Paleta saturada tipo Ghibli, sin fotos.
+ * Textura grande de color para el terreno (ESTILO MODERNO-PBR):
+ * base pintada natural + FOTO CC0 de césped (ambientCG) mezclada por
+ * encima, senderos ocre-tierra que conectan hoguera, santuarios y
+ * arena, y roca gris en altura. La foto se estampa en async cuando
+ * llega (needsUpdate), los senderos se redibujan encima.
  */
 export function terrainSplat(): THREE.CanvasTexture {
   if (cache.has('splat')) return cache.get('splat')!;
-  const S = 1024;
+  const S = 2048;
   const [c, ctx] = makeCanvas(S, S);
+  const rock = [128, 130, 140];
 
   const paint = () => {
     const px = S / WORLD_TEX_SIZE; // píxeles por unidad de mundo
     const rng = mulberry32(4242);
 
-    const grassA = [72, 158, 78], grassB = [108, 190, 96], grassDry = [176, 182, 96];
-    const grassLight = [150, 212, 118];
-    const dirt = [156, 118, 72], dirtDark = [118, 88, 54];
-    const rock = [142, 148, 168], rockDark = [108, 112, 132];
+    const grassA = [88, 128, 66], grassB = [112, 152, 78], grassDry = [148, 142, 88];
+    const dirt = [124, 96, 62], dirtDark = [98, 76, 50];
+    const rockDark = [100, 102, 112];
 
-    // 1) base pintada: celdas grandes de verde vivo con manchas claras
+    // 1) base pintada: celdas grandes de verde natural con manchas
     ctx.clearRect(0, 0, S, S);
     {
-      const cell = 10;
+      const cell = 12;
       for (let cy = 0; cy < S; cy += cell) {
         for (let cx = 0; cx < S; cx += cell) {
           const wx = (cx / S) * WORLD_TEX_SIZE - 100;
@@ -132,9 +133,9 @@ export function terrainSplat(): THREE.CanvasTexture {
           const mix01 = (a: number[], bb: number[], t: number) => [a[0] + (bb[0] - a[0]) * t, a[1] + (bb[1] - a[1]) * t, a[2] + (bb[2] - a[2]) * t];
           let col = mix01(grassA, grassB, n);
           if (n > 0.60) col = mix01(col, grassDry, (n - 0.60) * 2.1);
-          if (n2 > 0.72) col = mix01(col, grassLight, (n2 - 0.72) * 2.6);
-          const jitter = (rng() - 0.5) * 16;
-          let r = col[0] + jitter, g = col[1] + jitter * 1.15, b = col[2] + jitter * 0.6;
+          if (n2 > 0.72) col = mix01(col, [130, 168, 92], (n2 - 0.72) * 2.4);
+          const jitter = (rng() - 0.5) * 12;
+          let r = col[0] + jitter, g = col[1] + jitter * 1.1, b = col[2] + jitter * 0.6;
           const rr = Math.hypot(wx, wz);
           if (rr > 78) {
             const t = Math.min(1, (rr - 78) / 16);
@@ -147,89 +148,76 @@ export function terrainSplat(): THREE.CanvasTexture {
       }
     }
 
-    // manchas redondeadas claras/oscuras (parches pintados suaves)
+    // manchas redondeadas claras/oscuras (parches suaves)
     for (let i = 0; i < 90; i++) {
-      const x = rng() * S, y = rng() * S, R = 18 + rng() * 60;
+      const x = rng() * S, y = rng() * S, R = 24 + rng() * 80;
       const light = rng() > 0.45;
       const g2 = ctx.createRadialGradient(x, y, 0, x, y, R);
-      g2.addColorStop(0, light ? 'rgba(178,224,140,0.20)' : 'rgba(52,128,64,0.18)');
+      g2.addColorStop(0, light ? 'rgba(158,186,116,0.20)' : 'rgba(64,102,58,0.18)');
       g2.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g2;
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
 
-    // roca en la corona del mundo
-    const cell2 = 26;
-    for (let cy = 0; cy < S; cy += cell2) {
-      for (let cx = 0; cx < S; cx += cell2) {
-        const wx = (cx / S) * WORLD_TEX_SIZE - 100;
-        const wz = (cy / S) * WORLD_TEX_SIZE - 100;
-        const rr = Math.hypot(wx, wz);
-        if (rr > 78) {
-          const t = Math.min(1, (rr - 78) / 16);
-          ctx.fillStyle = `rgba(${rock[0]},${rock[1]},${rock[2]},${0.5 * t})`;
-          ctx.fillRect(cx, cy, cell2, cell2);
-        }
-      }
-    }
-
     // 2) parches de tierra irregulares
     for (let i = 0; i < 130; i++) {
-    const a = rng() * Math.PI * 2;
-    const rad = 6 + rng() * (72 - 6);
-    const wx = Math.cos(a) * rad, wz = Math.sin(a) * rad;
-    if (fbm(wx * 0.09 + 7, wz * 0.09 + 3, 2) < 0.18) continue;
-    const x = (wx + 100) * px, y = (wz + 100) * px;
-    const R = (2 + rng() * 5) * px;
-    const g = ctx.createRadialGradient(x, y, 0, x, y, R);
-    const dc = rng() > 0.5 ? dirt : dirtDark;
-    g.addColorStop(0, `rgba(${dc[0]},${dc[1]},${dc[2]},0.6)`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // 3) senderos: hoguera → santuarios/arena, claros estilo anime
-  const W = WORLD;
-  const drawPath = (x1: number, z1: number, x2: number, z2: number, wUnits: number) => {
-    const mx = (x1 + x2) / 2 + (z2 - z1) * 0.18;
-    const mz = (z1 + z2) / 2 - (x2 - x1) * 0.18;
-    const p = new Path2D();
-    p.moveTo((x1 + 100) * px, (z1 + 100) * px);
-    p.quadraticCurveTo((mx + 100) * px, (mz + 100) * px, (x2 + 100) * px, (z2 + 100) * px);
-    ctx.lineCap = 'round';
-    ctx.strokeStyle = 'rgba(96,72,44,0.4)';
-    ctx.lineWidth = wUnits * px * 1.7;
-    ctx.stroke(p);
-    ctx.strokeStyle = 'rgba(196,158,104,0.9)';
-    ctx.lineWidth = wUnits * px;
-    ctx.stroke(p);
-    ctx.strokeStyle = 'rgba(226,196,142,0.55)';
-    ctx.lineWidth = wUnits * px * 0.45;
-    ctx.stroke(p);
-    // piedritas claras
-    const steps = Math.hypot(x2 - x1, z2 - z1) * 2.2;
-    for (let i = 0; i < steps; i++) {
-      const t = rng();
-      const bx = (1 - t) * (1 - t) * x1 + 2 * (1 - t) * t * mx + t * t * x2;
-      const bz = (1 - t) * (1 - t) * z1 + 2 * (1 - t) * t * mz + t * t * z2;
-      const ox = (rng() - 0.5) * wUnits * 1.1, oz = (rng() - 0.5) * wUnits * 1.1;
-      const shade = 170 + rng() * 70;
-      ctx.fillStyle = `rgba(${shade},${shade * 0.97},${shade * 0.9},${0.35 + rng() * 0.4})`;
-      ctx.beginPath();
-      ctx.arc((bx + ox + 100) * px, (bz + oz + 100) * px, (0.05 + rng() * 0.12) * px, 0, Math.PI * 2);
-      ctx.fill();
+      const a = rng() * Math.PI * 2;
+      const rad = 6 + rng() * (72 - 6);
+      const wx = Math.cos(a) * rad, wz = Math.sin(a) * rad;
+      if (fbm(wx * 0.09 + 7, wz * 0.09 + 3, 2) < 0.18) continue;
+      const x = (wx + 100) * px, y = (wz + 100) * px;
+      const R = (2 + rng() * 5) * px;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+      const dc = rng() > 0.5 ? dirt : dirtDark;
+      g.addColorStop(0, `rgba(${dc[0]},${dc[1]},${dc[2]},0.6)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
   };
-  for (const s of W.shrines) drawPath(W.bonfire.x, W.bonfire.z, s.x, s.z, 2.1);
-  drawPath(W.bonfire.x, W.bonfire.z, W.arena.x, W.arena.z - W.arena.r, 2.6);
 
-    // 4) desgaste alrededor de hoguera y santuarios
+  /** senderos + desgaste (se pintan al final, encima de la foto) */
+  const paintPaths = (px: number, rng: () => number) => {
+    const W = WORLD;
+    const drawPath = (x1: number, z1: number, x2: number, z2: number, wUnits: number) => {
+      const mx = (x1 + x2) / 2 + (z2 - z1) * 0.18;
+      const mz = (z1 + z2) / 2 - (x2 - x1) * 0.18;
+      const p = new Path2D();
+      p.moveTo((x1 + 100) * px, (z1 + 100) * px);
+      p.quadraticCurveTo((mx + 100) * px, (mz + 100) * px, (x2 + 100) * px, (z2 + 100) * px);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(92,70,44,0.45)';
+      ctx.lineWidth = wUnits * px * 1.7;
+      ctx.stroke(p);
+      ctx.strokeStyle = 'rgba(168,136,92,0.92)';
+      ctx.lineWidth = wUnits * px;
+      ctx.stroke(p);
+      ctx.strokeStyle = 'rgba(196,166,120,0.5)';
+      ctx.lineWidth = wUnits * px * 0.45;
+      ctx.stroke(p);
+      // piedritas claras
+      const steps = Math.hypot(x2 - x1, z2 - z1) * 2.2;
+      for (let i = 0; i < steps; i++) {
+        const t = rng();
+        const bx = (1 - t) * (1 - t) * x1 + 2 * (1 - t) * t * mx + t * t * x2;
+        const bz = (1 - t) * (1 - t) * z1 + 2 * (1 - t) * t * mz + t * t * z2;
+        const ox = (rng() - 0.5) * wUnits * 1.1, oz = (rng() - 0.5) * wUnits * 1.1;
+        const shade = 160 + rng() * 70;
+        ctx.fillStyle = `rgba(${shade},${shade * 0.97},${shade * 0.9},${0.3 + rng() * 0.4})`;
+        ctx.beginPath();
+        ctx.arc((bx + ox + 100) * px, (bz + oz + 100) * px, (0.05 + rng() * 0.12) * px, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+    for (const s of W.shrines) drawPath(W.bonfire.x, W.bonfire.z, s.x, s.z, 2.1);
+    drawPath(W.bonfire.x, W.bonfire.z, W.arena.x, W.arena.z - W.arena.r, 2.6);
+
+    // desgaste alrededor de hoguera y santuarios
     for (const p of [W.bonfire, ...W.shrines, { x: W.arena.x, z: W.arena.z }]) {
       const x = (p.x + 100) * px, y = (p.z + 100) * px;
-      const R = 26;
+      const R = 30;
       const g = ctx.createRadialGradient(x, y, 4, x, y, R);
-      g.addColorStop(0, 'rgba(150,116,72,0.5)');
+      g.addColorStop(0, 'rgba(132,104,68,0.5)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
@@ -237,9 +225,44 @@ export function terrainSplat(): THREE.CanvasTexture {
   };
 
   paint();
-  const t = toTexture(c, true, false);
-  cache.set('splat', t);
-  return t;
+  const rngPath = mulberry32(777);
+  paintPaths(S / WORLD_TEX_SIZE, rngPath);
+
+  // 3) FOTO CC0 de césped mezclada por encima (async); luego senderos encima
+  texLoader.load('/textures/grass_color.jpg', (tex) => {
+    const img = tex.image as HTMLImageElement | undefined;
+    if (!img) return;
+    const px = S / WORLD_TEX_SIZE;
+    ctx.save();
+    ctx.globalAlpha = 0.62;
+    const tile = (6.5) * px; // celda de ~6.5 m
+    for (let y = 0; y < S; y += tile) {
+      for (let x = 0; x < S; x += tile) ctx.drawImage(img, x, y, tile + 1, tile + 1);
+    }
+    ctx.restore();
+    // roca en la corona del mundo (encima de la foto)
+    const rng2 = mulberry32(99);
+    ctx.save();
+    for (let cy = 0; cy < S; cy += 30) {
+      for (let cx = 0; cx < S; cx += 30) {
+        const wx = (cx / S) * WORLD_TEX_SIZE - 100;
+        const wz = (cy / S) * WORLD_TEX_SIZE - 100;
+        const rr = Math.hypot(wx, wz);
+        if (rr > 78) {
+          const t = Math.min(1, (rr - 78) / 16);
+          ctx.fillStyle = `rgba(${rock[0]},${rock[1]},${rock[2]},${0.72 * t})`;
+          ctx.fillRect(cx + (rng2() - 0.5) * 8, cy + (rng2() - 0.5) * 8, 30, 30);
+        }
+      }
+    }
+    ctx.restore();
+    paintPaths(px, mulberry32(777));
+    t2.needsUpdate = true;
+  });
+
+  const t2 = toTexture(c, true, false);
+  cache.set('splat', t2);
+  return t2;
 }
 
 /** Mapa de normales de detalle en mosaico para el terreno */

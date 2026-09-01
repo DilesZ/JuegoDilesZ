@@ -9,7 +9,7 @@ import {
 } from './models';
 import { Particles } from './particles';
 import {
-  terrainSplat, glowSprite, mistTexture, moonTexture,
+  terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex,
   waterNormal, arenaFloorTexture, bannerTexture,
 } from './textures';
 import type { DayNightSample } from './daynight';
@@ -112,7 +112,7 @@ export class World {
   private envIntensityTarget = 0.5;
   private nightK = 1; // factor de oscuridad actual (para antorchas etc.)
   private mistMul = 1.2; // multiplicador de niebla rasante
-  private terrainMat: THREE.MeshToonMaterial | null = null;
+  private terrainMat: THREE.MeshStandardMaterial | null = null;
 
   /* ---- nubes estilo anime (Ghibli) ---- */
   private clouds: { mesh: THREE.Mesh; mat: ToonMat; speed: number; baseY: number }[] = [];
@@ -462,18 +462,14 @@ export class World {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    const mat = new THREE.MeshToonMaterial({
+    // Terreno PBR moderno: splat con base fotográfica CC0 + normal de detalle
+    const mat = new THREE.MeshStandardMaterial({
       map: terrainSplat(),
+      normalMap: pbrTex('grass_normal.jpg', { srgb: false, repeat: 46 }),
+      normalScale: new THREE.Vector2(0.6, 0.6),
+      roughness: 0.94,
+      metalness: 0,
       vertexColors: true,
-      gradientMap: (() => {
-        // rampa suave de 4 bandas para un terreno pintado, no duro
-        const v = new Uint8Array([150, 150, 150, 255, 200, 200, 200, 255, 240, 240, 240, 255, 255, 255, 255, 255]);
-        const tex = new THREE.DataTexture(v, 4, 1, THREE.RGBAFormat);
-        tex.minFilter = tex.magFilter = THREE.NearestFilter;
-        tex.colorSpace = THREE.NoColorSpace;
-        tex.needsUpdate = true;
-        return tex;
-      })(),
     });
     this.terrainMat = mat;
     const terrain = new THREE.Mesh(geo, mat);

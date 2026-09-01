@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { loadCharacterAssets } from '@/game/characters';
 import type { HudState, ItemView, ShopEntryView, ShopSellView } from '@/game/core';
 import type { Game, QualityTier } from '@/game/game';
 
@@ -494,6 +495,7 @@ export default function Home() {
   const [hud, setHud] = useState<HudState>(INITIAL_HUD);
   const [booted, setBooted] = useState(false);
   const [bootError, setBootError] = useState(false);
+  const [loadMsg, setLoadMsg] = useState('Forjando el mundo…');
 
   /* Arranque: construye el mundo en segundo plano y muestra el
      menú cinemático con la hoguera en vivo detrás del panel. */
@@ -502,11 +504,19 @@ export default function Home() {
     const boot = async () => {
       try {
         await new Promise(r => setTimeout(r, 250)); // deja pintar el velo de carga
+        setLoadMsg('Invocando personajes…');
+        // modelos GLB reales (héroe, enemigos, mercader, criaturas, ruinas)
+        const chars = await loadCharacterAssets((frac, label) => {
+          if (!cancelled) setLoadMsg(`Invocando ${label}… ${Math.round(frac * 100)}%`);
+        });
+        if (cancelled) return;
+        setLoadMsg('Despertando AETHERIA…');
         const mod = await import('@/game/game');
         if (cancelled || !containerRef.current || !minimapRef.current || !vignetteRef.current) return;
         const game = new mod.Game(
           { container: containerRef.current, minimap: minimapRef.current, vignette: vignetteRef.current },
           setHud,
+          chars,
         );
         gameRef.current = game;
         (window as unknown as { __game?: Game }).__game = game;
@@ -560,10 +570,10 @@ export default function Home() {
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-[#05060a]">
           <div className="w-10 h-10 border-2 border-amber-700/30 border-t-amber-400 rounded-full animate-spin" />
           <div className="mt-5 text-amber-300/90 font-display tracking-[0.35em] text-sm uppercase animate-pulse">
-            {bootError ? 'No se pudo forjar el mundo' : 'Forjando el mundo…'}
+            {bootError ? 'No se pudo forjar el mundo' : loadMsg}
           </div>
           {!bootError && (
-            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Toon shading anime · Nubes Ghibli · Ciclo día/noche</div>
+            <div className="mt-2 text-[11px] text-stone-600 tracking-widest">Modelos PBR reales · Animaciones Mixamo · Ciclo día/noche</div>
           )}
         </div>
       )}

@@ -378,8 +378,17 @@ export interface HumanoidOpts {
   outline?: number;
 }
 
-export interface HumanoidRig {
+/** Contrato visual mínimo que usan las entidades (rig procedural o GLB) */
+export interface VisualRig {
   root: THREE.Group;
+  weapon: THREE.Group | null;
+  weaponMat: CharMat | null;
+  handR: THREE.Object3D | null;
+  handL: THREE.Object3D | null;
+  height: number;
+}
+
+export interface HumanoidRig extends VisualRig {
   body: THREE.Group;
   torso: THREE.Group;
   head: THREE.Group;
@@ -389,8 +398,6 @@ export interface HumanoidRig {
   legR: THREE.Group;
   handR: THREE.Group;
   handL: THREE.Group;
-  weapon: THREE.Group | null;
-  weaponMat: CharMat | null;
   height: number;
 }
 

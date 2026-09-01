@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { dampAngle, terrainHeight, WORLD } from './core';
-import { buildMerchantRig, buildMerchantStall, type HumanoidRig } from './models';
+import { buildMerchantRig, buildMerchantStall, type HumanoidRig, type VisualRig } from './models';
 import { PoseApplier, idlePose } from './animations';
+import { createMerchantCharacter, type GlbCharacter, type CharacterPack } from './characters';
 
 /* ============================================================
    MERCADER — Ferran, NPC comercial del campamento.
@@ -71,7 +72,9 @@ export class Merchant {
   root = new THREE.Group();
   pos = new THREE.Vector3();
   yaw = 0;
-  rig: HumanoidRig;
+  rig: VisualRig;
+  private procRig: HumanoidRig;
+  private glb: GlbCharacter | null = null;
   private applier: PoseApplier;
   private lantern: THREE.PointLight;
   private lanternCore: THREE.Mesh;
@@ -82,10 +85,17 @@ export class Merchant {
   /** fase del saludo (levanta el brazo) 0 = nada */
   private waveT = 0;
 
-  constructor() {
-    // mercader
-    this.rig = buildMerchantRig();
-    this.root.add(this.rig.root);
+  constructor(pack: CharacterPack | null = null) {
+    // mercader (GLB real si hay pack, procedural de respaldo)
+    this.procRig = buildMerchantRig();
+    this.rig = this.procRig;
+    this.root.add(this.procRig.root);
+    if (pack) {
+      this.glb = createMerchantCharacter(pack);
+      this.root.remove(this.procRig.root);
+      this.rig = this.glb.rig;
+      this.root.add(this.glb.root);
+    }
     const m = MERCHANT_SPOT.merchant;
     const h = terrainHeight(m.x, m.z);
     this.pos.set(m.x, h, m.z);
@@ -95,7 +105,7 @@ export class Merchant {
     // el root NO rota (el puesto y el rótulo viven en coords de mundo);
     // solo el rig del personaje gira para mirar al héroe
     this.rig.root.rotation.y = this.yaw;
-    this.applier = new PoseApplier(this.rig, 10);
+    this.applier = new PoseApplier(this.procRig, 10);
 
     // puesto: offset directo desde el mercader (root sin rotación)
     const s = MERCHANT_SPOT.stall;
@@ -138,14 +148,20 @@ export class Merchant {
     }
     if (this.waveT > 0) this.waveT -= dt;
 
-    // pose: idle respirando + brazo levantado mientras saluda
-    const pose = idlePose(this.t);
-    if (this.waveT > 0) {
-      const w = Math.min(1, this.waveT / 0.35); // entra y sale suave
-      pose.armR = [-2.35 * w, 0, (-0.45 + Math.sin(this.t * 13) * 0.28) * w];
-      pose.head = [0, 0, -0.06 * w];
+    // pose: idle respirando + saludo (GLB con crossfade o procedural)
+    if (this.glb) {
+      if (this.waveT > 0) this.glb.animator.play('greet', { fade: 0.12 });
+      else this.glb.animator.play('idle', { fade: 0.35 });
+      this.glb.animator.update(dt);
+    } else {
+      const pose = idlePose(this.t);
+      if (this.waveT > 0) {
+        const w = Math.min(1, this.waveT / 0.35); // entra y sale suave
+        pose.armR = [-2.35 * w, 0, (-0.45 + Math.sin(this.t * 13) * 0.28) * w];
+        pose.head = [0, 0, -0.06 * w];
+      }
+      this.applier.apply(pose, dt, 8);
     }
-    this.applier.apply(pose, dt, 8);
     this.root.position.y = this.pos.y + Math.sin(this.t * 1.7) * 0.015;
 
     // rótulo siempre encarado a cámara (sprite, automático) + leve vaivén (offset)
