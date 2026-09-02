@@ -64,6 +64,8 @@ export const WORLD = {
   radius: 92,            // radio jugable
   bonfire: { x: 0, z: 6 },
   arena: { x: 0, z: 76, r: 21 },
+  /** nido del dragón ancestral (jefe 2): cráter helado al norte-este */
+  roost: { x: 64, z: -52, r: 19 },
   shrines: [
     { x: 58, z: 20, name: 'Santuario del Alba', r: 12 },
     { x: -54, z: 40, name: 'Santuario del Crepúsculo', r: 12 },
@@ -81,6 +83,8 @@ const CAMP_FLATS: { x: number; z: number; r: number; h: number }[] = [
   { x: WORLD.bonfire.x, z: WORLD.bonfire.z, r: 10, h: rawHeight(WORLD.bonfire.x, WORLD.bonfire.z) },
   ...WORLD.shrines.map(s => ({ x: s.x, z: s.z, r: s.r + 3, h: rawHeight(s.x, s.z) })),
   { x: WORLD.arena.x, z: WORLD.arena.z, r: WORLD.arena.r + 4, h: rawHeight(WORLD.arena.x, WORLD.arena.z) },
+  // nido del dragón: cuenco hundido (cráter) con borde elevado
+  { x: WORLD.roost.x, z: WORLD.roost.z, r: WORLD.roost.r + 5, h: rawHeight(WORLD.roost.x, WORLD.roost.z) - 2.5 },
 ];
 
 export function terrainHeight(x: number, z: number): number {
@@ -221,6 +225,13 @@ export interface HudState {
   weaponSlots: WeaponSlotView[];
   /** tipo de arma activa (para la barra del HUD) */
   weaponType: WeaponType;
+  /** misión activa del argumento (acto I / acto II) */
+  quest: QuestStage;
+  /** Núcleos de Brasa recogidos (misión del acto II) */
+  embers: number;
+  embersRequired: number;
+  /** el nido del dragón está abierto (portal visible) */
+  gateOpen: boolean;
 }
 
 /* Rangos del medidor de estilo (D→SSS, estilo Devil May Cry) */
@@ -245,4 +256,16 @@ export const ENEMY_NAMES: Record<string, string> = {
   archer: 'Espectro Errante',
   orc: 'Orco Brutal',
   boss: "Bel'Zaroth, el Señor Caído",
+  boss2: "Vaelrath, la Furia Ancestral",
 };
+
+/* ---------- Misiones ----------
+   Acto I: purificar los 3 santuarios → despertar de Bel'Zaroth
+   Acto II (nueva): tras derrotar a Bel'Zaroth, el héroe descubre
+   que el poder del jefe fluye hacia el norte: hay que recolectar
+   3 Núcleos de Brasa (drops raros) para abrir el paso al nido y
+   despertar a Vaelrath, el dragón ancestral. */
+export type QuestStage = 'act1_shrines' | 'act1_boss' | 'act2_embers' | 'act2_gate' | 'act2_boss' | 'free';
+
+export const EMBER_NAME = 'Núcleo de Brasa';
+export const EMBERS_REQUIRED = 3;

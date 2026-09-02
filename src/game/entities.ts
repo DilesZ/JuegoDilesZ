@@ -46,6 +46,8 @@ export interface GameCtx {
   playerHurt(): void;
   /** Recoge un objeto de equipo/consumible del suelo */
   gainItem(def: ItemDef): void;
+  /** Recoge un Núcleo de Brasa (misión del acto II) */
+  gainEmber(): void;
   /** 0 = pleno día, 1 = noche cerrada (los enemigos se vuelven más rápidos) */
   nightFactor: number;
   /** Golpe de FOV cinematográfico (DMC): +grados que decaen solos */
@@ -984,14 +986,20 @@ export class Pickup {
   pos = new THREE.Vector3();
   life = 40;
   dead = false;
-  kind: 'potion' | 'item';
+  kind: 'potion' | 'item' | 'ember';
   item: ItemDef | null = null;
   private core: THREE.Mesh;
   private t = Math.random() * 10;
 
-  constructor(pos: THREE.Vector3, kind: 'potion' | 'item', item?: ItemDef) {
+  constructor(pos: THREE.Vector3, kind: 'potion' | 'item' | 'ember', item?: ItemDef) {
     this.kind = kind;
-    const color = kind === 'item' && item ? RARITY_INFO[item.rarity].hex : 0xff4a4a;
+    let color: number;
+    if (kind === 'ember') {
+      // Núcleo de Brasa: orbe ígneo palpitante (misión acto II)
+      color = 0xff8a3a;
+    } else {
+      color = kind === 'item' && item ? RARITY_INFO[item.rarity].hex : 0xff4a4a;
+    }
     const { group, core } = buildPickupOrb(color);
     this.root = group;
     this.core = core;
@@ -999,6 +1007,10 @@ export class Pickup {
     if (kind === 'item') {
       // los objetos flotan un poco más alto y giran una cartera de destellos
       this.root.scale.setScalar(1.25);
+    }
+    if (kind === 'ember') {
+      this.root.scale.setScalar(1.15);
+      this.life = 120; // las brasas no expiran pronto (son misión)
     }
     this.pos.copy(pos);
     this.pos.y = terrainHeight(pos.x, pos.z) + (kind === 'item' ? 0.7 : 0.5);
@@ -1015,6 +1027,11 @@ export class Pickup {
     const p = ctx.player.pos;
     const d = Math.hypot(p.x - this.pos.x, p.z - this.pos.z);
     if (d < 1.5 && Math.abs(p.y - this.pos.y) < 2.5 && !ctx.player.invulnHit) {
+      if (this.kind === 'ember') {
+        ctx.gainEmber();
+        this.dead = true;
+        return;
+      }
       if (this.kind === 'item' && this.item) {
         ctx.gainItem(this.item);
         this.dead = true;

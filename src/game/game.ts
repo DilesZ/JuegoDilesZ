@@ -5,7 +5,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, type SmithView, type WeaponSlotView, ENEMY_NAMES, STYLE_RANKS } from './core';
+import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, type SmithView, type WeaponSlotView, ENEMY_NAMES, STYLE_RANKS, type QuestStage, EMBERS_REQUIRED, EMBER_NAME } from './core';
 import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, SMITH_CATALOG, upgradeCost, MAX_FORGE, FORGE_DMG_PER_LEVEL, weaponTypeOf, WEAPON_TYPE_ICON, WEAPON_TYPE_LABEL, type EquipSlot, type ItemDef, type WeaponType } from './items';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
@@ -135,6 +135,7 @@ const RESPAWN_T: Record<EnemyType, number> = {
   archer: 32,
   orc: 48,
   boss: 140,
+  boss2: 9999, // el dragón no repuebla solo (final del acto II)
 };
 
 /** Probabilidad de que cada tipo de enemigo suelte un objeto de equipo */
@@ -235,8 +236,20 @@ export class Game {
   private hudTimer = 0;
   private minimapTimer = 0;
   private lockEnemy: Enemy | null = null;
-  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil' | 'merchant' | 'smith'; idx?: number } | null = null;
+  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil' | 'merchant' | 'smith' | 'gate'; idx?: number } | null = null;
   private victoryDelay = -1;
+
+  /* ---------- MISIONES (acto II) ----------
+     Tras derrotar a Bel'Zaroth, su poder escapa hacia el nido helado.
+     El héroe debe arrancar 3 Núcleos de Brasa a los enemigos reforzados
+     para fundir el sello de escarcha y despertar a Vaelrath. */
+  private quest: QuestStage = 'act1_shrines';
+  private embers = 0;
+  private boss2: Enemy | null = null;
+  private boss2Defeated = false;
+  private boss2AwakenT = -1;
+  /** prob. de brasa al matar enemigos (solo durante la misión del acto II) */
+  private emberChance = 0;
 
   // números de daño (DOM pool)
   private dmgPool: DamageNumber[] = [];
@@ -423,6 +436,7 @@ export class Game {
       onEnemyDied: (e) => this.handleEnemyDied(e),
       playerHurt: () => { this.hurtFlash = 1; this.comboHits = 0; this.stylePts *= 0.35; },
       gainItem: (def) => this.gainItem(def),
+      gainEmber: () => this.gainEmber(),
       nightFactor: 0,
       fovKick: (deg) => { this.fovKickAmt = Math.min(7, this.fovKickAmt + deg); },
       shockwave: (pos, color = 0xffd9a0, maxR = 3.4) => {
@@ -493,6 +507,57 @@ export class Game {
   toggleInventory() {
     if (this.phase !== 'playing') return;
     this.setPanel(this.uiPanel === 'inv' ? null : 'inv');
+  }
+
+  /** Recogida de un Núcleo de Brasa (misión del acto II) */
+  private gainEmber() {
+    if (this.quest !== 'act2_embers') return;
+    this.embers++;
+    this.audio.coin();
+    this.addDamageNumber(
+      new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.2, this.player.pos.z),
+      `${EMBER_NAME} ${this.embers}/${EMBERS_REQUIRED}`, '#ff9a4a', true,
+    );
+    this.particles.burst({
+      x: this.player.pos.x, y: this.player.pos.y + 1.2, z: this.player.pos.z,
+      count: 18, speed: 4, color: 0xff8a3a, size: 0.3, life: 0.8, glow: 2.6, gravity: -2,
+    });
+    if (this.embers >= EMBERS_REQUIRED) {
+      this.quest = 'act2_gate';
+      this.world.openGate();
+      this.notice = `Las ${EMBERS_REQUIRED} brasas funden el sello: el portal del nido se ha abierto`;
+      this.noticeT = 9;
+      this.audio.cleanse();
+      this.ctx.shockwave(
+        new THREE.Vector3(WORLD.roost.x, terrainHeight(WORLD.roost.x, WORLD.roost.z), WORLD.roost.z),
+        0x37d8ff, 14,
+      );
+      this.ctx.shake(0.5);
+    }
+    this.emitHud();
+  }
+
+  /** El héroe cruza el portal: Vaelrath despierta en el nido helado */
+  private spawnBoss2(mul = 1) {
+    if (this.boss2 && this.boss2.alive) return;
+    const R = WORLD.roost;
+    const e = this.spawnEnemy('boss2', R.x, R.z - R.r * 0.4);
+    // el dragón nace en vuelo sobre el cráter
+    e.pos.y = terrainHeight(R.x, R.z) + 9;
+    e.maxHp = Math.round(e.maxHp * mul); e.hp = e.maxHp;
+    this.boss2 = e;
+    this.bossActive = true;
+    this.quest = 'act2_boss';
+    this.world.setDragonRage(true); // el cráter se congela
+    this.audio.bossRoar();
+    this.audio.setIntensity(1);
+    this.ctx.shake(1);
+    // rugido de escarcha: estallido frío del cráter
+    this.particles.burst({
+      x: R.x, y: terrainHeight(R.x, R.z) + 2, z: R.z,
+      count: 80, speed: 9, color: 0x8fe8ff, size: 0.45, life: 1.6, gravity: -1.5, drag: 0.9, glow: 2.8,
+    });
+    this.emitHud();
   }
 
   /** Abre/cierra un panel de UI (mochila, tienda o forja) congelando el mundo */
@@ -982,8 +1047,14 @@ export class Game {
         }
       }
     } else {
-      // jefe del mundo: reaparece en modo infinito, cada vez más fuerte
-      this.bossRespawnT = RESPAWN_T.boss;
+      // jefes del mundo: reaparecen en modo infinito, cada vez más fuertes
+      if (e.type === 'boss2') {
+        // Vaelrath muerto: final verdadero, sin respawn automático
+        this.boss2 = null;
+        this.world.setDragonRage(false); // el cráter se deshiela
+      } else {
+        this.bossRespawnT = RESPAWN_T.boss;
+      }
     }
     // orbes de alma
     for (let i = 0; i < 10; i++) {
@@ -1009,6 +1080,12 @@ export class Game {
       this.pickups.push(pk);
       this.scene.add(pk.root);
     }
+    // NÚCLEO DE BRASA (misión acto II): los enemigos abrasados lo sueltan
+    if (!e.isBoss && this.quest === 'act2_embers' && Math.random() < this.emberChance) {
+      const em = new Pickup(new THREE.Vector3(e.pos.x, 0, e.pos.z), 'ember');
+      this.pickups.push(em);
+      this.scene.add(em.root);
+    }
     // guardianes → santuario purificable
     if (e.guardianOf >= 0) {
       const alive = this.enemies.filter(o => o.guardianOf === e.guardianOf && o.alive && o !== e).length;
@@ -1025,7 +1102,6 @@ export class Game {
       this.world.sigilReady();
       this.slowmoT = 2.2;
       this.timeScale = 0.3;
-      this.victoryDelay = 2.0;
       this.audio.setIntensity(0.2);
       this.audio.cleanse();
       this.ctx.shake(1);
@@ -1033,6 +1109,26 @@ export class Game {
         x: e.pos.x, y: e.pos.y + 2, z: e.pos.z,
         count: 90, speed: 10, color: 0xffc84a, size: 0.5, life: 2, gravity: -1, drag: 0.8, glow: 2.6,
       });
+      // ---- ACTO II: la esencia del jefe huye hacia el nido helado ----
+      if (e.type === 'boss' && this.quest === 'act1_boss') {
+        this.quest = 'act2_embers';
+        this.notice = 'La esencia de Bel\'Zaroth escapa al norte… El nido helado despierta';
+        this.noticeT = 9;
+        this.addDamageNumber(
+          new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.6, this.player.pos.z),
+          'NUEVA MISIÓN — LOS NÚCLEOS DE BRASA', '#8fd8ff', true,
+        );
+        // los enemigos del mundo se "abra": +brasa y ligera mejora visual
+        this.emberChance = 0.45;
+      }
+      // ---- Muerte de VAELRATH: final verdadero ----
+      if (e.type === 'boss2') {
+        this.boss2Defeated = true;
+        this.quest = 'free';
+        this.notice = 'El cielo se despeja… Aetheria es libre. Gracias, héroe.';
+        this.noticeT = 10;
+        this.victoryDelay = 2.6;
+      }
     }
   }
 
@@ -1062,6 +1158,16 @@ export class Game {
       const d = Math.hypot(p.x - sh.pos.x, p.z - sh.pos.z);
       if (d < 5 && guardians.length === 0) {
         this.interactTarget = { kind: 'shrine', idx: sh.idx };
+        return;
+      }
+    }
+    // portal del nido del dragón (acto II): visible cuando la quest lo abre
+    if (this.world.gate?.opened && this.quest === 'act2_gate' && !this.boss2Defeated && !(this.boss2?.alive)) {
+      const R = WORLD.roost;
+      const gz = R.z + R.r - 2.2;
+      const d = Math.hypot(p.x - R.x, p.z - gz);
+      if (d < 3.6) {
+        this.interactTarget = { kind: 'gate' };
         return;
       }
     }
@@ -1108,6 +1214,10 @@ export class Game {
       this.world.sigilReady();
       this.spawnBoss(1.35 ** this.bossKills());
       this.addDamageNumber(new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.3, this.player.pos.z), 'EL JEFE DESPIERTA DE NUEVO', '#ff5a4e', true);
+    } else if (t.kind === 'gate') {
+      // cruzar el portal: el dragón ancestral despierta
+      this.spawnBoss2(1 + 0.12 * (this.player.level - 1));
+      this.addDamageNumber(new THREE.Vector3(this.player.pos.x, this.player.pos.y + 2.3, this.player.pos.z), 'VAELRATH DESPIERTA', '#8fd8ff', true);
     }
   }
 
@@ -1808,7 +1918,7 @@ export class Game {
   private drawMinimap() {
     const entities = this.enemies
       .filter(e => e.alive && e.state !== 'spawn')
-      .map(e => ({ x: e.pos.x, z: e.pos.z, kind: e.type as 'goblin' | 'archer' | 'orc' | 'boss' }));
+      .map(e => ({ x: e.pos.x, z: e.pos.z, kind: e.type as 'goblin' | 'archer' | 'orc' | 'boss' | 'boss2' }));
     drawMinimap(
       this.refs.minimap,
       this.player.pos,
@@ -1825,6 +1935,12 @@ export class Game {
   /* ---------- HUD ---------- */
 
   private objective(): string {
+    // ACTO II
+    if (this.quest === 'act2_embers') return `Arranca ${EMBERS_REQUIRED} Núcleos de Brasa a los enemigos (${this.embers}/${EMBERS_REQUIRED})`;
+    if (this.quest === 'act2_gate') return 'Cruza el portal del nido helado (norte-este)';
+    if (this.quest === 'act2_boss') return `Derrota a ${ENEMY_NAMES.boss2}`;
+    if (this.quest === 'free') return 'Aetheria es libre — el sigilo de la arena invoca jefes de nuevo';
+    // ACTO I
     if (this.bossDefeated) return 'Modo infinito — el sigilo de la arena invoca al jefe de nuevo';
     if (this.bossActive) return `Derrota a ${ENEMY_NAMES.boss}`;
     if (this.shrinesCleansed >= 3) return 'El aire vibra… algo despierta en la arena del norte';
@@ -1832,7 +1948,9 @@ export class Game {
   }
 
   private emitHud() {
-    const boss = this.boss;
+    // el jefe mostrado es el activo: Bel'Zaroth (acto I) o Vaelrath (acto II)
+    const boss = this.boss?.alive ? this.boss : (this.boss2?.alive ? this.boss2 : null);
+    const bossLabel = this.boss2?.alive ? ENEMY_NAMES.boss2 : ENEMY_NAMES.boss;
     // vistas cacheadas: solo se reconstruyen cuando cambia el inventario/tienda
     if (this.invDirty || !this.invCache) { this.invCache = this.invView(); this.invDirty = false; }
     this.invCache.open = this.uiPanel === 'inv';
@@ -1862,7 +1980,7 @@ export class Game {
       objective: this.objective(),
       enemiesAlive,
       bossActive: this.bossActive && !!boss?.alive,
-      bossName: ENEMY_NAMES.boss,
+      bossName: bossLabel,
       bossHp: boss?.hp ?? 0, bossMaxHp: boss?.maxHp ?? 1, bossPhase: boss?.phase ?? 1,
       kills: this.player.kills, time: this.elapsed,
       lockOn: !!this.lockEnemy,
@@ -1885,6 +2003,10 @@ export class Game {
       smith: this.smithCache,
       weaponSlots: this.slotsCache,
       weaponType: this.player.weaponType,
+      quest: this.quest,
+      embers: this.embers,
+      embersRequired: EMBERS_REQUIRED,
+      gateOpen: this.world.gate?.opened ?? false,
     });
   }
 
@@ -1896,6 +2018,7 @@ export class Game {
       case 'smith': return `E · Hablar con ${SMITH_NAME} el Herrero (forjar y mejorar)`;
       case 'shrine': return `E · Purificar ${WORLD.shrines[this.interactTarget.idx!].name}`;
       case 'sigil': return 'E · Despertar al jefe de nuevo';
+      case 'gate': return 'E · Cruzar el portal — el dragón ancestral agita';
     }
   }
 

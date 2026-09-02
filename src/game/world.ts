@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { mulberry32, terrainHeight, WORLD, fbm, lerp } from './core';
+import { mulberry32, terrainHeight, WORLD, fbm, lerp, rand, clamp } from './core';
 import {
   buildObelisk, buildBonfire, buildTorch, buildRuinedPillar, buildBrokenArch,
   buildSigil, grassGeometry, grassMaterial, canopyMat, pineCanopyMat,
@@ -12,7 +12,7 @@ import {
 import { Particles } from './particles';
 import {
   terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex, cloudPuffTexture,
-  waterNormal, arenaFloorTexture, bannerTexture,
+  waterNormal, arenaFloorTexture, bannerTexture, stoneMaps,
 } from './textures';
 import type { DayNightSample } from './daynight';
 
@@ -124,12 +124,14 @@ export class World {
     this.buildSky();
     this.buildLights();
     this.buildClouds();
+    this.buildSunBeams();
     this.buildTerrain();
     this.buildDecorations();
     this.buildLunarBasin();
     this.buildBonfire();
     this.buildShrines();
     this.buildArena();
+    this.buildRoost();
     if (renderer) this.buildEnvironmentMap(renderer);
   }
 
@@ -350,6 +352,60 @@ export class World {
   }
   private cloudGroups: THREE.Object3D[] = [];
 
+  /* ---------- God rays: haces volumétricos al alba/atardecer ---------- */
+
+  private sunBeams: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial }[] = [];
+  private beamGroup: THREE.Group | null = null;
+
+  private buildSunBeams() {
+    // 8 haces cilíndricos aditivos alrededor del sol: solo se ven cuando
+    // el sol está bajo (alba/ocaso) — coste ~8 draw calls con blending
+    this.beamGroup = new THREE.Group();
+    const geo = new THREE.CylinderGeometry(0.9, 4.2, 130, 6, 1, true);
+    geo.translate(0, -35, 0);
+    const tex = mistTexture();
+    for (let i = 0; i < 8; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, color: 0xffd9a0, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 6;
+      this.beamGroup.add(mesh);
+      this.sunBeams.push({ mesh, mat });
+    }
+    this.beamGroup.visible = false;
+    this.scene.add(this.beamGroup);
+  }
+
+  /** Orienta los haces hacia el sol y ajusta su opacidad por franja horaria */
+  private updateSunBeams(sunDir: THREE.Vector3, sunGlow: number, tint: THREE.Color, sunA: number) {
+    if (!this.beamGroup) return;
+    // visibles solo con el sol bajo y brillante (alba/atardecer)
+    const k = clamp(sunGlow * sunA, 0, 1) * clamp(1 - Math.abs(sunDir.y) * 1.6, 0, 1);
+    this.beamGroup.visible = k > 0.02;
+    if (!this.beamGroup.visible) return;
+    this.beamGroup.position.set(0, 0, 0);
+    for (let i = 0; i < this.sunBeams.length; i++) {
+      const b = this.sunBeams[i];
+      // distribuye los haces en un cono abierto alrededor del eje solar
+      const offA = (i / this.sunBeams.length) * Math.PI * 2;
+      const offR = 14 + (i % 3) * 9;
+      b.mesh.position.set(
+        sunDir.x * 210 + Math.cos(offA) * offR,
+        sunDir.y * 210 - 20,
+        sunDir.z * 210 + Math.sin(offA) * offR,
+      );
+      // el haz apunta hacia el sol (eje Y del cilindro)
+      b.mesh.lookAt(sunDir.x * 420, sunDir.y * 420, sunDir.z * 420);
+      b.mesh.rotateX(Math.PI / 2);
+      b.mat.color.copy(tint);
+      b.mat.opacity = k * (i % 2 === 0 ? 0.05 : 0.032);
+    }
+  }
+
   /* ---------- Luces ---------- */
 
   private buildLights() {
@@ -408,6 +464,8 @@ export class World {
     this.sunSprites.forEach((sp) => { sp.position.copy(s.lightDir).multiplyScalar(385); });
     if (this.sunMat) this.sunMat.opacity = 0.85 * s.sunA;
     if (this.sunGlowMat) this.sunGlowMat.opacity = 0.34 * s.sunA;
+    // god rays volumétricos (alba/ocaso)
+    this.updateSunBeams(s.lightDir, s.sunGlow, s.sunTint, s.sunA);
     if (this.moonGroup) {
       this.moonGroup.visible = s.moonA > 0.02;
       this.moonGroup.position.set(0, 0, 0);
@@ -429,6 +487,7 @@ export class World {
     // niebla volumétrica global
     if (this.scene.fog instanceof THREE.FogExp2) {
       this.scene.fog.color.copy(s.fogColor);
+      this.rageFogTint(this.scene.fog.color);
       this.scene.fog.density = s.fogDensity;
     }
 
@@ -1152,6 +1211,141 @@ export class World {
 
   setArenaRage(on: boolean) { this.arenaRage = on; }
 
+  /* ---------- Nido del dragón (jefe 2 — cráter de escarcha) ---------- */
+
+  /** Portal sellado hacia el nido: se abre con los Núcleos de Brasa */
+  gate!: { group: THREE.Group; mat: THREE.MeshStandardMaterial; opened: boolean };
+  /** luz fría del cráter */
+  private roostLight!: THREE.PointLight;
+  private roostTime = 0;
+
+  private buildRoost() {
+    const R = WORLD.roost;
+    const h = terrainHeight(R.x, R.z);
+    const rng = mulberry32(0xD2A60);
+    // suelo del cráter: losa de escarcha azulada
+    const frostMat = toonMat(0x9fc4d8, {
+      map: stoneMaps().map, normalMap: stoneMaps().normalMap,
+      roughness: 0.55, metalness: 0.08,
+    });
+    frostMat.color.lerp(new THREE.Color(0x8fd8ff), 0.45);
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(R.r - 1.5, 40), frostMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(R.x, h + 0.28, R.z);
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+    // agujas de hielo perimetrales (colisionables, proyectan sombra)
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 + 0.22;
+      const rr = R.r - rand(2.5, 4);
+      const px = R.x + Math.cos(a) * rr, pz = R.z + Math.sin(a) * rr;
+      const hh = 2.6 + rng() * 3.4;
+      const spike = new THREE.Mesh(
+        new THREE.ConeGeometry(0.5 + rng() * 0.55, hh, 6),
+        toonMat(0xbfe8ff, { roughness: 0.22, metalness: 0.05, emissive: 0x2a6a8a, emissiveIntensity: 0.35 }),
+      );
+      spike.position.set(px, terrainHeight(px, pz) + hh / 2 - 0.3, pz);
+      spike.rotation.y = rng() * Math.PI;
+      spike.rotation.z = (rng() - 0.5) * 0.22;
+      spike.castShadow = true;
+      this.scene.add(spike);
+      this.colliders.push({ x: px, z: pz, r: 0.75 });
+    }
+    // costillas gigantes (restos de presas del dragón)
+    const boneMat = toonMat(0xd8d2c0, { roughness: 0.7, metalness: 0 });
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + 0.8;
+      const rr = R.r * 0.55;
+      const rib = new THREE.Mesh(
+        new THREE.TorusGeometry(1.6 + rng() * 0.7, 0.14, 5, 12, Math.PI * 1.1),
+        boneMat,
+      );
+      rib.position.set(R.x + Math.cos(a) * rr, h + 0.4, R.z + Math.sin(a) * rr);
+      rib.rotation.set(Math.PI / 2 + (rng() - 0.5) * 0.4, rng() * Math.PI * 2, 0);
+      rib.castShadow = true;
+      this.scene.add(rib);
+    }
+    // columna vertebral central (tronco de hueso sobre el que vuela el dragón)
+    const spineLen = 9;
+    for (let i = 0; i < 7; i++) {
+      const seg = new THREE.Mesh(
+        new THREE.SphereGeometry(0.42 - i * 0.035, 7, 6),
+        boneMat,
+      );
+      seg.position.set(R.x - 4 + (i / 6) * spineLen, h + 0.35 + Math.sin(i * 0.8) * 0.14, R.z + Math.sin(i * 1.7) * 0.5);
+      seg.scale.set(1, 0.7, 1.25);
+      seg.castShadow = true;
+      this.scene.add(seg);
+    }
+    // luz fría del nido (pulsa)
+    this.roostLight = new THREE.PointLight(0x66d8ff, 14, 34, 1.8);
+    this.roostLight.position.set(R.x, h + 4, R.z);
+    this.scene.add(this.roostLight);
+    // PORTAL SELLADO: anillo rúnico vertical en el borde del cráter.
+    // Inactivo (apagado) hasta que la misión del acto II lo abre.
+    const gate = new THREE.Group();
+    const ringGeo = new THREE.TorusGeometry(2.6, 0.34, 8, 40);
+    const gateMat = toonMat(0x24303e, { emissive: 0x0a141c, emissiveIntensity: 0.2, roughness: 0.5, metalness: 0.3 });
+    const ring = new THREE.Mesh(ringGeo, gateMat);
+    ring.castShadow = true;
+    gate.add(ring);
+    // velos de escarcha interior (planos cruzados, opacidad baja)
+    const veilMat = new THREE.MeshBasicMaterial({
+      color: 0x7ad8ff, transparent: true, opacity: 0.14,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 3; i++) {
+      const veil = new THREE.Mesh(new THREE.CircleGeometry(2.35, 28), veilMat);
+      veil.position.z = (i - 1) * 0.24;
+      gate.add(veil);
+    }
+    // sitúa el portal en el borde sur del cráter, mirando al centro
+    const gx = R.x, gz = R.z + R.r - 2.2;
+    gate.position.set(gx, terrainHeight(gx, gz) + 2.7, gz);
+    gate.lookAt(R.x, terrainHeight(R.x, R.z) + 2, R.z);
+    this.scene.add(gate);
+    this.colliders.push({ x: gx, z: gz, r: 0.9 });
+    this.gate = { group: gate, mat: gateMat, opened: false };
+  }
+
+  /** Abre el portal del nido (al completar la misión de las brasas) */
+  openGate() {
+    if (!this.gate || this.gate.opened) return;
+    this.gate.opened = true;
+    this.gate.mat.emissive.set(0x37d8ff);
+    this.gate.mat.emissiveIntensity = 2.2;
+  }
+
+  /** Modo "pelea del dragón": el cráter se congela (niebla azulada) */
+  setDragonRage(on: boolean) {
+    if (!on) { this.dragonRage = false; return; }
+    this.dragonRage = true;
+  }
+  private dragonRage = false;
+
+  /** tinte frío aplicado sobre la niebla del ciclo durante la pelea */
+  rageFogTint(fogColor: THREE.Color) {
+    if (this.dragonRage) fogColor.lerp(new THREE.Color(0x2a4a66), 0.45);
+  }
+
+  private updateRoost(dt: number) {
+    // pulso de la luz fría + escarcha de partículas del nido
+    this.roostTime += dt;
+    if (this.roostLight) {
+      this.roostLight.intensity = 12 + Math.sin(this.roostTime * 1.7) * 3.5;
+    }
+    const R = WORLD.roost;
+    if (this.fx && Math.random() < dt * 5) {
+      const a = Math.random() * Math.PI * 2;
+      const rr = Math.random() * R.r;
+      this.fx.spawn({
+        x: R.x + Math.cos(a) * rr, y: terrainHeight(R.x, R.z) + 0.3, z: R.z + Math.sin(a) * rr,
+        vy: 0.5 + Math.random() * 0.9, color: 0x8fe8ff, size: rand(0.16, 0.3),
+        life: rand(1.2, 2.4), glow: 1.4, drag: 0.4, fadePow: 1.6,
+      });
+    }
+  }
+
   activateSigil() {
     if (this.sigil) {
       this.sigil.group.visible = true;
@@ -1249,6 +1443,7 @@ export class World {
     this.skyTime.value = this.time;
     this.waterTime.value = this.time;
     updateWindAndFlames(this.time);
+    this.updateRoost(dt);
 
     // deriva lenta de las nubes billboard
     for (let i = 0; i < this.cloudGroups.length; i++) {

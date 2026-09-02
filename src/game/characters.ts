@@ -103,7 +103,7 @@ export interface CharacterPack {
   /** clips del Soldier renombrados en minúscula (mercader) */
   soldierClips: Record<string, THREE.AnimationClip>;
   /** monstruos por variante de enemigo (Quaternius CC0) */
-  monsters: Partial<Record<'goblin' | 'archer' | 'orc' | 'boss', MonsterPack>>;
+  monsters: Partial<Record<'goblin' | 'archer' | 'orc' | 'boss' | 'boss2', MonsterPack>>;
   foxSource: THREE.Object3D;
   foxClips: THREE.AnimationClip[];
   dungeon: THREE.Group | null;
@@ -484,7 +484,7 @@ export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
   return char;
 }
 
-export type EnemyVariant = 'goblin' | 'archer' | 'orc' | 'boss';
+export type EnemyVariant = 'goblin' | 'archer' | 'orc' | 'boss' | 'boss2';
 
 const ENEMY_LOOK: Record<EnemyVariant, {
   h: number; tint: number; emissive: number | null; emissiveI: number;
@@ -493,6 +493,8 @@ const ENEMY_LOOK: Record<EnemyVariant, {
   archer: { h: 1.38, tint: 0xbadce8, emissive: 0x2ad8ff, emissiveI: 0.3 },
   orc: { h: 2.16, tint: 0xd8a898, emissive: null, emissiveI: 0 },
   boss: { h: 2.95, tint: 0x8a7a94, emissive: 0xff2a1e, emissiveI: 0.16 },
+  // dragón ancestral: azul glacial con vientre de brasa
+  boss2: { h: 3.4, tint: 0x6a9ac8, emissive: 0x37d8ff, emissiveI: 0.34 },
 };
 
 /** Mapeo de clips nativos del monstruo → nombres del motor */
@@ -501,6 +503,7 @@ const MONSTER_CLIPS: Record<EnemyVariant, Record<string, string>> = {
   archer: { idle: 'Flying_Idle', walk: 'Fast_Flying', run: 'Fast_Flying', strafe: 'Flying_Idle', hurt: 'HitReact', death: 'Death', attack1: 'Headbutt', attack2: 'Headbutt', cast: 'Punch' },
   orc: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Punch' },
   boss: { idle: 'Idle', walk: 'Walk', run: 'Run', strafe: 'Idle', hurt: 'HitReact', death: 'Death', attack1: 'Punch', attack2: 'Weapon', cast: 'Weapon' },
+  boss2: { idle: 'Flying_Idle', walk: 'Fast_Flying', run: 'Fast_Flying', strafe: 'Flying_Idle', hurt: 'HitReact', death: 'Death', attack1: 'Headbutt', attack2: 'Punch', cast: 'Punch' },
 };
 
 /** Velocidad de reproducción por clip (ajusta paso natural a velocidad de juego) */
@@ -509,6 +512,7 @@ const MONSTER_TIMESCALE: Record<EnemyVariant, Record<string, number>> = {
   archer: { walk: 0.6, run: 1.0 },
   orc: { walk: 1.35, run: 1.25 },
   boss: { walk: 1.1, run: 1.05 },
+  boss2: { walk: 0.9, run: 1.0 },
 };
 
 export function monsterTimeScale(type: EnemyVariant, clip: string): number {
@@ -565,6 +569,10 @@ export function monsterAttackTimings(pack: CharacterPack): {
     { type: 'boss', idx: 1, clip: 'attack2', frac: 0.62 },
     { type: 'boss', idx: 2, clip: 'attack1', frac: 0.45 },
     { type: 'boss', idx: 3, clip: 'cast', frac: 0.5 },
+    { type: 'boss2', idx: 0, clip: 'attack1', frac: 0.52 },
+    { type: 'boss2', idx: 1, clip: 'attack2', frac: 0.62 },
+    { type: 'boss2', idx: 2, clip: 'cast', frac: 0.55 },
+    { type: 'boss2', idx: 3, clip: 'attack2', frac: 0.48 },
   ];
   const out: { type: EnemyVariant; idx: number; dur: number; hitAt: number }[] = [];
   for (const d of defs) {
@@ -786,6 +794,7 @@ const ASSETS: { file: string; label: string }[] = [
   { file: 'monsters/Ghost_Skull.gltf', label: 'los espectros' },
   { file: 'monsters/Orc.gltf', label: 'los orcos' },
   { file: 'monsters/Demon.gltf', label: 'el señor de la noche' },
+  { file: 'monsters/Dragon.gltf', label: 'el dragón ancestral' },
   { file: 'Fox.glb', label: 'criaturas' },
   { file: 'dungeon_warkarma.glb', label: 'las ruinas' },
 ];
@@ -828,6 +837,7 @@ export async function loadCharacterAssets(
       ['archer', 'monsters/Ghost_Skull.gltf'],
       ['orc', 'monsters/Orc.gltf'],
       ['boss', 'monsters/Demon.gltf'],
+      ['boss2', 'monsters/Dragon.gltf'],
     ];
     for (const [variant, file] of monsterFiles) {
       const gltf = loaded[file];

@@ -6,7 +6,7 @@ import { WORLD, clamp } from './core';
    ============================================================ */
 
 export interface MinimapEntity {
-  x: number; z: number; kind: 'goblin' | 'archer' | 'orc' | 'boss';
+  x: number; z: number; kind: 'goblin' | 'archer' | 'orc' | 'boss' | 'boss2';
 }
 
 export function drawMinimap(
@@ -56,6 +56,14 @@ export function drawMinimap(
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.arc(ax, az, WORLD.arena.r * scale, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // nido del dragón (jefe 2): cráter glacial
+  const [nx, nz] = toMap(WORLD.roost.x, WORLD.roost.z);
+  ctx.strokeStyle = 'rgba(120, 210, 255, 0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(nx, nz, WORLD.roost.r * scale, 0, Math.PI * 2);
   ctx.stroke();
 
   // hoguera
@@ -112,8 +120,9 @@ export function drawMinimap(
   // enemigos
   for (const e of enemies) {
     const [ex, ez] = toMap(e.x, e.z);
-    if (e.kind === 'boss') {
-      ctx.fillStyle = '#ff2211';
+    if (e.kind === 'boss' || e.kind === 'boss2') {
+      // jefe: marca mayor (rojo demonio / azul dragón)
+      ctx.fillStyle = e.kind === 'boss2' ? '#37d8ff' : '#ff2211';
       ctx.beginPath();
       ctx.moveTo(ex, ez - 6); ctx.lineTo(ex + 5, ez + 4); ctx.lineTo(ex - 5, ez + 4);
       ctx.closePath();

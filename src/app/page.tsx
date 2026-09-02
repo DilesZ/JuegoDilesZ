@@ -37,6 +37,10 @@ const INITIAL_HUD: HudState = {
   styleProgress: 0,
   comboHits: 0,
   comboActive: false,
+  quest: 'act1_shrines',
+  embers: 0,
+  embersRequired: 3,
+  gateOpen: false,
   inv: {
     open: false,
     bag: [], bagSize: 24,
@@ -839,24 +843,46 @@ export default function Home() {
 
           {/* Objetivo + reloj del mundo (arriba-centro) */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 text-center max-w-md">
-            <div className="text-[13px] tracking-[0.18em] uppercase text-amber-200/90 font-display bg-black/45 border border-amber-900/40 rounded px-4 py-1.5">
+            <div
+              className={`text-[13px] tracking-[0.18em] uppercase font-display bg-black/45 border rounded px-4 py-1.5 ${
+                hud.quest.startsWith('act2')
+                  ? 'text-sky-200/95 border-sky-700/50'
+                  : 'text-amber-200/90 border-amber-900/40'
+              }`}
+            >
               {hud.objective}
             </div>
             <div className="mt-2">
               <ClockChip clock={hud.clock} day={hud.dayNum} night={hud.night} />
             </div>
-            <div className="flex items-center justify-center gap-1.5 mt-2">
-              {Array.from({ length: hud.shrinesTotal }).map((_, i) => (
-                <div
-                  key={i}
-                  className={`w-3 h-3 rotate-45 border ${
-                    i < hud.shrinesCleansed
-                      ? 'bg-teal-400 border-teal-200 shadow-[0_0_8px_rgba(55,216,200,0.8)]'
-                      : 'bg-red-900/70 border-red-500/70 shadow-[0_0_6px_rgba(216,50,60,0.5)]'
-                  }`}
-                />
-              ))}
-            </div>
+            {/* Progreso: santuarios (acto I) o brasas (acto II) */}
+            {hud.quest.startsWith('act2') ? (
+              <div className="flex items-center justify-center gap-1.5 mt-2">
+                {Array.from({ length: hud.embersRequired }).map((_, i) => (
+                  <div
+                    key={i}
+                    className={`w-3.5 h-3.5 rounded-full border ${
+                      i < hud.embers
+                        ? 'bg-orange-400 border-orange-200 shadow-[0_0_10px_rgba(255,138,58,0.9)]'
+                        : 'bg-stone-900/80 border-orange-900/60'
+                    }`}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center gap-1.5 mt-2">
+                {Array.from({ length: hud.shrinesTotal }).map((_, i) => (
+                  <div
+                    key={i}
+                    className={`w-3 h-3 rotate-45 border ${
+                      i < hud.shrinesCleansed
+                        ? 'bg-teal-400 border-teal-200 shadow-[0_0_8px_rgba(55,216,200,0.8)]'
+                        : 'bg-red-900/70 border-red-500/70 shadow-[0_0_6px_rgba(216,50,60,0.5)]'
+                    }`}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Aviso de amanecer/anochecer */}
@@ -871,11 +897,18 @@ export default function Home() {
           {/* Barra del jefe */}
           {hud.bossActive && (
             <div className="absolute top-28 left-1/2 -translate-x-1/2 w-[min(560px,70vw)]">
-              <div className="text-center font-gothic tracking-[0.14em] text-red-200 text-2xl mb-1 uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
+              <div className={`text-center font-gothic tracking-[0.14em] text-2xl mb-1 uppercase drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] ${hud.quest === 'act2_boss' ? 'text-sky-200' : 'text-red-200'}`}>
                 {hud.bossName}
-                {hud.bossPhase >= 2 && <span className="ml-3 align-middle text-[11px] font-display text-red-400 animate-pulse tracking-[0.3em]">FASE {hud.bossPhase}</span>}
+                {hud.bossPhase >= 2 && <span className={`ml-3 align-middle text-[11px] font-display animate-pulse tracking-[0.3em] ${hud.quest === 'act2_boss' ? 'text-sky-400' : 'text-red-400'}`}>FASE {hud.bossPhase}</span>}
               </div>
-              <Bar value={hud.bossHp} max={hud.bossMaxHp} className="bg-gradient-to-r from-red-950 via-red-600 to-red-400" height="h-4" />
+              <Bar
+                value={hud.bossHp}
+                max={hud.bossMaxHp}
+                className={hud.quest === 'act2_boss'
+                  ? 'bg-gradient-to-r from-sky-950 via-sky-500 to-cyan-300'
+                  : 'bg-gradient-to-r from-red-950 via-red-600 to-red-400'}
+                height="h-4"
+              />
             </div>
           )}
 

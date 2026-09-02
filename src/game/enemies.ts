@@ -10,7 +10,7 @@ import { monsterTimeScale } from './characters';
    ENEMIGOS: IA por máquina de estados + jefe con fases
    ============================================================ */
 
-export type EnemyType = 'goblin' | 'archer' | 'orc' | 'boss';
+export type EnemyType = 'goblin' | 'archer' | 'orc' | 'boss' | 'boss2';
 
 interface EnemyAttackDef {
   clip: string;
@@ -20,7 +20,7 @@ interface EnemyAttackDef {
   range: number;
   arc: number;          // radians total (PI = 180°)
   impulse: number;
-  special?: 'aoe' | 'orbs' | 'spin';
+  special?: 'aoe' | 'orbs' | 'spin' | 'breath';
   weight: number;
   minPhase?: number;
 }
@@ -69,6 +69,24 @@ export const ENEMY_CFG: Record<EnemyType, EnemyCfg> = {
       { clip: 'cast', dur: 1.0, hitAt: 0.5, dmg: 14, range: 40, arc: 0, impulse: 0, special: 'orbs', weight: 2, minPhase: 2 },
     ],
   },
+  /* VAELRATH, la Furia Ancestral: dragón del nido helado.
+     Ataca en vuelo: barre con aliento (cono de fuego), embiste en picado
+     y aterriza para morder. Fase 2 (60%): el aliento es doble y espiral;
+     fase 3 (30%): tormenta de brasas al aterrizar. */
+  boss2: {
+    make: buildBossRig, hp: 1250, dmg: 26, speed: 7.5, aggro: 42, radius: 1.7,
+    xp: 900, gold: [260, 380], potionChance: 1, cooldown: 1.5, scale: 2.4,
+    attacks: [
+      // picado de embestida (Headbutt): golpe en cono al pasar
+      { clip: 'attack1', dur: 1.05, hitAt: 0.52, dmg: 30, range: 4.6, arc: 2.6, impulse: 4, weight: 3 },
+      // mordisco en aterrizaje (Punch): cono corto y dañino
+      { clip: 'attack2', dur: 0.85, hitAt: 0.55, dmg: 34, range: 3.4, arc: 2.2, impulse: 3, weight: 2 },
+      // aliento de fuego (cast): cono de partículas + daño por segundo
+      { clip: 'cast', dur: 1.6, hitAt: 0.6, dmg: 9, range: 13, arc: 0.75, impulse: 0, special: 'breath', weight: 3 },
+      // aterrizaje sísmico (fase 2+): onda de escarcha
+      { clip: 'attack2', dur: 1.15, hitAt: 0.5, dmg: 26, range: 6.2, arc: 6.3, impulse: 4, special: 'aoe', weight: 2, minPhase: 2 },
+    ],
+  },
 };
 
 type AiState = 'spawn' | 'idle' | 'wander' | 'chase' | 'strafe' | 'windup' | 'recover' | 'hurt' | 'dead';
@@ -112,13 +130,18 @@ export class Enemy extends Entity {
   tint = 0; // acumulador paraflash
   /** hit-react direccional acumulado (decae solo) */
   private ovHitLean = 0;
+  /** vuelo del dragón: tiempo en órbita y ángulo actual */
+  private flyT = 0;
+  private flyOrbit = Math.random() * Math.PI * 2;
+  /** velocidad de caída (muerte del dragón) */
+  private fallSpeed = 0;
 
   constructor(type: EnemyType, pos: THREE.Vector3, guardianOf = -1, hpMul = 1, dmgMul = 1) {
     super();
     this.type = type;
     this.cfg = ENEMY_CFG[type];
     this.guardianOf = guardianOf;
-    this.isBoss = type === 'boss';
+    this.isBoss = type === 'boss' || type === 'boss2';
     this.procRig = this.cfg.make();
     this.rig = this.procRig;
     this.root.add(this.procRig.root);
@@ -151,8 +174,9 @@ export class Enemy extends Entity {
     this.bar.visible = false;
     this.bar.position.y = this.rig.height + 0.4;
     this.root.add(this.bar);
-    // spawn: hundido
-    this.root.position.y -= 2.2;
+    // spawn: hundido (el dragón nace en el aire — lo posiciona Game)
+    if (type !== 'boss2') this.root.position.y -= 2.2;
+    else this.root.position.y = this.pos.y;
   }
   private dmgMul: number;
 
@@ -302,6 +326,19 @@ export class Enemy extends Entity {
     switch (this.state) {
       case 'spawn': {
         this.stateT += dt;
+        // dragón: nace en vuelo con rugido, sin emerger del suelo
+        if (this.type === 'boss2') {
+          if (Math.random() < 0.6) ctx.particles.spawn({
+            x: this.pos.x + rand(-2, 2), y: this.pos.y + rand(-1, 1), z: this.pos.z + rand(-2, 2),
+            color: 0x8fe8ff, size: 0.4, life: 0.9, vy: rand(-2, 1), glow: 2,
+          });
+          this.anim('idle', { fade: 0.2 });
+          this.glb?.animator.update(dt);
+          if (this.stateT > 1.1) { this.state = 'chase'; this.stateT = 0; this.aggroed = true; }
+          this.root.position.copy(this.pos);
+          this.root.rotation.y = this.yaw;
+          return;
+        }
         const t = clamp(this.stateT / 1.0, 0, 1);
         this.root.position.y = this.pos.y - 2.2 * (1 - t) + Math.sin(t * Math.PI) * 0.15;
         if (Math.random() < 0.5) ctx.particles.spawn({
@@ -321,6 +358,25 @@ export class Enemy extends Entity {
           this.anim('death', { once: true });
         } else {
           this.applier.snap(sampleClip(CLIPS.death, this.stateT), dt);
+        }
+        // DRAGÓN: cae del cielo con gravedad antes de apagarse
+        if (this.type === 'boss2') {
+          this.fallSpeed = Math.min(14, this.fallSpeed + 18 * dt);
+          const groundY = terrainHeight(this.pos.x, this.pos.z);
+          this.pos.y -= this.fallSpeed * dt;
+          if (this.pos.y <= groundY) {
+            this.pos.y = groundY;
+            if (this.fallSpeed > 4) {
+              // impacto del aterrizaje final
+              ctx.shake(0.8);
+              ctx.particles.burst({
+                x: this.pos.x, y: this.pos.y + 0.4, z: this.pos.z,
+                count: 42, speed: 7, spread: 0.5, color: 0x8fe8ff, size: 0.4, life: 1, gravity: 5, drag: 1.6, glow: 1.8,
+              });
+            }
+            this.fallSpeed = 0;
+          }
+          this.root.position.set(this.pos.x, this.pos.y, this.pos.z);
         }
         if (k >= 1) {
           // hundirse y desaparecer
@@ -386,6 +442,36 @@ export class Enemy extends Entity {
       case 'chase': {
         this.cd -= dt;
         if (dist > cfg.aggro * 2.6 || p.state === 'dead') { this.aggroed = false; this.state = 'wander'; this.stateT = 0; break; }
+        // DRAGÓN: órbita aérea sobre el cráter con picados periódicos
+        if (this.type === 'boss2') {
+          this.flyT += dt;
+          // velocidad angular de órbita + altura oscilante
+          this.flyOrbit += dt * (0.55 + 0.2 * Math.sin(this.flyT * 0.8)) * (this.phase === 3 ? 1.35 : 1);
+          const R = WORLD.roost;
+          const orR = R.r * 0.82 + Math.sin(this.flyT * 0.5) * 3.5;
+          const targetX = R.x + Math.cos(this.flyOrbit) * orR;
+          const targetZ = R.z + Math.sin(this.flyOrbit) * orR;
+          const baseY = terrainHeight(R.x, R.z);
+          const targetY = baseY + 7.5 + Math.sin(this.flyT * 1.1) * 2.2;
+          // persecución suave del punto de órbita (vuelo con inercia)
+          this.pos.x = damp(this.pos.x, targetX, 2.4, dt);
+          this.pos.z = damp(this.pos.z, targetZ, 2.4, dt);
+          this.pos.y = damp(this.pos.y, targetY, 2.8, dt);
+          // el hocico siempre mira al jugador (el dragón gira la cabeza,
+          // el cuerpo sigue la trayectoria)
+          this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 4.5, dt);
+          this.moving = true;
+          if (this.cd <= 0 && dist < cfg.aggro) {
+            const atk = this.pickAttack(dist);
+            if (atk) {
+              this.attack = atk; this.state = 'windup'; this.stateT = 0; this.didHit = false;
+              this.playWindup(atk);
+              this.yaw = Math.atan2(toPlayer.x, toPlayer.z);
+              break;
+            }
+          }
+          break;
+        }
         const range = this.cfg.strafe ? this.cfg.preferredRange! : cfg.attacks[0].range;
         if (dist <= cfg.attacks[0].range && this.cd <= 0) {
           // atacar
@@ -457,6 +543,33 @@ export class Enemy extends Entity {
         if (localT < atk.hitAt * 0.7 && !cfg.strafe && atk.special !== 'orbs') {
           this.yaw = dampAngle(this.yaw, Math.atan2(toPlayer.x, toPlayer.z), 6, dt);
         }
+        // DRAGÓN: se lanza en picado/alienta desde el aire según el ataque
+        if (this.type === 'boss2') {
+          if (atk.special === 'breath') {
+            // aliento: baja a media altura y barre fuego continuo
+            const hoverY = terrainHeight(this.pos.x, this.pos.z) + 4.2;
+            this.pos.y = damp(this.pos.y, hoverY, 2.2, dt);
+            // particulas del chorro durante toda la fase activa
+            if (localT > atk.hitAt * 0.55 && localT < atk.dur * 0.92) {
+              this.breatheFire(ctx, atk);
+            }
+          } else if (atk.special === 'aoe') {
+            // aterrizaje sísmico: cae rápido al suelo
+            const groundY = terrainHeight(this.pos.x, this.pos.z);
+            this.pos.y = damp(this.pos.y, groundY + 0.2, 6.5, dt);
+          } else {
+            // picado/embestida: apunta y se lanza hacia el jugador
+            if (localT < atk.hitAt) {
+              this.yaw = Math.atan2(toPlayer.x, toPlayer.z);
+            } else {
+              // fase activa: embiste hacia delante y abaja el morro
+              this.pos.x += Math.sin(this.yaw) * atk.impulse * 3.2 * dt;
+              this.pos.z += Math.cos(this.yaw) * atk.impulse * 3.2 * dt;
+              const aimY = p.pos.y + 1.2;
+              this.pos.y = damp(this.pos.y, aimY, 3.2, dt);
+            }
+          }
+        }
         if (this.glb) {
           // (el clip de ataque se dispara UNA vez al entrar en windup)
           this.glb.animator.update(dt * (speed - 1)); // aceleración del jefe en fase 3
@@ -525,9 +638,17 @@ export class Enemy extends Entity {
       }
     }
 
-    const h = terrainHeight(this.pos.x, this.pos.z);
-    // (los estados 'dead' y 'spawn' ya retornaron antes)
-    this.pos.y = damp(this.pos.y, h, 20, dt);
+    // el dragón volador gestiona su altura en vuelo; el resto se apoya
+    // (los estados 'dead' y 'spawn' del dragón retornan antes)
+    const flying = this.type === 'boss2';
+    if (!flying) {
+      const h = terrainHeight(this.pos.x, this.pos.z);
+      this.pos.y = damp(this.pos.y, h, 20, dt);
+    } else {
+      // suelo de seguridad: nunca bajo el terreno (picados largos)
+      const minH = terrainHeight(this.pos.x, this.pos.z) + 0.4;
+      if (this.pos.y < minH) this.pos.y = minH;
+    }
     this.root.position.set(this.pos.x, this.pos.y, this.pos.z);
     this.root.rotation.y = this.yaw;
 
@@ -539,6 +660,39 @@ export class Enemy extends Entity {
       const frac = clamp(this.hp / this.maxHp, 0, 1);
       this.barFill.scale.x = Math.max(0.0001, frac);
     }
+  }
+
+  /** Aliento de fuego del dragón: chorro de partículas en cono desde el hocico */
+  private breatheFire(ctx: GameCtx, atk: EnemyAttackDef) {
+    const muzzle = _eTmpC.set(
+      this.pos.x + Math.sin(this.yaw) * 1.6,
+      this.pos.y + this.rig.height * 0.42,
+      this.pos.z + Math.cos(this.yaw) * 1.6,
+    );
+    // 4-6 partículas por frame en el frente del cono
+    const n = this.phase >= 2 ? 5 : 4;
+    for (let i = 0; i < n; i++) {
+      const spread = 0.22;
+      const dirX = Math.sin(this.yaw) + rand(-spread, spread);
+      const dirZ = Math.cos(this.yaw) + rand(-spread, spread);
+      const spd = rand(9, 15);
+      ctx.particles.spawn({
+        x: muzzle.x, y: muzzle.y, z: muzzle.z,
+        vx: dirX * spd, vy: rand(-1.2, 0.6), vz: dirZ * spd,
+        color: i % 3 === 0 ? 0xffd98a : (i % 3 === 1 ? 0xff8a2a : 0xff5a1e),
+        size: rand(0.35, 0.6), life: rand(0.5, 0.85),
+        glow: 2.8, drag: 1.6, grow: 1.2, fadePow: 1.3,
+      });
+    }
+    // brasas ocasionales que quedan flotando
+    if (Math.random() < 0.3) {
+      ctx.particles.spawn({
+        x: muzzle.x, y: muzzle.y, z: muzzle.z,
+        vx: rand(-2, 2), vy: rand(1, 3), vz: rand(-2, 2),
+        color: 0xffb45a, size: 0.18, life: rand(0.8, 1.4), glow: 2.2, gravity: -1.5,
+      });
+    }
+    void atk;
   }
 
   private executeAttack(atk: EnemyAttackDef, ctx: GameCtx) {
@@ -579,6 +733,29 @@ export class Enemy extends Entity {
       const d = Math.hypot(p.pos.x - impact.x, p.pos.z - impact.z);
       if (d < atk.range * 0.85 && Math.abs(p.pos.y - impact.y) < 2.5) {
         p.takeDamage(atk.dmg * this.dmgMul, this.pos, ctx);
+      }
+      return;
+    }
+    if (atk.special === 'breath') {
+      // Aliento de fuego: cono de daño frontal (el chorro visual ya está vivo)
+      ctx.audio.slam();
+      ctx.shake(0.3);
+      const toP = new THREE.Vector3().subVectors(p.pos, this.pos).setY(0);
+      const d = toP.length();
+      if (d <= atk.range + p.radius) {
+        const angTo = Math.atan2(toP.x, toP.z);
+        let diff = Math.abs(((angTo - this.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+        diff = Math.abs(diff);
+        // el jugador solo se salva si está por encima del chorro
+        const heightOk = Math.abs(p.pos.y + 1 - (this.pos.y + this.rig.height * 0.42)) < 5;
+        if (diff <= atk.arc / 2 && heightOk) {
+          p.takeDamage(atk.dmg * this.dmgMul * (this.phase >= 2 ? 1.3 : 1), this.pos, ctx);
+          // quemadura visual sobre el héroe
+          ctx.particles.burst({
+            x: p.pos.x, y: p.pos.y + 1, z: p.pos.z,
+            count: 14, speed: 4, color: 0xff6a2a, size: 0.3, life: 0.6, glow: 2.4, gravity: -1,
+          });
+        }
       }
       return;
     }
