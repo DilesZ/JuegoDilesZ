@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { loadCharacterAssets } from '@/game/characters';
-import type { HudState, ItemView, ShopEntryView, ShopSellView } from '@/game/core';
+import type { HudState, ItemView, ShopEntryView, ShopSellView, WeaponSlotView } from '@/game/core';
 import type { Game, QualityTier } from '@/game/game';
+import { WEAPON_TYPE_LABEL } from '@/game/items';
 
 /* ============================================================
    AETHERIA — Eco del Reino Caído · Action RPG 3D
@@ -52,6 +53,19 @@ const INITIAL_HUD: HudState = {
     gold: 0,
     restockDay: 1,
   },
+  smith: {
+    open: false,
+    name: 'Bran',
+    gold: 0,
+    weapon: null,
+    forgeLevel: 0,
+    maxForge: 5,
+    upgradeCost: null,
+    upgradeDesc: '',
+    catalog: [],
+  },
+  weaponSlots: [],
+  weaponType: 'sword',
 };
 
 function fmtTime(t: number): string {
@@ -123,8 +137,9 @@ const CONTROLS: [string, string][] = [
   ['W A S D', 'Moverse'],
   ['Ratón', 'Cámara'],
   ['Rueda', 'Zoom de cámara'],
-  ['Clic izq.', 'Combo de 4 golpes (canc. con el siguiente)'],
-  ['Clic der.', 'Mandoble cargado (o remate en la cadena)'],
+  ['Clic izq.', 'Ataca (combo distinto por arma)'],
+  ['Clic der.', 'Golpe cargado (o remate en la cadena)'],
+  ['1 2 3 4', 'Espada · Arco · Alabarda · Bastón (forja en Bran)'],
   ['Espacio', 'Esquiva rodando — cancela ataques (invulnerable)'],
   ['Tab', 'Fijar objetivo'],
   ['F', 'Beber poción'],
@@ -491,6 +506,185 @@ function MerchantPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | nul
   );
 }
 
+/* ============================================================
+   FORJA DEL HERRERO (Bran)
+   ============================================================ */
+
+function SmithPanel({ hud, g, onClose }: { hud: HudState; g: () => Game | null; onClose: () => void }) {
+  const [hover, setHover] = useState<{ item: ItemView; extra: string; accent: string } | null>(null);
+  const smith = hud.smith;
+  const affordUp = smith.upgradeCost !== null && hud.gold >= smith.upgradeCost;
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-[3px] pointer-events-auto">
+      <div className="relative aetheria-frame w-[min(880px,95vw)] max-h-[92vh] bg-[#140d0a]/95 border border-orange-900/50 shadow-[0_0_80px_rgba(0,0,0,0.7)] flex flex-col aetheria-pop">
+        <Corners />
+
+        {/* Cabecera */}
+        <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-orange-900/30">
+          <div className="flex items-center gap-4">
+            <div className="w-11 h-11 rounded-full border-2 border-orange-600/80 bg-stone-950/90 flex items-center justify-center text-xl shadow-[0_0_12px_rgba(0,0,0,0.8)]">
+              ⚒️
+            </div>
+            <div>
+              <h2 className="font-display text-2xl text-orange-200 tracking-[0.18em] uppercase leading-none">
+                {smith.name} · Herrero de la Forja
+              </h2>
+              <div className="text-[11px] text-stone-500 tracking-[0.2em] uppercase mt-1">
+                “El acero se mejora golpes a golpes” · Forja encendida día y noche
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className={`text-sm font-semibold px-3 py-1.5 rounded border ${hud.gold > 0 ? 'text-amber-300/90 border-amber-800/50 bg-black/40' : 'text-red-300 border-red-900/50 bg-black/40'}`}>
+              ◈ {hud.gold}
+            </div>
+            <button
+              onClick={onClose}
+              className="w-9 h-9 rounded border border-stone-700/70 bg-stone-900/80 text-stone-400 hover:text-amber-100 hover:border-amber-600/60 transition-colors text-lg leading-none"
+              title="Cerrar (Esc)"
+            >✕</button>
+          </div>
+        </div>
+
+        {/* Cuerpo: mejorar | forjar */}
+        <div className="grid md:grid-cols-2 gap-5 p-5 overflow-y-auto aetheria-scroll">
+          {/* Mejorar arma equipada */}
+          <div className="flex flex-col">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-orange-600/80 font-display mb-2">Yunque · Mejorar arma equipada</div>
+            <div className="flex-1 bg-black/30 border border-stone-800/70 rounded-lg p-4 flex flex-col gap-3">
+              {smith.weapon ? (
+                <>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-14 h-14 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-3xl"
+                      style={{ borderColor: RARITY_CSS[smith.weapon.rarity], boxShadow: `0 0 12px ${RARITY_CSS[smith.weapon.rarity]}44` }}
+                    >
+                      {smith.weapon.icon}
+                    </div>
+                    <div>
+                      <div className="font-display text-base tracking-wide" style={{ color: RARITY_CSS[smith.weapon.rarity] }}>
+                        {smith.weapon.name}
+                      </div>
+                      <div className="text-[11px] text-stone-500">{RARITY_LABEL[smith.weapon.rarity]} · {KIND_LABEL[smith.weapon.kind]}</div>
+                      <div className="mt-1 flex items-center gap-1">
+                        {Array.from({ length: smith.maxForge }).map((_, i) => (
+                          <span
+                            key={i}
+                            className={`w-3 h-3 rotate-45 border ${i < smith.forgeLevel
+                              ? 'bg-orange-400 border-orange-200 shadow-[0_0_6px_rgba(251,146,60,0.9)]'
+                              : 'bg-stone-900 border-stone-700'}`}
+                          />
+                        ))}
+                        <span className="ml-2 text-[11px] font-bold text-orange-300">Nv. {smith.forgeLevel}/{smith.maxForge}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-[12px] text-emerald-300/90 font-semibold">⚒ {smith.upgradeDesc}</div>
+                  <button
+                    onClick={() => g()?.upgradeWeapon()}
+                    disabled={smith.upgradeCost === null}
+                    className={`mt-auto w-full py-3 rounded border-2 font-display tracking-[0.2em] uppercase text-sm transition-all
+                      ${smith.upgradeCost !== null
+                        ? affordUp
+                          ? 'border-orange-500/70 bg-orange-900/30 text-orange-100 hover:bg-orange-700/40 hover:border-orange-400 cursor-pointer'
+                          : 'border-stone-700/70 bg-stone-900/60 text-stone-500 cursor-not-allowed'
+                        : 'border-stone-800/60 bg-stone-950/60 text-stone-600 cursor-not-allowed'}`}
+                  >
+                    {smith.upgradeCost !== null ? `⚒ Mejorar · ${smith.upgradeCost} ◈` : 'Al máximo'}
+                  </button>
+                </>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-[12px] text-stone-600 italic text-center">
+                  No llevas ninguna arma equipada…
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Forjar armas nuevas */}
+          <div className="flex flex-col">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-orange-600/80 font-display mb-2">Hornalla · Forjar estilos de combate</div>
+            <div className="flex-1 flex flex-col gap-2 bg-black/30 border border-stone-800/70 rounded-lg p-3">
+              {smith.catalog.length === 0 && (
+                <div className="text-[12px] text-stone-600 italic py-6 text-center">Catálogo no disponible</div>
+              )}
+              {smith.catalog.map((e, i) => {
+                const afford = hud.gold >= e.price;
+                return (
+                  <button
+                    key={`${e.item.id}-${i}`}
+                    onClick={() => g()?.buySmithWeapon(i)}
+                    onMouseEnter={() => setHover({
+                      item: e.item,
+                      extra: e.owned ? 'Ya posees un arma de este estilo' : `Precio de forja: ${e.price} ◈`,
+                      accent: e.owned ? '#8ef2a6' : (afford ? '#8ef2a6' : '#ff8a7a'),
+                    })}
+                    onMouseLeave={() => setHover(null)}
+                    className={`flex items-center gap-3 p-3 rounded-md border-2 bg-stone-950/85 text-left transition-all duration-150
+                      ${e.owned ? 'opacity-55 cursor-default' : afford ? 'cursor-pointer hover:scale-[1.02] hover:border-orange-400/80' : 'opacity-70 cursor-not-allowed'}`}
+                    style={{ borderColor: `${RARITY_CSS[e.item.rarity]}88` }}
+                  >
+                    <div
+                      className="w-12 h-12 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-2xl"
+                      style={{ borderColor: RARITY_CSS[e.item.rarity], boxShadow: `0 0 10px ${RARITY_CSS[e.item.rarity]}44` }}
+                    >
+                      {e.item.icon}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-display text-sm tracking-wide truncate" style={{ color: RARITY_CSS[e.item.rarity] }}>
+                        {e.item.name}
+                      </div>
+                      <div className="text-[10px] text-stone-500 uppercase tracking-wider">
+                        {WEAPON_TYPE_LABEL[e.wtype]}
+                      </div>
+                    </div>
+                    {e.owned ? (
+                      <span className="text-[11px] font-bold text-emerald-300 shrink-0">✓ ADQUIRIDA</span>
+                    ) : (
+                      <span className={`text-sm font-bold shrink-0 ${afford ? 'text-amber-300' : 'text-red-400/90'}`}>◈ {e.price}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Detalle + pie */}
+        <div className="px-5 pb-4">
+          <div className="bg-black/30 border border-stone-800/70 rounded-lg p-3 min-h-[64px] flex items-center">
+            {hover ? (
+              <div className="flex items-center gap-3 w-full">
+                <div
+                  className="w-10 h-10 shrink-0 rounded-md border-2 bg-stone-950/85 flex items-center justify-center text-xl"
+                  style={{ borderColor: RARITY_CSS[hover.item.rarity], boxShadow: `0 0 10px ${RARITY_CSS[hover.item.rarity]}44` }}
+                >
+                  {hover.item.icon}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-display text-sm tracking-wide" style={{ color: RARITY_CSS[hover.item.rarity] }}>{hover.item.name}</div>
+                  <div className="text-[10px] text-stone-500 italic">{hover.item.desc}</div>
+                  <ItemStatLines item={hover.item} />
+                </div>
+                <div className="text-sm font-bold shrink-0" style={{ color: hover.accent }}>{hover.extra}</div>
+              </div>
+            ) : (
+              <div className="w-full text-center text-[12px] text-stone-600 italic">
+                Cada arma desbloquea un estilo de combate propio · cámbialas con las teclas 1-4
+              </div>
+            )}
+          </div>
+          <div className="mt-2 text-[10px] text-stone-600 flex justify-between">
+            <span>Esc / ✕ cierra la forja · La mejora del arma es permanente</span>
+            <span className="hidden sm:inline">Las brasas de Bran nunca se apagan</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================ */
 
 export default function Home() {
@@ -706,6 +900,25 @@ export default function Home() {
             </button>
           </div>
 
+          {/* Barra de armas (cambio rápido 1-4) */}
+          {hud.weaponSlots && hud.weaponSlots.length > 0 && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-end gap-2">
+              {hud.weaponSlots.map((s: WeaponSlotView) => (
+                <div
+                  key={s.type}
+                  className={`w-12 h-12 rounded-md border-2 bg-stone-950/85 flex flex-col items-center justify-center transition-all duration-150
+                    ${s.active
+                      ? 'border-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.7)] scale-110'
+                      : s.owned ? 'border-stone-600/80' : 'border-stone-800/60 opacity-40'}`}
+                  title={s.owned ? `${s.name} (${s.label})` : `${s.name} — forja en Bran el Herrero`}
+                >
+                  <span className="text-lg leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.9)]">{s.icon}</span>
+                  <span className={`text-[9px] font-bold leading-none mt-0.5 ${s.active ? 'text-amber-200' : 'text-stone-500'}`}>{s.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Prompt de interacción (abajo-centro) */}
           {hud.prompt && (
             <div className="absolute bottom-20 left-1/2 -translate-x-1/2">
@@ -717,9 +930,9 @@ export default function Home() {
 
           {/* Ayuda de controles (abajo-derecha) */}
           <div className="absolute bottom-4 right-4 text-right text-[10px] leading-relaxed text-stone-500">
-            <div>Clic izq. combo ×4 (remate final) · Clic der. cargado · Espacio esquiva-cancel</div>
-            <div>Tab objetivo · F poción · E interactuar / comerciar · Esc pausa</div>
-            <div>Rueda zoom · I mochila · Ferran comercia junto a la hoguera · ¡encadena sin parar para subir el ESTILO!</div>
+            <div>1-4 cambian de arma (espada/arco/alabarda/bastón) · clic izq. combo · clic der. cargado</div>
+            <div>Tab objetivo · F poción · E interactuar · Esc pausa · Espacio esquiva-cancel</div>
+            <div>Ferran comercia junto a la hoguera · Bran forja y mejora armas · ¡encadena para subir el ESTILO!</div>
           </div>
         </div>
       )}
@@ -732,6 +945,11 @@ export default function Home() {
       {/* ============ TIENDA DEL MERCADER ============ */}
       {booted && hud.shop?.open && (
         <MerchantPanel hud={hud} g={g} onClose={() => g()?.closeShop()} />
+      )}
+
+      {/* ============ FORJA DEL HERRERO ============ */}
+      {booted && hud.smith?.open && (
+        <SmithPanel hud={hud} g={g} onClose={() => g()?.closeSmith()} />
       )}
 
       {/* ============ MENÚ PRINCIPAL (mundo en vivo detrás) ============ */}
@@ -758,7 +976,8 @@ export default function Home() {
                 Purifícalos, crece en poder y derriba al señor de la noche en su arena.
               </p>
               <p className="font-body text-amber-200/70 text-[12px] leading-relaxed max-w-lg mx-auto mt-2">
-                Comercia con <span className="text-amber-300">Ferran el Mercader</span> junto a la hoguera ·
+                Comercia con <span className="text-amber-300">Ferran el Mercader</span> y forja armas nuevas con{' '}
+                <span className="text-orange-300">Bran el Herrero</span> (espada, arco, alabarda y bastón de hechizos) ·
                 Los enemigos reaparecen en sus puestos con el tiempo, como en los MMORPG
               </p>
 

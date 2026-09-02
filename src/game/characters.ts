@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { rand, terrainHeight } from './core';
-import { buildSword, buildShield, stoneMat, type VisualRig } from './models';
+import { buildSword, buildShield, buildBow, buildHalberd, buildStaff, buildHammer, stoneMat, type VisualRig } from './models';
 import { CLIPS, sampleClip, idlePose, strafePose, type Pose } from './animations';
 
 /* ============================================================
@@ -74,12 +74,19 @@ export class GlbAnimator {
 
 /* ---------- Carácter GLB genérico ---------- */
 
+export type HeroWeaponVisual = 'sword' | 'bow' | 'halberd' | 'staff';
+
 export interface GlbCharacter {
   root: THREE.Group;
   model: THREE.Object3D;
   rig: VisualRig;
   animator: GlbAnimator;
   height: number;
+  /** huesos para overlay procedural (mirada/inclinación) */
+  head?: THREE.Object3D | null;
+  spine?: THREE.Object3D | null;
+  /** cambia el arma visible en la mano derecha (héroe) */
+  setWeapon?: (t: HeroWeaponVisual) => void;
 }
 
 /** Pack de un monstruo: fuente + clips ya renombrados a nombres del motor */
@@ -242,6 +249,24 @@ function greetPose(t: number): Pose {
   return p;
 }
 
+/** Martilleo del herrero: alza el martillo y golpea el yunque (1.5 s) */
+function hammerPose(t: number): Pose {
+  const dur = 1.5;
+  const p = idlePose(t);
+  // fase: 0-0.55 alza el martillo, 0.55-0.7 golpe cae, 0.7-1.0 recupera
+  const up = Math.min(1, t / (dur * 0.42));
+  const down = t > dur * 0.42 && t < dur * 0.6 ? (t - dur * 0.42) / (dur * 0.18) : 0;
+  const settle = t >= dur * 0.6 ? Math.max(0, 1 - (t - dur * 0.6) / (dur * 0.4)) : 1;
+  const lift = up * (1 - down) * (t < dur * 0.6 ? 1 : 0);
+  const w = t < dur * 0.6 ? lift : 0;
+  p.armR = [-0.5 - 2.0 * w + down * 1.6 * (1 - settle * 0.0), 0, -0.35];
+  p.torso = [0.06 + 0.16 * w - down * 0.12, 0.18, 0];
+  p.head = [0.1 + 0.08 * w, 0.1, 0];
+  p.armL = [-0.7, 0, 0.4];   // sostiene la pieza sobre el yunque
+  p.bodyY = -0.02 - 0.03 * w;
+  return p;
+}
+
 /** Beber poción (0.45 s): lleva la mano izquierda a la cara */
 function potionPose(t: number): Pose {
   const dur = 0.45;
@@ -354,19 +379,22 @@ function makeCharacter(
     sh.position.set(0, -0.07, 0);
   }
   const animator = new GlbAnimator(model, clips);
+  const head = findBone(model, 'Head', 'Neck');
+  const spine = findBone(model, 'Spine1', 'Spine2', 'Spine', 'Chest');
   return {
     root, model,
     rig: { root, weapon, weaponMat: (weaponMat ?? null) as VisualRig['weaponMat'], handR, handL, height },
-    animator, height,
+    animator, height, head, spine,
   };
 }
 
 /** MOCAP RPM → nombres de motor (mismo esqueleto que readyplayer.me) */
 const RPM_MAP: [string, string][] = [
   ['idle', 'M_Standing_Idle_001'],
-  ['walk', 'M_Jog_001'],
+  ['walk', 'M_Walk_001'],           // caminar REAL (antes: jog)
+  ['jog', 'M_Jog_001'],             // transición/sprint corto
   ['run', 'M_Run_001'],
-  ['back', 'M_Jog_Backwards_001'],
+  ['back', 'M_Walk_Backwards_001'], // retroceso caminado (antes: jog)
   ['strafeL', 'M_Jog_Strafe_Left_001'],
   ['strafeR', 'M_Jog_Strafe_Right_001'],
 ];
@@ -397,7 +425,8 @@ export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
 
   const binder = new SkeletonBinder(model, true);
   const clips: Record<string, THREE.AnimationClip> = {};
-  for (const n of ['slash1', 'slash2', 'slash3', 'heavy', 'roll', 'hurt', 'death']) {
+  for (const n of ['slash1', 'slash2', 'slash3', 'heavy', 'halb1', 'halb2', 'spin',
+    'bow1', 'bow2', 'bow3', 'cast1', 'cast2', 'nova', 'roll', 'hurt', 'death']) {
     clips[n] = bakeActionClip(n, n, binder, targetH);
   }
   clips.strafe = bakeLoopClip('strafe', Math.PI / 4, 12, t => strafePose(t, false), binder, targetH);
@@ -409,15 +438,50 @@ export function createHeroCharacter(pack: CharacterPack): GlbCharacter {
   }
   restoreRest(model, rest);
 
-  const weapon = buildSword(1.05);
+  // ARSENAL COMPLETO: las 4 armas viven en la mano derecha y se
+  // muestran/ocultan según el arma equipada (cambio instantáneo).
+  const arsenal: Record<HeroWeaponVisual, THREE.Group> = {
+    sword: buildSword(1.05),
+    bow: buildBow(),
+    halberd: buildHalberd(0.92),
+    staff: buildStaff(0.95),
+  };
   let weaponMat: THREE.Material | null = null;
-  weapon.traverse(m => {
-    if (m instanceof THREE.Mesh) {
-      const mm = m.material as THREE.MeshStandardMaterial;
-      if (mm && mm.emissive && mm.emissiveIntensity > 0) weaponMat = mm;
+  for (const g of Object.values(arsenal)) {
+    g.traverse(m => {
+      if (m instanceof THREE.Mesh) {
+        const mm = m.material as THREE.MeshStandardMaterial;
+        if (mm && mm.emissive && mm.emissiveIntensity > 0 && !weaponMat) weaponMat = mm;
+      }
+    });
+  }
+  const char = makeCharacter(model, targetH, clips, arsenal.sword, weaponMat, true);
+  // el resto de armas cuelga también de la mano (ocultas)
+  const handR = char.rig.handR;
+  if (handR) {
+    for (const key of ['bow', 'halberd', 'staff'] as const) {
+      const g = arsenal[key];
+      g.visible = false;
+      handR.add(g);
+      // misma orientación base que la espada (fijada en espacio mundo)
+      g.quaternion.copy(arsenal.sword.quaternion);
+      g.position.copy(arsenal.sword.position);
     }
-  });
-  return makeCharacter(model, targetH, clips, weapon, weaponMat, true);
+    // el arco se empuña girado (perpendicular al brazo)
+    arsenal.bow.rotateY(Math.PI / 2);
+  }
+  // el escudo fue añadido como último hijo de la mano izquierda (makeCharacter)
+  const handL = char.rig.handL;
+  const shieldObj: THREE.Object3D | null = handL && handL.children.length > 0
+    ? handL.children[handL.children.length - 1] : null;
+
+  char.setWeapon = (t: HeroWeaponVisual) => {
+    for (const key of Object.keys(arsenal) as HeroWeaponVisual[]) {
+      arsenal[key].visible = key === t;
+    }
+    if (shieldObj) shieldObj.visible = t === 'sword'; // alabarda/bastón son a dos manos
+  };
+  return char;
 }
 
 export type EnemyVariant = 'goblin' | 'archer' | 'orc' | 'boss';
@@ -534,6 +598,29 @@ export function createMerchantCharacter(pack: CharacterPack): GlbCharacter {
   clips.greet = bakeLoopClip('greet', 1.2, 16, t => greetPose(t), binder, targetH);
   restoreRest(model, rest);
   return makeCharacter(model, targetH, clips, null, null, false);
+}
+
+/** Herrero Bran: Soldier corpulento teñido de cuero, martillo en mano y martilleo horneado */
+export function createBlacksmithCharacter(pack: CharacterPack): GlbCharacter {
+  const targetH = 1.72;
+  const model = SkeletonUtils.clone(pack.soldierSource);
+  model.traverse(o => {
+    if (o instanceof THREE.Mesh && o.material && !Array.isArray(o.material)) {
+      const m = (o.material as THREE.MeshStandardMaterial).clone();
+      if (m.name.includes('Body')) m.color.lerp(new THREE.Color(0x4a3226), 0.7); // delantal de cuero
+      m.roughness = 0.78;
+      o.material = m;
+    }
+  });
+  normalizeModel(model, targetH);
+  enableShadows(model);
+  const rest = captureRest(model);
+  const binder = new SkeletonBinder(model, true);
+  const clips: Record<string, THREE.AnimationClip> = { ...pack.soldierClips };
+  clips.hammer = bakeLoopClip('hammer', 1.5, 24, t => hammerPose(t), binder, targetH);
+  restoreRest(model, rest);
+  const hammer = buildHammer(1.15);
+  return makeCharacter(model, targetH, clips, hammer, null, false);
 }
 
 /* ============================================================
@@ -688,9 +775,10 @@ function mergeDungeonGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | 
 const ASSETS: { file: string; label: string }[] = [
   { file: 'readyplayer.me.glb', label: 'el héroe' },
   { file: 'rpm-anims/M_Standing_Idle_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Walk_001.glb', label: 'el mocap' },
+  { file: 'rpm-anims/M_Walk_Backwards_001.glb', label: 'el mocap' },
   { file: 'rpm-anims/M_Jog_001.glb', label: 'el mocap' },
   { file: 'rpm-anims/M_Run_001.glb', label: 'el mocap' },
-  { file: 'rpm-anims/M_Jog_Backwards_001.glb', label: 'el mocap' },
   { file: 'rpm-anims/M_Jog_Strafe_Left_001.glb', label: 'el mocap' },
   { file: 'rpm-anims/M_Jog_Strafe_Right_001.glb', label: 'el mocap' },
   { file: 'Soldier.glb', label: 'aliados' },

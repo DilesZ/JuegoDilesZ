@@ -18,6 +18,7 @@ export function drawMinimap(
   bossActive: boolean,
   victory: boolean,
   merchant?: { x: number; z: number },
+  smith?: { x: number; z: number },
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -93,6 +94,19 @@ export function drawMinimap(
     ctx.lineWidth = 1;
     ctx.strokeRect(-2.6, -2.6, 5.2, 5.2);
     ctx.restore();
+  }
+
+  // herrero (triángulo naranja fuego)
+  if (smith) {
+    const [fx, fz] = toMap(smith.x, smith.z);
+    ctx.fillStyle = '#ff7a2a';
+    ctx.beginPath();
+    ctx.moveTo(fx, fz - 4.6); ctx.lineTo(fx + 4, fz + 3); ctx.lineTo(fx - 4, fz + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#4a1c08';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
   // enemigos

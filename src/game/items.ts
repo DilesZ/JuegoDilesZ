@@ -8,6 +8,15 @@ export type Rarity = 'comun' | 'raro' | 'epico' | 'legendario';
 export type ItemKind = 'weapon' | 'armor' | 'helmet' | 'accessory' | 'consumible';
 export type EquipSlot = 'weapon' | 'armor' | 'helmet' | 'acc1' | 'acc2';
 
+/** Tipos de arma: cada uno tiene su propio estilo de combate y modelo 3D */
+export type WeaponType = 'sword' | 'bow' | 'halberd' | 'staff';
+export const WEAPON_TYPE_LABEL: Record<WeaponType, string> = {
+  sword: 'Espada', bow: 'Arco', halberd: 'Alabarda', staff: 'Bastón',
+};
+export const WEAPON_TYPE_ICON: Record<WeaponType, string> = {
+  sword: '⚔️', bow: '🏹', halberd: '🪓', staff: '🔥',
+};
+
 /** Stats de equipo. dmg/speed/stam son BONOS aditivos sobre 1; crit es 0..1 */
 export interface EquipStats {
   dmg: number;    // bonus multiplicador de daño (+0.10 = +10%)
@@ -29,6 +38,12 @@ export interface ItemDef {
   desc: string;
   stats: Partial<EquipStats>;
   useText?: string;  // solo consumibles: efecto al usar
+  /** solo armas: estilo de combate que desbloquea (espada por defecto) */
+  wtype?: WeaponType;
+}
+
+export function weaponTypeOf(def: ItemDef | null): WeaponType {
+  return def?.wtype ?? 'sword';
 }
 
 /* ---------- Rarezas ---------- */
@@ -94,6 +109,38 @@ export const ITEMS: ItemDef[] = [
     id: 'tensaiga_lunar', name: 'Tensaiga Lunar', kind: 'weapon', rarity: 'legendario', icon: '🌙',
     desc: 'La colmilluna. Dice la leyenda que puede cortar la noche en dos.',
     stats: { dmg: 0.58, crit: 0.12, speed: 0.06 },
+  },
+
+  /* ----- ARMAS DE OTROS ESTILOS (forjadas por Bran el Herrero) ----- */
+  {
+    id: 'arco_silvano', name: 'Arco Silvano', kind: 'weapon', rarity: 'comun', icon: '🏹', wtype: 'bow',
+    desc: 'Madera de tejo flexible y cuerda de seda. Caza desde la distancia.',
+    stats: { dmg: 0.14, crit: 0.05 },
+  },
+  {
+    id: 'arco_tormenta', name: 'Arco de la Tormenta', kind: 'weapon', rarity: 'epico', icon: '🏹', wtype: 'bow',
+    desc: 'Sus flechas silban como el viento antes del rayo.',
+    stats: { dmg: 0.30, crit: 0.12, speed: 0.05 },
+  },
+  {
+    id: 'alabarda_centinela', name: 'Alabarda del Centinela', kind: 'weapon', rarity: 'comun', icon: '🔱', wtype: 'halberd',
+    desc: 'El alcance de la lanza, el filo del hacha. Barrieras a todos.',
+    stats: { dmg: 0.22, hp: 10 },
+  },
+  {
+    id: 'cosechadora_almas', name: 'Cosechadora de Almas', kind: 'weapon', rarity: 'epico', icon: '💀', wtype: 'halberd',
+    desc: 'Cada giro siega una vida. Su hoja canta con voces antiguas.',
+    stats: { dmg: 0.42, crit: 0.05, hp: 15 },
+  },
+  {
+    id: 'baston_ascuas', name: 'Bastón de las Ascuas', kind: 'weapon', rarity: 'comun', icon: '🔥', wtype: 'staff',
+    desc: 'Un cristal de brasa late en su punta. Escupe fuego a tu voluntad.',
+    stats: { dmg: 0.16 },
+  },
+  {
+    id: 'bordon_lunar', name: 'Bordón Lunar', kind: 'weapon', rarity: 'epico', icon: '🌙', wtype: 'staff',
+    desc: 'Tallado en un meteoro caído. Sus llamas son de otro cielo.',
+    stats: { dmg: 0.38, crit: 0.06, stam: 0.08 },
   },
 
   /* ----- ARMADURAS ----- */
@@ -297,6 +344,26 @@ export function rollDrop(level: number, boss = false): ItemDef {
   return src[Math.floor(Math.random() * src.length)];
 }
 
+/* ---------- Forja del herrero ---------- */
+
+/** Nivel máximo de mejora de un arma en la forja de Bran */
+export const MAX_FORGE = 5;
+
+/** Bonus de daño por nivel de forja (+8% por nivel, acumulativo) */
+export const FORGE_DMG_PER_LEVEL = 0.08;
+
+/** Coste en ◈ de subir el arma equipada de nivel `level` a `level+1` */
+export function upgradeCost(level: number): number {
+  return 60 + level * 75;
+}
+
+/** Catálogo que forja Bran: una pieza estrella por cada estilo de combate */
+export const SMITH_CATALOG: string[] = [
+  'baston_ascuas',
+  'arco_silvano',
+  'alabarda_centinela',
+];
+
 /* ---------- Inventario ---------- */
 
 export const BAG_SIZE = 24;
@@ -306,6 +373,8 @@ export interface BagEntry { def: ItemDef; count: number; }
 export class Inventory {
   bag: BagEntry[] = [];
   equip: Record<EquipSlot, ItemDef | null> = { weapon: null, armor: null, helmet: null, acc1: null, acc2: null };
+  /** nivel de forja por id de arma (mejoras permanentes de Bran) */
+  forge: Record<string, number> = {};
 
   /** Añade a la mochila (los consumibles se apilan). false si está llena. */
   addItem(def: ItemDef): boolean {
@@ -369,7 +438,38 @@ export class Inventory {
     return def;
   }
 
-  /** Suma de todos los bonus de equipo. */
+  /** Nivel de forja de un arma (0 si no tiene). */
+  forgeLevel(id: string): number {
+    return this.forge[id] ?? 0;
+  }
+
+  /** Sube un nivel de forja. Devuelve el nuevo nivel o -1 si estaba al máximo. */
+  addForgeLevel(id: string): number {
+    const cur = this.forgeLevel(id);
+    if (cur >= MAX_FORGE) return -1;
+    this.forge[id] = cur + 1;
+    return cur + 1;
+  }
+
+  /** ¿Posee el jugador (equipada o en la mochila) un arma de este tipo? */
+  ownsWeaponType(t: WeaponType): boolean {
+    const w = this.equip.weapon;
+    if (w && weaponTypeOf(w) === t) return true;
+    return this.bag.some(e => e.def.kind === 'weapon' && weaponTypeOf(e.def) === t);
+  }
+
+  /** Devuelve el arma equipada si es del tipo, o la mejor de la mochila. */
+  findWeaponByType(t: WeaponType): { where: 'equip' | 'bag'; index: number; def: ItemDef } | null {
+    const w = this.equip.weapon;
+    if (w && weaponTypeOf(w) === t) return { where: 'equip', index: -1, def: w };
+    for (let i = 0; i < this.bag.length; i++) {
+      const e = this.bag[i];
+      if (e.def.kind === 'weapon' && weaponTypeOf(e.def) === t) return { where: 'bag', index: i, def: e.def };
+    }
+    return null;
+  }
+
+  /** Suma de todos los bonus de equipo (+ forja del arma equipada). */
   totals(): EquipStats {
     const t: EquipStats = { ...NEUTRAL_STATS };
     for (const slot of ['weapon', 'armor', 'helmet', 'acc1', 'acc2'] as const) {
@@ -382,6 +482,9 @@ export class Inventory {
       t.stam += it.stats.stam ?? 0;
       t.crit += it.stats.crit ?? 0;
     }
+    // forja del arma equipada: +8% de daño por nivel
+    const w = this.equip.weapon;
+    if (w) t.dmg += this.forgeLevel(w.id) * FORGE_DMG_PER_LEVEL;
     t.crit = Math.min(0.75, t.crit);
     return t;
   }

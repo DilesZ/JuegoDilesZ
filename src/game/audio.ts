@@ -241,6 +241,13 @@ export class AudioEngine {
     this.tone(60, 0.5, { type: 'sine', gain: 0.6, slideTo: 30 });
     this.noise(0.4, { freq: 200, q: 0.5, gain: 0.5, sweep: 0.2 });
   }
+  /** Clac de yunque del herrero: golpe metálico con resonancia */
+  anvil() {
+    this.sample('hitFlesh2', { gain: 0.28, rate: 1.7 });
+    this.noise(0.1, { freq: 4200, q: 8, gain: 0.22, sweep: 0.6 });
+    this.tone(1480, 0.34, { type: 'sine', gain: 0.14, slideTo: 1100 });
+    this.tone(2260, 0.22, { type: 'sine', gain: 0.07, slideTo: 1800 });
+  }
   uiClick() {
     this.sample('uiSelect', { gain: 0.6 });
     if (!this.sampleReady('uiSelect')) this.tone(660, 0.07, { type: 'triangle', gain: 0.12 });

@@ -319,12 +319,95 @@ export function buildAxe(): THREE.Group {
 
 export function buildBow(): THREE.Group {
   const g = new THREE.Group();
-  const arc = mesh(new THREE.TorusGeometry(0.42, 0.03, 6, 14, Math.PI * 1.15), woodMat(), 0, 0.35, 0);
-  arc.rotation.z = Math.PI * 0.42;
-  const strMat = new THREE.LineBasicMaterial({ color: 0xd8d3c0 });
-  const pts = [new THREE.Vector3(-0.38, 0.05, 0), new THREE.Vector3(0.06, 0.35, 0), new THREE.Vector3(-0.38, 0.65, 0)];
+  const wood = woodMat();
+  const gold = forgedMat(0xc7a24a);
+  // recurva: dos arcos curvos con extremos reforzados
+  const arc = mesh(new THREE.TorusGeometry(0.44, 0.028, 6, 16, Math.PI * 1.2), wood, 0, 0.35, 0);
+  arc.rotation.z = Math.PI * 0.4;
+  // cantoneras doradas de las puntas
+  const tipT = mesh(new THREE.ConeGeometry(0.035, 0.11, 5), gold, -0.2, 0.72, 0);
+  tipT.rotation.z = 1.2;
+  const tipB = mesh(new THREE.ConeGeometry(0.035, 0.11, 5), gold, -0.2, -0.02, 0);
+  tipB.rotation.z = -1.9;
+  // empuñadura envuelta en cuero
+  const grip = mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.14, 8), stdMat(0x5a3a24), -0.06, 0.35, 0);
+  grip.rotation.z = -0.35;
+  const strMat = new THREE.LineBasicMaterial({ color: 0xf2ecd8 });
+  const pts = [new THREE.Vector3(-0.21, 0.73, 0), new THREE.Vector3(-0.055, 0.35, 0), new THREE.Vector3(-0.21, -0.03, 0)];
   const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), strMat);
-  g.add(arc, line);
+  g.add(arc, tipT, tipB, grip, line);
+  return g;
+}
+
+/** Alabarda: asta larga, punta de lanza, hoja de hacha y contrapeso */
+export function buildHalberd(scale = 1): THREE.Group {
+  const g = new THREE.Group();
+  const s = scale;
+  const steel = forgedMat(0xb9c2d0);
+  const gold = forgedMat(0xc7a24a);
+  // asta larga (2.05 m) con refuerzos metálicos
+  const shaft = mesh(new THREE.CylinderGeometry(0.032 * s, 0.04 * s, 2.05 * s, 7), woodMat(), 0, 0.92 * s, 0);
+  const collar1 = mesh(new THREE.CylinderGeometry(0.044 * s, 0.044 * s, 0.07 * s, 8), gold, 0, 1.62 * s, 0);
+  const collar2 = mesh(new THREE.CylinderGeometry(0.044 * s, 0.044 * s, 0.07 * s, 8), gold, 0, 0.42 * s, 0);
+  // punta de lanza (rombo alargado)
+  const tip = mesh(new THREE.ConeGeometry(0.055 * s, 0.34 * s, 5), steel, 0, 2.12 * s, 0);
+  // hoja de hacha lateral (media luna afilada)
+  const headGeo = new THREE.CylinderGeometry(0.3 * s, 0.3 * s, 0.05 * s, 3);
+  const head = mesh(headGeo, steel, 0.17 * s, 1.86 * s, 0);
+  head.rotation.x = Math.PI / 2;
+  head.rotation.z = Math.PI;
+  head.scale.set(1, 1, 0.9);
+  const edge = mesh(new THREE.TorusGeometry(0.27 * s, 0.02 * s, 5, 10, Math.PI * 0.85), forgedMat(0xe2e8f0), 0.17 * s, 1.86 * s, 0);
+  edge.rotation.x = Math.PI / 2;
+  edge.rotation.z = Math.PI * 0.6;
+  // gancho trasero + contrapeso con runa encendida
+  const hook = mesh(new THREE.ConeGeometry(0.04 * s, 0.2 * s, 4), steel, -0.11 * s, 1.82 * s, 0);
+  hook.rotation.z = 1.9;
+  const rune = mesh(new THREE.OctahedronGeometry(0.045 * s, 0), emisMat(0xff9a3a, 1.5), 0, 0.36 * s, 0, false);
+  g.add(shaft, collar1, collar2, tip, head, edge, hook, rune);
+  return g;
+}
+
+/** Bastón mágico: asta con garras doradas que abrazan un cristal de brasa */
+export function buildStaff(scale = 1): THREE.Group {
+  const g = new THREE.Group();
+  const s = scale;
+  const dark = woodMat();
+  const gold = forgedMat(0xb08a3e);
+  const shaft = mesh(new THREE.CylinderGeometry(0.03 * s, 0.042 * s, 1.85 * s, 7), dark, 0, 0.82 * s, 0);
+  // espiral metálica decorativa
+  for (let i = 0; i < 5; i++) {
+    const ring = mesh(new THREE.TorusGeometry(0.05 * s, 0.008 * s, 4, 10), gold, 0, (0.5 + i * 0.24) * s, 0);
+    ring.rotation.x = Math.PI / 2;
+    ring.rotation.y = i * 0.5;
+    g.add(ring);
+  }
+  // copa de garras
+  for (let i = 0; i < 3; i++) {
+    const claw = mesh(new THREE.ConeGeometry(0.024 * s, 0.22 * s, 5), gold,
+      Math.cos(i * 2.094) * 0.07 * s, 1.78 * s, Math.sin(i * 2.094) * 0.07 * s);
+    claw.rotation.set(Math.sin(i * 2.094) * 0.5, 0, -Math.cos(i * 2.094) * 0.5);
+    g.add(claw);
+  }
+  // cristal de brasa (runa del arma — tiñible por rareza)
+  const crystal = mesh(new THREE.OctahedronGeometry(0.085 * s, 0), emisMat(0xff6a2a, 2.4), 0, 1.92 * s, 0, false);
+  crystal.name = 'weaponRune';
+  const halo = mesh(new THREE.SphereGeometry(0.13 * s, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0xff8a3a, transparent: true, opacity: 0.22, depthWrite: false }),
+    0, 1.92 * s, 0, false);
+  g.add(shaft, crystal, halo);
+  return g;
+}
+
+/** Martillo de herrero: mango de madera y cabeza de acero */
+export function buildHammer(scale = 1): THREE.Group {
+  const g = new THREE.Group();
+  const s = scale;
+  const handle = mesh(new THREE.CylinderGeometry(0.024 * s, 0.03 * s, 0.5 * s, 7), woodMat(), 0, 0.18 * s, 0);
+  const head = mesh(new THREE.BoxGeometry(0.11 * s, 0.13 * s, 0.24 * s), forgedMat(0x4a4a58), 0, 0.46 * s, 0);
+  const band1 = mesh(new THREE.CylinderGeometry(0.032 * s, 0.032 * s, 0.04 * s, 8), forgedMat(0x2a2a34), 0, 0.36 * s, 0);
+  const band2 = mesh(new THREE.CylinderGeometry(0.032 * s, 0.032 * s, 0.04 * s, 8), forgedMat(0x2a2a34), 0, 0.03 * s, 0);
+  g.add(handle, head, band1, band2);
   return g;
 }
 
@@ -711,6 +794,110 @@ export function buildMerchantRig(): HumanoidRig {
     rim: { color: 0xffd9a0, strength: 0.25 },
     outline: 0.024,
   });
+}
+/** Bran, el herrero — corpulento, delantal de cuero y barba canosa */
+export function buildBlacksmithRig(): HumanoidRig {
+  return buildHumanoid({
+    scale: 1.16, skin: 0xe8b48c, torso: 0x5a2e22, legs: 0x3a2e26, arms: 0x5a2e22,
+    eyes: 0xffd23e, eyeStyle: 'anime',
+    hair: 0x8a7a70,          // barba/cabello canoso (las puntas actúan de barba)
+    chest: 0x4a3a30,          // peto de cuero
+    bigHead: true,
+    rim: { color: 0xffb37d, strength: 0.3 },
+    outline: 0.026,
+  });
+}
+
+/* ---------- FORJA del herrero: yunque, hornalla, rack de armas y cubo ---------- */
+
+export interface ForgeSet {
+  group: THREE.Group;
+  /** luz cálida de la hornalla (parpadea de noche) */
+  light: THREE.PointLight;
+  /** brasas (escala/brillo pulsante) */
+  coals: THREE.Mesh;
+  /** llama de la hornalla (shader) */
+  fire: THREE.Mesh;
+  /** punto exacto sobre el yunque (chispas al martillear) */
+  anvilTop: THREE.Vector3;
+}
+
+export function buildForgeSet(): ForgeSet {
+  const g = new THREE.Group();
+  const st = stoneMat();
+  const dark = forgedMat(0x3a3a46);
+  const wood = woodMat();
+
+  // --- HORNALLA: bloque de piedra con arcada y brasas encendidas ---
+  const base = mesh(new THREE.BoxGeometry(1.5, 0.55, 1.2), st, 0, 0.27, 0);
+  const body = mesh(new THREE.BoxGeometry(1.35, 0.85, 1.05), st, 0, 0.95, 0);
+  // campana de humo corta en piedra (antes: cono negro gigante)
+  const hood = mesh(new THREE.CylinderGeometry(0.42, 0.72, 0.8, 6), st, 0, 1.78, -0.08);
+  const chimney = mesh(new THREE.BoxGeometry(0.42, 0.7, 0.42), stoneMat(), 0, 2.4, -0.08);
+  // arcada frontal con el fuego dentro + brillo fundido alrededor
+  const arch = mesh(new THREE.TorusGeometry(0.34, 0.09, 6, 12, Math.PI), dark, 0, 0.85, 0.53);
+  const glowRim = mesh(new THREE.TorusGeometry(0.3, 0.045, 6, 12, Math.PI * 1.2),
+    emisMat(0xff6a2a, 2.2), 0, 0.82, 0.56, false);
+  const cavity = mesh(new THREE.BoxGeometry(0.85, 0.55, 0.25), stdMat(0x120a08), 0, 0.68, 0.42);
+  // brasas (runa del fuego) + llama shader
+  const coals = mesh(new THREE.SphereGeometry(0.3, 10, 8),
+    emisMat(0xff5a1e, 2.6), 0, 0.62, 0.42, false);
+  coals.scale.set(1.25, 0.5, 1);
+  const fire = new THREE.Mesh(flameGeometry(0.62, 0.85), makeFlameMaterial(0xffc26a, 0xff4a10));
+  fire.position.set(0, 0.92, 0.42);
+  g.add(base, body, hood, chimney, arch, glowRim, cavity, coals, fire);
+  const light = new THREE.PointLight(0xff7a2a, 5.5, 11, 1.7);
+  light.position.set(0, 1.15, 0.5);
+  g.add(light);
+
+  // --- YUNQUE sobre el tronco (prominente, mirando al frente) ---
+  const stump = mesh(new THREE.CylinderGeometry(0.32, 0.36, 0.44, 9), wood, 0.95, 0.22, 0.62);
+  const anvilBase = mesh(new THREE.BoxGeometry(0.46, 0.1, 0.22), dark, 0.95, 0.49, 0.62);
+  const anvilBody = mesh(new THREE.BoxGeometry(0.66, 0.18, 0.26), forgedMat(0x6a6a78), 0.95, 0.62, 0.62);
+  const horn = mesh(new THREE.ConeGeometry(0.11, 0.32, 6), forgedMat(0x6a6a78), 1.42, 0.62, 0.62);
+  horn.rotation.z = Math.PI / 2;
+  g.add(stump, anvilBase, anvilBody, horn);
+
+  // --- RACK de armas: dos postes + travesaño con una muestra de cada arma ---
+  const rack = new THREE.Group();
+  const postGeo = new THREE.CylinderGeometry(0.05, 0.06, 1.7, 6);
+  const p1 = mesh(postGeo, wood, 0, 0.85, 0);
+  const p2 = mesh(postGeo, wood, 1.45, 0.85, 0);
+  const bar = mesh(new THREE.BoxGeometry(1.6, 0.07, 0.07), wood, 0.72, 1.55, 0);
+  rack.add(p1, p2, bar);
+  // armas de muestra apoyadas (alabarda, bastón, espada)
+  const hSample = buildHalberd(0.85);
+  hSample.position.set(0.28, 1.5, 0.02);
+  hSample.rotation.z = -0.06;
+  rack.add(hSample);
+  const sSample = buildStaff(0.85);
+  sSample.position.set(0.72, 1.5, 0.02);
+  sSample.rotation.z = 0.05;
+  rack.add(sSample);
+  const swSample = buildSword(0.95);
+  swSample.position.set(1.12, 1.46, 0.02);
+  swSample.rotation.z = 0.14;
+  rack.add(swSample);
+  rack.position.set(-0.35, 0, 0.95);
+  rack.rotation.y = Math.PI * 0.06;
+  g.add(rack);
+
+  // --- CUBO de agua para templar (con agua oscura) ---
+  const barrel = new THREE.Group();
+  const bBody = mesh(new THREE.CylinderGeometry(0.24, 0.2, 0.5, 10), wood, 0, 0.25, 0);
+  const bRim1 = mesh(new THREE.TorusGeometry(0.235, 0.02, 5, 12), dark, 0, 0.4, 0);
+  bRim1.rotation.x = Math.PI / 2;
+  const bRim2 = mesh(new THREE.TorusGeometry(0.21, 0.02, 5, 12), dark, 0, 0.1, 0);
+  bRim2.rotation.x = Math.PI / 2;
+  const water = mesh(new THREE.CircleGeometry(0.2, 10), stdMat(0x22343e, { roughness: 0.25, metalness: 0.1 }), 0, 0.44, 0, false);
+  water.rotation.x = -Math.PI / 2;
+  barrel.add(bBody, bRim1, bRim2, water);
+  barrel.position.set(1.85, 0, -0.25);
+  g.add(barrel);
+
+  // yunque: posición local exacta para chispas
+  const anvilTop = new THREE.Vector3(0.95, 0.73, 0.62);
+  return { group: g, light, coals, fire, anvilTop };
 }
 
 /* ---------- Props del mundo ---------- */

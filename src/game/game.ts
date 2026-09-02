@@ -5,8 +5,8 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, ENEMY_NAMES, STYLE_RANKS } from './core';
-import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, type EquipSlot, type ItemDef } from './items';
+import { clamp, dampAngle, damp, rand, randInt, pick, WORLD, terrainHeight, type HudState, type GamePhase, type GameRefs, type ItemView, type InvView, type ShopView, type SmithView, type WeaponSlotView, ENEMY_NAMES, STYLE_RANKS } from './core';
+import { Inventory, RARITY_INFO, itemById, rollDrop, merchantStock, buyPrice, sellPrice, SMITH_CATALOG, upgradeCost, MAX_FORGE, FORGE_DMG_PER_LEVEL, weaponTypeOf, WEAPON_TYPE_ICON, WEAPON_TYPE_LABEL, type EquipSlot, type ItemDef, type WeaponType } from './items';
 import { Particles } from './particles';
 import { AudioEngine } from './audio';
 import { World } from './world';
@@ -14,6 +14,7 @@ import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
+import { Blacksmith, SMITH_NAME, SMITH_SPOT, smithDist } from './smith';
 import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, monsterAttackTimings, type CharacterPack, type EnemyVariant } from './characters';
 import { drawMinimap } from './minimap';
 
@@ -166,11 +167,14 @@ export class Game {
   private inputState: InputState;
   private mouseDX = 0; private mouseDY = 0;
   private locked = false;
+  /** salida de pointer lock esperada (panel abierto): no pausar */
+  private unlockGuard = false;
   // inventario / equipo / tienda
   inventory = new Inventory();
   uiOpen = false;
-  uiPanel: 'inv' | 'shop' | null = null;
+  uiPanel: 'inv' | 'shop' | 'smith' | null = null;
   merchant!: Merchant;
+  smith!: Blacksmith;
   private shopStock: ItemDef[] = [];
   private restockDay = -1;
   private chars: CharacterPack | null;
@@ -215,7 +219,7 @@ export class Game {
   private hudTimer = 0;
   private minimapTimer = 0;
   private lockEnemy: Enemy | null = null;
-  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil' | 'merchant'; idx?: number } | null = null;
+  private interactTarget: { kind: 'bonfire' | 'shrine' | 'sigil' | 'merchant' | 'smith'; idx?: number } | null = null;
   private victoryDelay = -1;
 
   // números de daño (DOM pool)
@@ -225,8 +229,11 @@ export class Game {
   // cachés de vistas HUD (evita serializar mochila/tienda 12 veces por segundo)
   private invCache: InvView | null = null;
   private shopCache: ShopView | null = null;
+  private smithCache: SmithView | null = null;
+  private slotsCache: WeaponSlotView[] | null = null;
   private invDirty = true;
   private shopDirty = true;
+  private smithDirty = true;
 
   private onHud: (s: HudState) => void;
   private ctx: GameCtx;
@@ -308,6 +315,11 @@ export class Game {
     this.shopStock = merchantStock(1);
     this.restockDay = this.cycle.day;
 
+    // herrero con su forja encendida (lado opuesto del campamento)
+    this.smith = new Blacksmith(this.chars);
+    this.scene.add(this.smith.root);
+    for (const c of this.smith.colliderList()) this.world.colliders.push(c);
+
     // zorros ambientales
     if (this.chars) {
       this.foxes = createFoxes(this.chars, 3);
@@ -386,6 +398,7 @@ export class Game {
       shake: (a) => { this.shakeAmt = Math.min(1.2, this.shakeAmt + a); },
       hitStop: (d) => { this.hitStopT = Math.max(this.hitStopT, d); },
       spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
+      playerShotHit: (pos, dmg, aoe, isFire) => this.resolvePlayerShotHit(pos, dmg, aoe, isFire),
       onEnemyDied: (e) => this.handleEnemyDied(e),
       playerHurt: () => { this.hurtFlash = 1; this.comboHits = 0; this.stylePts *= 0.35; },
       gainItem: (def) => this.gainItem(def),
@@ -433,6 +446,8 @@ export class Game {
     const ok = this.inventory.addItem(def);
     this.invDirty = true;
     this.shopDirty = true;
+    this.slotsCache = null;
+    this.smithDirty = true;
     if (!ok) {
       // mochila llena: se convierte en oro
       const gold = 20;
@@ -456,8 +471,8 @@ export class Game {
     this.setPanel(this.uiPanel === 'inv' ? null : 'inv');
   }
 
-  /** Abre/cierra un panel de UI (mochila o tienda) congelando el mundo */
-  private setPanel(panel: 'inv' | 'shop' | null) {
+  /** Abre/cierra un panel de UI (mochila, tienda o forja) congelando el mundo */
+  private setPanel(panel: 'inv' | 'shop' | 'smith' | null) {
     this.uiPanel = panel;
     const open = panel !== null;
     this.uiOpen = open;
@@ -465,7 +480,11 @@ export class Game {
     this.queued = { attack: false, heavy: false, roll: false, potion: false };
     if (open) {
       this.audio.uiOpen();
-      if (document.pointerLockElement) document.exitPointerLock();
+      if (document.pointerLockElement) {
+        // marca la salida de bloqueo como esperada (evita pausa fantasma)
+        this.unlockGuard = true;
+        document.exitPointerLock();
+      }
     } else {
       this.audio.uiClick();
       if (this.phase === 'playing') this.requestLock();
@@ -479,12 +498,14 @@ export class Game {
     if (!res.ok) return;
     if (res.swapped) this.inventory.addItem(res.swapped);
     this.invDirty = true;
+    this.slotsCache = null;
+    this.smithDirty = true;
     this.refreshEquipStats();
   }
 
   unequipSlot(slot: EquipSlot) {
     if (!this.uiOpen) return;
-    if (this.inventory.unequip(slot)) { this.invDirty = true; this.refreshEquipStats(); }
+    if (this.inventory.unequip(slot)) { this.invDirty = true; this.slotsCache = null; this.smithDirty = true; this.refreshEquipStats(); }
   }
 
   useBagItem(i: number) {
@@ -584,6 +605,8 @@ export class Game {
     p.gold -= price;
     this.invDirty = true;
     this.shopDirty = true;
+    this.slotsCache = null;
+    this.smithDirty = true;
     this.audio.coin();
     this.addDamageNumber(head, `- ${price} ◈  ${def.icon} ${def.name}`, RARITY_INFO[def.rarity].css);
     this.emitHud();
@@ -599,10 +622,164 @@ export class Game {
     this.player.gold += gold;
     this.invDirty = true;
     this.shopDirty = true;
+    this.slotsCache = null;
+    this.smithDirty = true;
     this.audio.coin();
     const p = this.player;
     this.addDamageNumber(new THREE.Vector3(p.pos.x, p.pos.y + 2.15, p.pos.z), `+ ${gold} ◈  ${e.def.icon} ${e.def.name}`, '#ffc84a');
     this.emitHud();
+  }
+
+  /* ---------- Forja del herrero ---------- */
+
+  openSmith() {
+    if (this.phase !== 'playing' || this.uiOpen) return;
+    this.setPanel('smith');
+  }
+
+  closeSmith() {
+    if (this.uiPanel === 'smith') this.setPanel(null);
+  }
+
+  private smithView(): SmithView {
+    const view = (d: ItemDef | null, count = 1): ItemView | null => d ? {
+      id: d.id, name: d.name, kind: d.kind, rarity: d.rarity, icon: d.icon,
+      desc: d.desc, stats: d.stats, useText: d.useText, count,
+    } : null;
+    const wep = this.inventory.equip.weapon;
+    const lvl = wep ? this.inventory.forgeLevel(wep.id) : 0;
+    const catalog: SmithView['catalog'] = SMITH_CATALOG.map(id => {
+      const def = itemById(id);
+      const wt = weaponTypeOf(def);
+      return { item: view(def)!, price: buyPrice(def), owned: this.inventory.ownsWeaponType(wt), wtype: wt };
+    });
+    return {
+      open: this.uiPanel === 'smith',
+      name: SMITH_NAME,
+      gold: this.player.gold,
+      weapon: view(wep),
+      forgeLevel: lvl,
+      maxForge: MAX_FORGE,
+      upgradeCost: wep && lvl < MAX_FORGE ? upgradeCost(lvl) : null,
+      upgradeDesc: wep && lvl < MAX_FORGE
+        ? `+${Math.round(FORGE_DMG_PER_LEVEL * 100)}% de daño (nivel ${lvl} → ${lvl + 1})`
+        : 'El acero ha alcanzado su perfección',
+      catalog,
+    };
+  }
+
+  /** Forja una nueva arma del catálogo de Bran */
+  buySmithWeapon(i: number) {
+    if (this.uiPanel !== 'smith') return;
+    const def = itemById(SMITH_CATALOG[i]);
+    if (!def) return;
+    const wt = weaponTypeOf(def);
+    if (this.inventory.ownsWeaponType(wt)) {
+      this.audio.uiClick();
+      this.addDamageNumber(this._headPos(), `YA TIENES UN ARMA DE ESE TIPO`, '#ffd98a');
+      return;
+    }
+    const price = buyPrice(def);
+    const p = this.player;
+    if (p.gold < price) {
+      this.audio.uiClick();
+      this.addDamageNumber(this._headPos(), `FALTAN ${price - p.gold} ◈`, '#ff8a7a');
+      return;
+    }
+    if (!this.inventory.addItem(def)) {
+      this.audio.uiClick();
+      this.addDamageNumber(this._headPos(), 'MOCHILA LLENA', '#ff8a7a');
+      return;
+    }
+    p.gold -= price;
+    this.invDirty = true;
+    this.shopDirty = true;
+    this.smithDirty = true;
+    this.slotsCache = null;
+    this.audio.anvil();
+    this.audio.coin();
+    this.addDamageNumber(this._headPos(), `⚒ FORJADA  ${def.icon} ${def.name}`, RARITY_INFO[def.rarity].css, true);
+    this.emitHud();
+  }
+
+  /** Mejora el arma equipada en la forja (+8% daño por nivel) */
+  upgradeWeapon() {
+    if (this.uiPanel !== 'smith') return;
+    const wep = this.inventory.equip.weapon;
+    if (!wep) return;
+    const lvl = this.inventory.forgeLevel(wep.id);
+    if (lvl >= MAX_FORGE) return;
+    const cost = upgradeCost(lvl);
+    const p = this.player;
+    if (p.gold < cost) {
+      this.audio.uiClick();
+      this.addDamageNumber(this._headPos(), `FALTAN ${cost - p.gold} ◈`, '#ff8a7a');
+      return;
+    }
+    p.gold -= cost;
+    this.inventory.addForgeLevel(wep.id);
+    this.refreshEquipStats(false);
+    this.invDirty = true;
+    this.smithDirty = true;
+    this.audio.anvil();
+    this.addDamageNumber(this._headPos(), `⚒ +${wep.name} Nv.${lvl + 1}`, '#ffb37d', true);
+    this.particles.burst({
+      x: this.smith.pos.x, y: this.smith.pos.y + 1.2, z: this.smith.pos.z,
+      count: 26, speed: 4.5, color: 0xffb347, size: 0.3, life: 0.8, gravity: 4, drag: 1.5, glow: 2.6,
+    });
+    this.emitHud();
+  }
+
+  private _headPos(): THREE.Vector3 {
+    const p = this.player.pos;
+    return new THREE.Vector3(p.x, p.y + 2.2, p.z);
+  }
+
+  /* ---------- Cambio rápido de arma (1-4) ---------- */
+
+  switchWeaponType(t: WeaponType) {
+    if (this.phase !== 'playing') return;
+    const cur = weaponTypeOf(this.inventory.equip.weapon);
+    if (cur === t) return; // ya está activa
+    if (!this.inventory.ownsWeaponType(t)) {
+      this.audio.uiClick();
+      this.addDamageNumber(this._headPos(), `SIN ARMA · ${WEAPON_TYPE_LABEL[t]} — la forja Bran`, '#ffd98a');
+      return;
+    }
+    // cambia el arma activa (si estaba en la mochila, se equipa)
+    if (cur !== t) {
+      const found = this.inventory.findWeaponByType(t);
+      if (found && found.where === 'bag') {
+        const res = this.inventory.equipFromBag(found.index);
+        if (res.ok && res.swapped) this.inventory.addItem(res.swapped);
+      }
+    }
+    this.player.setWeaponType(t);
+    this.refreshEquipStats(false);
+    this.invDirty = true;
+    this.smithDirty = true;
+    this.audio.uiClick();
+    const wep = this.inventory.equip.weapon;
+    if (wep) {
+      this.addDamageNumber(this._headPos(), `${WEAPON_TYPE_ICON[t]} ${wep.name}`, RARITY_INFO[wep.rarity].css);
+    }
+    this.emitHud();
+  }
+
+  private weaponSlots(): WeaponSlotView[] {
+    const types: WeaponType[] = ['sword', 'bow', 'halberd', 'staff'];
+    const cur = this.player.weaponType;
+    return types.map((t, i) => {
+      const found = this.inventory.findWeaponByType(t);
+      return {
+        type: t,
+        icon: WEAPON_TYPE_ICON[t],
+        label: `${i + 1}`,
+        name: found ? found.def.name : WEAPON_TYPE_LABEL[t],
+        active: cur === t,
+        owned: !!found,
+      };
+    });
   }
 
   /* ---------- Calidad ---------- */
@@ -842,6 +1019,11 @@ export class Game {
       this.interactTarget = { kind: 'merchant' };
       return;
     }
+    // forja del herrero
+    if (smithDist(p.x, p.z) < 2.7) {
+      this.interactTarget = { kind: 'smith' };
+      return;
+    }
     for (const sh of this.world.shrines) {
       if (sh.cleansed) continue;
       const guardians = this.enemies.filter(e => e.guardianOf === sh.idx && e.alive);
@@ -888,6 +1070,8 @@ export class Game {
       this.emitHud();
     } else if (t.kind === 'merchant') {
       this.openShop();
+    } else if (t.kind === 'smith') {
+      this.openSmith();
     } else if (t.kind === 'sigil') {
       this.world.sigilReady();
       this.spawnBoss(1.35 ** this.bossKills());
@@ -1139,6 +1323,22 @@ export class Game {
       const line = pick(Merchant.greetingLines());
       this.addDamageNumber(new THREE.Vector3(this.merchant.pos.x, this.merchant.pos.y + 2.35, this.merchant.pos.z), `“${line}”`, '#ffd98a');
     }
+
+    // herrero: martilleo (clacs → chispas en el yunque), hornalla y mirada
+    const clangs = this.smith.update(dt, this.cycle.nightFactor, this.player.pos);
+    if (clangs > 0 && !frozen) {
+      const anvil = this.smith.anvilWorldPos();
+      this.particles.burst({
+        x: anvil.x, y: anvil.y, z: anvil.z,
+        count: 14, speed: 3.6, color: 0xffc25a, size: 0.16, life: 0.5, gravity: 7, drag: 1.2, glow: 2.8,
+      });
+      if (this.player.pos.distanceTo(this.smith.pos) < 26) this.audio.anvil();
+      // saludo ocasional del herrero
+      if (Math.random() < 0.3 && !this.uiOpen && this.phase === 'playing') {
+        const line = pick(Blacksmith.greetingLines());
+        this.addDamageNumber(new THREE.Vector3(this.smith.pos.x, this.smith.pos.y + 2.5, this.smith.pos.z), `“${line}”`, '#ffb37d');
+      }
+    }
     for (const f of this.foxes) f.update(dt, this.player.pos);
 
     if (frozen) return;
@@ -1255,7 +1455,41 @@ export class Game {
 
   private resolvePlayerStrike(def: AttackDef) {
     const p = this.player;
+
+    // DISPAROS (arco/bastón): el golpe nace como proyectil hacia el objetivo
+    if (def.shot) {
+      const origin = this._gV3.set(p.pos.x, p.pos.y + 1.45, p.pos.z);
+      const dir = this._gV4;
+      // puntería asistida: al objetivo fijado si existe
+      if (p.lockTarget && p.lockTarget.alive) {
+        dir.set(p.lockTarget.pos.x - origin.x, p.lockTarget.pos.y + 1.0 - origin.y, p.lockTarget.pos.z - origin.z);
+      } else {
+        // hacia donde mira el héroe (leve elevación para alcance)
+        dir.set(Math.sin(p.yaw), 0.03, Math.cos(p.yaw));
+      }
+      if (dir.lengthSq() < 1e-6) dir.set(0, 0.03, 1);
+      this.ctx.spawnProjectile({
+        pos: origin.clone().addScaledVector(dir, 0.5),
+        dir: dir.clone().normalize(),
+        speed: def.shotSpeed ?? 20,
+        dmg: def.dmg * p.dmgMul,
+        kind: def.shot === 'arrow' ? 'arrow' : 'orb',
+        owner: 'player',
+        aoe: def.aoe ?? 0,
+      });
+      // destello en la mano/arma al disparar
+      this.particles.burst({
+        x: origin.x + dir.x * 0.6, y: origin.y + dir.y * 0.6, z: origin.z + dir.z * 0.6,
+        count: def.shot === 'arrow' ? 5 : 10, speed: 2, color: def.shot === 'arrow' ? 0xffe0a0 : 0xff8a2a,
+        size: 0.16, life: 0.3, drag: 2, glow: 2.2,
+      });
+      if (def.shot === 'fire') this.audio.castSpell();
+      else this.audio.swing(1.35);
+      return;
+    }
+
     const kind = def.kind;
+    const halfArc = def.spin ? Math.PI + 0.01 : def.arc / 2;
     let hitCount = 0;
     const to = this._gV1;
     for (const e of this.enemies) {
@@ -1265,7 +1499,7 @@ export class Game {
       if (d > def.range) continue;
       const ang = Math.atan2(to.x, to.z);
       let diff = Math.abs(((ang - p.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-      if (diff <= def.arc / 2) {
+      if (diff <= halfArc) {
         const dmg = def.dmg * p.dmgMul;
         e.takeDamage(dmg, p.pos, this.ctx, kind !== 'light');
         hitCount++;
@@ -1312,15 +1546,72 @@ export class Game {
       this.shakeAmt = Math.min(1.2, this.shakeAmt + (kind === 'finisher' ? 0.6 : 0.5));
       this.audio.heavyHit();
       this.fovKickAmt = Math.min(7, this.fovKickAmt + (kind === 'finisher' ? 6 : 4.5));
-      const impact = this._gV3.copy(p.pos).addScaledVector(this._gV4.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)), 1.7);
+      const impact = this._gV3.copy(p.pos).addScaledVector(this._gV4.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)), def.spin ? 0.5 : 1.7);
       impact.y = terrainHeight(impact.x, impact.z);
-      this.ctx.shockwave(impact, 0xffc87d, kind === 'finisher' ? 4.4 : 3.6);
+      this.ctx.shockwave(impact, 0xffc87d, def.spin ? 5.2 : (kind === 'finisher' ? 4.4 : 3.6));
       if (kind === 'finisher') {
         // anillo extra de chispas del remate
         this.particles.burst({
           x: impact.x, y: impact.y + 0.35, z: impact.z,
           count: 26, speed: 8.5, color: 0xffd9a0, size: 0.3, life: 0.55, drag: 1.8, glow: 2.9, gravity: 5,
         });
+        // nova del bastón: anillo de llamas ascendentes
+        if (def.spin && p.weaponType === 'staff') {
+          this.particles.burst({
+            x: impact.x, y: impact.y + 0.5, z: impact.z,
+            count: 40, speed: 6, color: 0xff7a2a, size: 0.34, life: 0.9, drag: 1.4, glow: 3, gravity: -2.5,
+          });
+        }
+      }
+    }
+  }
+
+  /** Impacto de un disparo del héroe: daño directo + AoE de fuego + estilo */
+  private resolvePlayerShotHit(pos: THREE.Vector3, dmg: number, aoe: number, isFire: boolean) {
+    const p = this.player;
+    let hitCount = 0;
+    for (const e of this.enemies) {
+      if (!e.alive || e.state === 'spawn') continue;
+      const d = Math.hypot(e.pos.x - pos.x, e.pos.z - pos.z);
+      const inAoe = aoe > 0 && d <= aoe + e.radius;
+      const inDirect = d <= e.radius + 0.6 && Math.abs(e.pos.y - pos.y) < 2.4;
+      if (!inAoe && !inDirect) continue;
+      // los impactos secundarios del AoE hacen 55% de daño
+      const factor = inDirect ? 1 : 0.55;
+      e.takeDamage(dmg * factor, pos, this.ctx, isFire);
+      hitCount++;
+    }
+    if (hitCount === 0 && aoe === 0) return;
+
+    if (isFire && aoe > 0) {
+      // explosión de bola de fuego
+      this.particles.burst({
+        x: pos.x, y: pos.y, z: pos.z,
+        count: 30, speed: 6.5, color: 0xff7a2a, size: 0.3, life: 0.6, drag: 1.6, glow: 2.8, gravity: 1,
+      });
+      this.particles.burst({
+        x: pos.x, y: pos.y + 0.3, z: pos.z,
+        count: 14, speed: 3.5, color: 0xffd98a, size: 0.24, life: 0.45, drag: 2, glow: 2.4, gravity: -1,
+      });
+      this.ctx.shockwave(pos, 0xff8a3a, aoe * 1.4);
+      this.shakeAmt = Math.min(1.2, this.shakeAmt + 0.35);
+      this.audio.heavyHit();
+    } else {
+      // impacto de flecha
+      this.particles.burst({
+        x: pos.x, y: pos.y, z: pos.z,
+        count: 10, speed: 4, color: 0xffe0a0, size: 0.18, life: 0.35, drag: 2, glow: 2.4, gravity: 3,
+      });
+      this.audio.hitMetal();
+    }
+    if (hitCount > 0) {
+      this.stylePts = Math.min(420, this.stylePts + (isFire ? 12 : 9) + (hitCount - 1) * 5);
+      this.comboHits += hitCount;
+      this.comboHitsTimer = 2.1;
+      if (this.hitStopGap <= 0) {
+        this.hitStopT = Math.max(this.hitStopT, 0.045);
+        this.hitStopScale = 0.16;
+        this.hitStopGap = 0.14;
       }
     }
   }
@@ -1463,6 +1754,7 @@ export class Game {
       this.bossActive,
       this.bossDefeated,
       { x: MERCHANT_SPOT.stall.x, z: MERCHANT_SPOT.stall.z },
+      { x: SMITH_SPOT.forge.x, z: SMITH_SPOT.forge.z },
     );
   }
 
@@ -1482,6 +1774,10 @@ export class Game {
     this.invCache.open = this.uiPanel === 'inv';
     if (this.shopDirty || !this.shopCache) { this.shopCache = this.shopView(); this.shopDirty = false; }
     this.shopCache.open = this.uiPanel === 'shop';
+    if (this.smithDirty || !this.smithCache) { this.smithCache = this.smithView(); this.smithDirty = false; }
+    this.smithCache.open = this.uiPanel === 'smith';
+    if (!this.slotsCache) this.slotsCache = this.weaponSlots();
+    for (const s of this.slotsCache) s.active = s.type === this.player.weaponType;
     // rango de estilo actual (D→SSS)
     let rankIdx = 0;
     for (let i = STYLE_RANKS.length - 1; i >= 0; i--) {
@@ -1522,6 +1818,9 @@ export class Game {
       comboActive: this.comboHitsTimer > 0 && this.comboHits > 1,
       inv: this.invCache,
       shop: this.shopCache,
+      smith: this.smithCache,
+      weaponSlots: this.slotsCache,
+      weaponType: this.player.weaponType,
     });
   }
 
@@ -1530,6 +1829,7 @@ export class Game {
     switch (this.interactTarget.kind) {
       case 'bonfire': return 'E · Descansar en la hoguera (cura y reabastece)';
       case 'merchant': return `E · Comerciar con ${MERCHANT_NAME} el Mercader`;
+      case 'smith': return `E · Hablar con ${SMITH_NAME} el Herrero (forjar y mejorar)`;
       case 'shrine': return `E · Purificar ${WORLD.shrines[this.interactTarget.idx!].name}`;
       case 'sigil': return 'E · Despertar al jefe de nuevo';
     }
@@ -1640,10 +1940,10 @@ export class Game {
 
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
-    // con un panel abierto (mochila/tienda) solo se permite cerrarlo
+    // con un panel abierto (mochila/tienda/forja) solo se permite cerrarlo
     if (this.uiOpen) {
       if (e.code === 'Escape' || e.code === 'KeyI' || e.code === 'KeyB') {
-        if (this.uiPanel === 'shop') this.setPanel(null);
+        if (this.uiPanel === 'shop' || this.uiPanel === 'smith') this.setPanel(null);
         else this.toggleInventory();
       }
       return;
@@ -1656,6 +1956,11 @@ export class Game {
       case 'KeyF': this.queued.potion = true; break;
       case 'KeyE': this.doInteract(); break;
       case 'KeyI': case 'KeyB': this.toggleInventory(); break;
+      // cambio rápido de arma (solo si la posees)
+      case 'Digit1': this.switchWeaponType('sword'); break;
+      case 'Digit2': this.switchWeaponType('bow'); break;
+      case 'Digit3': this.switchWeaponType('halberd'); break;
+      case 'Digit4': this.switchWeaponType('staff'); break;
     }
   };
 
@@ -1689,8 +1994,12 @@ export class Game {
 
   private onLockChange = () => {
     this.locked = document.pointerLockElement === this.renderer.domElement;
+    if (this.locked) this.unlockGuard = false;
     // no pausar si la salida de bloqueo fue por abrir la mochila
-    if (!this.locked && this.phase === 'playing' && !this.uiOpen) this.pause();
+    if (!this.locked && this.phase === 'playing' && !this.uiOpen) {
+      if (this.unlockGuard) { this.unlockGuard = false; return; }
+      this.pause();
+    }
   };
 
   /* ---------- Limpieza ---------- */

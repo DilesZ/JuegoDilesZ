@@ -112,7 +112,7 @@ export function terrainNormalY(x: number, z: number): number {
 export type GamePhase = 'menu' | 'loading' | 'playing' | 'paused' | 'dead' | 'victory';
 
 /* Vistas serializables del inventario para la UI (React) */
-import type { EquipSlot, EquipStats, ItemKind, Rarity } from './items';
+import type { EquipSlot, EquipStats, ItemKind, Rarity, WeaponType } from './items';
 
 export interface ItemView {
   id: string;
@@ -157,6 +157,36 @@ export interface ShopView {
   restockDay: number; // día en que se reabasteció
 }
 
+/* Vista serializable de la FORJA del herrero para la UI (React) */
+export interface SmithCatalogView {
+  item: ItemView;
+  price: number;
+  owned: boolean;
+  wtype: WeaponType;
+}
+export interface SmithView {
+  open: boolean;
+  name: string;
+  gold: number;
+  /** arma equipada (para mejorar) */
+  weapon: ItemView | null;
+  forgeLevel: number;
+  maxForge: number;
+  upgradeCost: number | null;   // null = al máximo o sin arma
+  upgradeDesc: string;
+  catalog: SmithCatalogView[];
+}
+
+/** Slots de cambio rápido de arma (1-4) para el HUD */
+export interface WeaponSlotView {
+  type: WeaponType;
+  icon: string;
+  label: string;
+  name: string;
+  active: boolean;
+  owned: boolean;
+}
+
 export interface HudState {
   phase: GamePhase;
   hp: number; maxHp: number;
@@ -186,6 +216,11 @@ export interface HudState {
   comboActive: boolean;
   inv: InvView;
   shop: ShopView;
+  smith: SmithView;
+  /** slots de cambio rápido de arma (teclas 1-4) */
+  weaponSlots: WeaponSlotView[];
+  /** tipo de arma activa (para la barra del HUD) */
+  weaponType: WeaponType;
 }
 
 /* Rangos del medidor de estilo (D→SSS, estilo Devil May Cry) */
