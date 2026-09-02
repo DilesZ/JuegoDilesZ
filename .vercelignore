@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.vercel
+.env
+.env.local
+*.log
+db
+download
+examples
+scripts
+tool-results
+.zscripts
+worklog.md
