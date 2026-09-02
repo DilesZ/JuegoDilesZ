@@ -360,16 +360,19 @@ export class World {
     this.moonLight = new THREE.DirectionalLight(0xaec6ff, 1.22);
     this.moonLight.position.set(-40, 55, -30);
     this.moonLight.castShadow = true;
-    this.moonLight.shadow.mapSize.set(2048, 2048);
-    this.moonLight.shadow.camera.near = 5;
-    this.moonLight.shadow.camera.far = 200;
-    const S = 44;
+    // Alta resolución + PCF Soft: sombras nítidas cerca del jugador (AAA)
+    this.moonLight.shadow.mapSize.set(3072, 3072);
+    this.moonLight.shadow.camera.near = 2;
+    this.moonLight.shadow.camera.far = 190;
+    this.moonLight.shadow.radius = 2.6;
+    this.moonLight.shadow.blurSamples = 12;
+    const S = 34;
     this.moonLight.shadow.camera.left = -S;
     this.moonLight.shadow.camera.right = S;
     this.moonLight.shadow.camera.top = S;
     this.moonLight.shadow.camera.bottom = -S;
-    this.moonLight.shadow.bias = -0.0006;
-    this.moonLight.shadow.normalBias = 0.03;
+    this.moonLight.shadow.bias = -0.0004;
+    this.moonLight.shadow.normalBias = 0.022;
     this.scene.add(this.moonLight);
     this.scene.add(this.moonLight.target);
 

@@ -13,6 +13,8 @@ import { World } from './world';
 import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
+import { SlashArcPool, ImpactDecalPool, HitFlarePool } from './vfx';
+import { glowSprite } from './textures';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
 import { Blacksmith, SMITH_NAME, SMITH_SPOT, smithDist } from './smith';
 import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, monsterAttackTimings, type CharacterPack, type EnemyVariant } from './characters';
@@ -20,16 +22,17 @@ import { drawMinimap } from './minimap';
 
 export type QualityTier = 'bajo' | 'medio' | 'alto';
 
-/* Grading final cinematográfico: contraste S suave, viñeta, grano, CA */
+/* Grading final cinematográfico (en HDR lineal, pre-tonemap): contraste S,
+   viñeta, grano de film y aberración cromática suave */
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
-    uVignette: { value: 0.34 },
-    uGrain: { value: 0.013 },
-    uCA: { value: 0.0009 },
-    uSat: { value: 1.04 },
-    uCon: { value: 1.06 },
+    uVignette: { value: 0.3 },
+    uGrain: { value: 0.006 },
+    uCA: { value: 0.0006 },
+    uSat: { value: 1.06 },
+    uCon: { value: 1.045 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
@@ -41,19 +44,28 @@ const GradeShader = {
       vec2 uv = vUv;
       vec2 d = uv - 0.5;
       float r2 = dot(d, d);
+      // aberración cromática radial (leve, progresiva hacia bordes)
       vec2 off = d * r2 * uCA * 8.0;
       vec3 col;
       col.r = texture2D(tDiffuse, uv + off).r;
       col.g = texture2D(tDiffuse, uv).g;
       col.b = texture2D(tDiffuse, uv - off).b;
-      float l = dot(col, vec3(0.299, 0.587, 0.114));
+      // purga de NaN/Inf (robustez HDR)
+      if (any(isnan(col)) || any(isinf(col))) col = vec3(0.0);
+      // saturación en lineal
+      float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
       col = mix(vec3(l), col, uSat);
-      // curva S suave (sombras densas, altas luces limpias)
-      col = col * col * (3.0 - 2.0 * col) * 0.28 + col * 0.72;
-      col = (col - 0.5) * uCon + 0.5;
-      col *= 1.0 - uVignette * smoothstep(0.12, 0.72, r2);
-      col += (hash(uv * vec2(1287.0, 731.0) + fract(uTime) * 43.7) - 0.5) * uGrain;
-      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+      // curva S suave preservando medias luces (Menpher / filmic S)
+      vec3 s = col * col * (3.0 - 2.0 * col);
+      col = mix(col, s, 0.22);
+      // contraste alrededor del gris medio (~0.18 lineal)
+      col = (col - 0.18) * uCon + 0.18;
+      // viñeta natural (no llega a negro puro)
+      col *= 1.0 - uVignette * smoothstep(0.14, 0.7, r2);
+      // grano de film sutil (lineal, proporcional a la señal)
+      float g = (hash(uv * vec2(1287.0, 731.0) + fract(uTime) * 43.7) - 0.5);
+      col += g * uGrain * (0.25 + l);
+      gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
     }`,
 };
 
@@ -198,6 +210,10 @@ export class Game {
   private baseFov = 65;
   private fovKickAmt = 0;
   private shockwaves!: ShockwavePool;
+  // VFX de combate (pools)
+  private slashArcs!: SlashArcPool;
+  private impactDecals!: ImpactDecalPool;
+  private hitFlares!: HitFlarePool;
 
   // medidor de estilo (DMC): puntos por golpe, decaimiento y rangos D→SSS
   private stylePts = 0;
@@ -257,7 +273,7 @@ export class Game {
     this.renderer.setPixelRatio(this.pixelRatioFor('alto'));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // ACES Filmic: respuesta tonal cinematográfica con modelos PBR
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.06;
@@ -290,6 +306,10 @@ export class Game {
     this.scene.add(this.player.root);
     this.trail = new SwordTrail(this.scene);
     this.shockwaves = new ShockwavePool(this.scene, 6);
+    // VFX de combate AAA: arcos de tajo, decals de impacto y destellos
+    this.slashArcs = new SlashArcPool(this.scene, 5);
+    this.impactDecals = new ImpactDecalPool(this.scene, 8);
+    this.hitFlares = new HitFlarePool(this.scene, 12, glowSprite());
 
     // IBL fotográfico (HDRIs CC0 de Poly Haven vía three.js)
     void this.world.loadHDRI();
@@ -359,11 +379,12 @@ export class Game {
         this.gtao = gtao;
       } catch { this.gtao = null; }
     }
-    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.55, 0.9);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.32, 0.6, 0.85);
     this.composer.addPass(bloom);
-    this.composer.addPass(new OutputPass());
+    // grading EN HDR (lineal): viñeta/contraste/grano antes del tonemap ACES
     this.grade = new ShaderPass(GradeShader);
     this.composer.addPass(this.grade);
+    this.composer.addPass(new OutputPass());
     if (lite) {
       this.renderer.setPixelRatio(0.7);
       this.composer.setPixelRatio(0.7);
@@ -406,6 +427,9 @@ export class Game {
       fovKick: (deg) => { this.fovKickAmt = Math.min(7, this.fovKickAmt + deg); },
       shockwave: (pos, color = 0xffd9a0, maxR = 3.4) => {
         this.shockwaves.spawn(pos, color, maxR);
+      },
+      flare: (pos, color = 0xfff2d8, size = 1.1, dur = 0.11) => {
+        this.hitFlares.spawn(pos, { color, size, dur });
       },
     };
 
@@ -921,6 +945,14 @@ export class Game {
     // jugosa recompensa de estilo por rematar (DMC)
     this.addStyle(22);
     this.ctx.fovKick(1.8);
+    // estallido de esencia al morir (VFX de remate)
+    const deathPos = this._gV3.set(e.pos.x, e.pos.y + e.rig.height * 0.5, e.pos.z);
+    this.hitFlares.spawn(deathPos, { color: 0xffd9a0, size: e.isBoss ? 5 : 2.2, dur: 0.18 });
+    this.particles.burst({
+      x: e.pos.x, y: e.pos.y + e.rig.height * 0.4, z: e.pos.z,
+      count: e.isBoss ? 60 : 22, speed: 6, color: 0xff9a3a, size: 0.28, life: 0.7,
+      gravity: -0.5, drag: 1.4, glow: 2.6, fadePow: 1.4,
+    });
     if (!e.isBoss && this.hitStopGap <= 0) {
       this.hitStopT = Math.max(this.hitStopT, 0.055);
       this.hitStopScale = 0.12;
@@ -1492,6 +1524,17 @@ export class Game {
     const halfArc = def.spin ? Math.PI + 0.01 : def.arc / 2;
     let hitCount = 0;
     const to = this._gV1;
+    // arco de tajo AAA: media luna que barre el cono del golpe
+    if (!def.shot) {
+      const arcColor = def.kind === 'finisher'
+        ? 0xffb45a
+        : (this.player.weaponType === 'staff' ? 0xff8a3a : 0xffe0b0);
+      this.slashArcs.spawn(this.player.pos, this.player.yaw, {
+        color: arcColor,
+        radius: def.range * 0.92,
+        dur: Math.max(0.2, def.dur * 0.55),
+      });
+    }
     for (const e of this.enemies) {
       if (!e.alive || e.state === 'spawn') continue;
       to.subVectors(e.pos, p.pos).setY(0);
@@ -1514,11 +1557,22 @@ export class Game {
           count: kind === 'light' ? 10 : 22, speed: kind === 'light' ? 5 : 7, color: 0xffd9a0,
           size: kind === 'light' ? 0.2 : 0.26, life: 0.38, drag: 2, glow: 2.6, gravity: 4,
         });
+        // destello de impacto en el punto exacto de contacto
+        this.hitFlares.spawn(hitPos, {
+          color: kind === 'light' ? 0xfff2d8 : 0xffd9a0,
+          size: kind === 'light' ? 0.9 : (def.kind === 'finisher' ? 2.0 : 1.5),
+          dur: kind === 'light' ? 0.1 : 0.14,
+        });
         if (kind !== 'light') {
           this.particles.burst({
             x: hitPos.x, y: hitPos.y, z: hitPos.z,
             count: 12, speed: 4.5, color: 0xff8848, size: 0.3, life: 0.5, drag: 1.6, glow: 2.2, gravity: 2,
           });
+          // decal radial en el suelo bajo el enemigo golpeado
+          this.impactDecals.spawn(
+            this._gV3.set(e.pos.x, terrainHeight(e.pos.x, e.pos.z), e.pos.z),
+            { color: 0xffa86a, radius: kind === 'finisher' ? 2.2 : 1.6, dur: 0.5 },
+          );
         }
       }
     }
@@ -1593,6 +1647,11 @@ export class Game {
         x: pos.x, y: pos.y + 0.3, z: pos.z,
         count: 14, speed: 3.5, color: 0xffd98a, size: 0.24, life: 0.45, drag: 2, glow: 2.4, gravity: -1,
       });
+      this.hitFlares.spawn(pos, { color: 0xffc47d, size: aoe * 1.6, dur: 0.16 });
+      this.impactDecals.spawn(
+        this._gV3.set(pos.x, terrainHeight(pos.x, pos.z), pos.z),
+        { color: 0xff8a3a, radius: aoe * 0.9, dur: 0.55 },
+      );
       this.ctx.shockwave(pos, 0xff8a3a, aoe * 1.4);
       this.shakeAmt = Math.min(1.2, this.shakeAmt + 0.35);
       this.audio.heavyHit();
@@ -1602,6 +1661,7 @@ export class Game {
         x: pos.x, y: pos.y, z: pos.z,
         count: 10, speed: 4, color: 0xffe0a0, size: 0.18, life: 0.35, drag: 2, glow: 2.4, gravity: 3,
       });
+      this.hitFlares.spawn(pos, { color: 0xfff2d8, size: 0.8, dur: 0.09 });
       this.audio.hitMetal();
     }
     if (hitCount > 0) {
@@ -1694,6 +1754,10 @@ export class Game {
     this.particles.update(dt, this.camera.position);
     // ondas expansivas (pool)
     this.shockwaves.update(dt);
+    // VFX de combate (pool)
+    this.slashArcs.update(dt);
+    this.impactDecals.update(dt);
+    this.hitFlares.update(dt);
     // números de daño
     const w = window.innerWidth, h = window.innerHeight;
     const v = this._gV4;

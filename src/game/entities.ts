@@ -52,6 +52,8 @@ export interface GameCtx {
   fovKick(deg: number): void;
   /** Onda expansiva en el suelo (impactos pesados, slams) */
   shockwave(pos: THREE.Vector3, color?: number, maxR?: number): void;
+  /** Destello luminoso breve (hit-flare en el punto de impacto) */
+  flare(pos: THREE.Vector3, color?: number, size?: number, dur?: number): void;
 }
 
 export abstract class Entity {
@@ -134,7 +136,12 @@ export class SwordTrail {
       vertexShader: `attribute float aAlpha; varying float vA;
         void main(){ vA = aAlpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
       fragmentShader: `uniform vec3 uColor; varying float vA;
-        void main(){ if (vA <= 0.003) discard; gl_FragColor = vec4(uColor * (0.6 + vA), vA * 0.85); }`,
+        void main(){
+          if (vA <= 0.003) discard;
+          // núcleo blanco caliente fundiéndose al color del arma (DMC)
+          vec3 core = mix(uColor, vec3(1.0, 0.97, 0.9), pow(vA, 1.6));
+          gl_FragColor = vec4(core * (0.7 + vA * 1.5), vA * 0.88);
+        }`,
       transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
     });
     this.mesh = new THREE.Mesh(this.geo, mat);
@@ -776,51 +783,57 @@ export class Player extends Entity {
   pendingStrike: AttackDef | null = null;
 
   /**
-   * Overlay orgánico sobre el mixer: inclina el torso al girar (banking),
-   * añade inclinación de combate y hace que la cabeza mire al objetivo.
-   * El mixer resetea los huesos cada frame, así que el overlay no se acumula.
-   */
-  private applyOverlay(dt: number, ctx: GameCtx) {
-    const glb = this.glb;
-    if (!glb) return;
-    // inclinación al girar (banking) según velocidad angular de yaw
-    let dYaw = this.yaw - this.ovPrevYaw;
-    while (dYaw > Math.PI) dYaw -= Math.PI * 2;
-    while (dYaw < -Math.PI) dYaw += Math.PI * 2;
-    this.ovPrevYaw = this.yaw;
-    const yawRate = dYaw / Math.max(dt, 1e-4);
-    const bankTarget = clamp(yawRate * 0.04, -0.16, 0.16);
-    this.ovBank += (bankTarget - this.ovBank) * Math.min(1, dt * 7);
-    // inclinación de combate: se adelanta al atacar/correr
-    const leanTarget = this.state === 'attack' ? 0.1 : (this.moving ? (this.sprinting ? 0.1 : 0.05) : 0.015);
-    this.ovLean += (leanTarget - this.ovLean) * Math.min(1, dt * 5);
-    const spine = glb.spine;
-    if (spine) {
-      spine.rotation.x += this.ovLean;
-      spine.rotation.z += -this.ovBank;
-    }
-    // mirada de cabeza hacia el objetivo fijado (o al frente al atacar)
-    const head = glb.head;
-    if (head) {
-      let lookYaw = 0, lookPitch = 0;
-      if (this.lockTarget && this.lockTarget.alive) {
-        const dx = this.lockTarget.pos.x - this.pos.x;
-        const dz = this.lockTarget.pos.z - this.pos.z;
-        let d = Math.atan2(dx, dz) - this.yaw;
-        while (d > Math.PI) d -= Math.PI * 2;
-        while (d < -Math.PI) d += Math.PI * 2;
-        lookYaw = clamp(d, -0.65, 0.65) * 0.75;
-        const dy = (this.lockTarget.pos.y + 1.2) - (this.pos.y + 1.5);
-        const dist = Math.max(0.6, Math.hypot(dx, dz));
-        lookPitch = clamp(-Math.atan2(dy, dist), -0.3, 0.3) * 0.55;
-      }
-      this.ovLookYaw += (lookYaw - this.ovLookYaw) * Math.min(1, dt * 6);
-      this.ovLookPitch += (lookPitch - this.ovLookPitch) * Math.min(1, dt * 6);
-      head.rotation.y += this.ovLookYaw;
-      head.rotation.x += this.ovLookPitch;
-    }
-    void ctx;
+ * Overlay orgánico sobre el mixer: inclina el torso al girar (banking),
+ * añade inclinación de combate, hace que la cabeza mire al objetivo y
+ * suma un micro-bob vertical sincronizado con el paso al correr.
+ * El mixer resetea los huesos cada frame, así que el overlay no se acumula.
+ */
+private applyOverlay(dt: number, ctx: GameCtx) {
+  const glb = this.glb;
+  if (!glb) return;
+  // inclinación al girar (banking) según velocidad angular de yaw
+  let dYaw = this.yaw - this.ovPrevYaw;
+  while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+  while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+  this.ovPrevYaw = this.yaw;
+  const yawRate = dYaw / Math.max(dt, 1e-4);
+  const bankTarget = clamp(yawRate * 0.04, -0.16, 0.16);
+  this.ovBank += (bankTarget - this.ovBank) * Math.min(1, dt * 7);
+  // inclinación de combate: se adelanta al atacar/correr
+  const leanTarget = this.state === 'attack' ? 0.1 : (this.moving ? (this.sprinting ? 0.1 : 0.05) : 0.015);
+  this.ovLean += (leanTarget - this.ovLean) * Math.min(1, dt * 5);
+  const spine = glb.spine;
+  if (spine) {
+    spine.rotation.x += this.ovLean;
+    spine.rotation.z += -this.ovBank;
   }
+  // micro-bob del torso al correr (impulso vertical del paso, sutil)
+  if (this.moving && this.state === 'idle') {
+    const bobK = this.sprinting ? 1.0 : 0.6;
+    if (spine) spine.rotation.x += Math.sin(this.animT * (this.sprinting ? 15 : 11)) * 0.02 * bobK;
+  }
+  // mirada de cabeza hacia el objetivo fijado (o al frente al atacar)
+  const head = glb.head;
+  if (head) {
+    let lookYaw = 0, lookPitch = 0;
+    if (this.lockTarget && this.lockTarget.alive) {
+      const dx = this.lockTarget.pos.x - this.pos.x;
+      const dz = this.lockTarget.pos.z - this.pos.z;
+      let d = Math.atan2(dx, dz) - this.yaw;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      lookYaw = clamp(d, -0.65, 0.65) * 0.75;
+      const dy = (this.lockTarget.pos.y + 1.2) - (this.pos.y + 1.5);
+      const dist = Math.max(0.6, Math.hypot(dx, dz));
+      lookPitch = clamp(-Math.atan2(dy, dist), -0.3, 0.3) * 0.55;
+    }
+    this.ovLookYaw += (lookYaw - this.ovLookYaw) * Math.min(1, dt * 6);
+    this.ovLookPitch += (lookPitch - this.ovLookPitch) * Math.min(1, dt * 6);
+    head.rotation.y += this.ovLookYaw;
+    head.rotation.x += this.ovLookPitch;
+  }
+  void ctx;
+}
   private ovLean = 0;
 
   private applyTransform(ctx: GameCtx, dt: number) {

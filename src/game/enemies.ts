@@ -110,6 +110,8 @@ export class Enemy extends Entity {
   isBoss = false;
   guardianOf = -1; // índice de santuario al que protege (-1 = errante)
   tint = 0; // acumulador paraflash
+  /** hit-react direccional acumulado (decae solo) */
+  private ovHitLean = 0;
 
   constructor(type: EnemyType, pos: THREE.Vector3, guardianOf = -1, hpMul = 1, dmgMul = 1) {
     super();
@@ -219,6 +221,15 @@ export class Enemy extends Entity {
     this.aggroed = true;
     this.flash();
     ctx.audio.hitFlesh();
+    // hit-react direccional: el enemigo se sacude ALEJÁNDOSE del golpe
+    // (retroceso de caderas hacia la fuente de daño — más orgánico)
+    const hitDir = _eTmpC.copy(srcPos).sub(this.pos).setY(0);
+    if (hitDir.lengthSq() > 0.001) {
+      hitDir.normalize();
+      // pequeño giro de cuerpo para telegrafiar el punto de impacto
+      const hitYaw = Math.atan2(hitDir.x, hitDir.z) - this.yaw;
+      this.ovHitLean += clamp(Math.sin(hitYaw), -1, 1) * 0.12;
+    }
     ctx.addDamageNumber(
       new THREE.Vector3(this.pos.x + rand(-0.4, 0.4), this.pos.y + this.rig.height * 0.9, this.pos.z),
       crit ? `${final}!` : `${final}`,
@@ -229,6 +240,11 @@ export class Enemy extends Entity {
       x: this.pos.x, y: this.pos.y + this.rig.height * 0.55, z: this.pos.z,
       count: crit ? 16 : 10, speed: 3.4, color: 0xd8323c, size: 0.22, life: 0.6, gravity: 6, drag: 1.2,
     });
+    // destello en el punto de impacto (AA): visible en cada golpe
+    ctx.flare(
+      _eTmpC.copy(this.pos).setY(this.pos.y + this.rig.height * 0.6),
+      crit ? 0xffe08a : 0xfff2d8, crit ? 1.4 : 0.85, 0.09,
+    );
     // empuje (sin allocations)
     const d = _eTmpD.copy(this.pos).sub(srcPos).setY(0);
     if (d.lengthSq() > 0.001) {
@@ -451,6 +467,17 @@ export class Enemy extends Entity {
         if (this.rig.weaponMat && localT > atk.hitAt * 0.35) {
           this.rig.weaponMat.emissiveIntensity = 1.4 + Math.sin(localT * 30) * 0.6;
         }
+        // chispas de carga durante la anticipación (telegrafía legible)
+        if (localT < atk.hitAt && Math.random() < 0.35) {
+          const wPos = _eTmpC;
+          if (this.rig.handR) this.rig.handR.getWorldPosition(wPos);
+          else wPos.set(this.pos.x, this.pos.y + this.rig.height * 0.6, this.pos.z);
+          ctx.particles.spawn({
+            x: wPos.x + rand(-0.2, 0.2), y: wPos.y + rand(-0.1, 0.2), z: wPos.z + rand(-0.2, 0.2),
+            color: 0xffa04a, size: 0.14, life: 0.3, glow: 2.4, drag: 2,
+            vx: rand(-0.8, 0.8), vy: rand(0.5, 1.6), vz: rand(-0.8, 0.8),
+          });
+        }
         if (localT >= atk.hitAt && !this.didHit) {
           this.didHit = true;
           this.executeAttack(atk, ctx);
@@ -472,6 +499,14 @@ export class Enemy extends Entity {
     }
 
     if (this.glb) this.glb.animator.update(dt);
+
+    // hit-react direccional: inclina el spine según el último golpe y decae
+    if (this.ovHitLean !== 0) {
+      const spine = this.glb?.spine;
+      if (spine) spine.rotation.z += this.ovHitLean;
+      this.ovHitLean *= Math.max(0, 1 - dt * 9);
+      if (Math.abs(this.ovHitLean) < 0.002) this.ovHitLean = 0;
+    }
 
     // knockback + separación + límites
     this.pos.addScaledVector(this.knock, dt);
