@@ -431,7 +431,11 @@ export class Game {
       addDamageNumber: (pos, text, color, big) => this.addDamageNumber(pos, text, color, big),
       shake: (a) => { this.shakeAmt = Math.min(1.2, this.shakeAmt + a); },
       hitStop: (d) => { this.hitStopT = Math.max(this.hitStopT, d); },
-      spawnProjectile: (o) => { this.projectiles.push(new Projectile(o)); },
+      spawnProjectile: (o) => {
+        const pr = new Projectile(o);
+        this.scene.add(pr.root); // sin esto la flecha/bola de fuego no se ve
+        this.projectiles.push(pr);
+      },
       playerShotHit: (pos, dmg, aoe, isFire) => this.resolvePlayerShotHit(pos, dmg, aoe, isFire),
       onEnemyDied: (e) => this.handleEnemyDied(e),
       playerHurt: () => { this.hurtFlash = 1; this.comboHits = 0; this.stylePts *= 0.35; },
@@ -982,6 +986,8 @@ export class Game {
     this.boss = e;
     this.bossActive = true;
     this.awakenTimer = -1;
+    // el jefe despierta: la misión del acto I pasa a la fase del jefe
+    if (this.quest === 'act1_shrines') this.quest = 'act1_boss';
     this.audio.bossRoar();
     this.audio.setIntensity(1);
     this.ctx.shake(1);

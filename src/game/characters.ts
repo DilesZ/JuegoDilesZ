@@ -279,6 +279,31 @@ function potionPose(t: number): Pose {
 
 /* ---------- Utilidades de normalización y materiales ---------- */
 
+/**
+ * Quita el "root motion" de un clip de mocap: el desplazamiento en XZ de la
+ * pelvis queda anclado a su primer keyframe (solo se conserva el bob vertical).
+ * Sin esto, el clip en bucle desplaza al personaje hacia delante y al
+ * reiniciar lo devuelve atrás: el clásico "avanza tres, retrocede dos".
+ */
+function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const posTracks: THREE.VectorKeyframeTrack[] = [];
+  for (const track of clip.tracks) {
+    if (track.name.endsWith('.position')) posTracks.push(track as THREE.VectorKeyframeTrack);
+  }
+  for (const t of posTracks) {
+    // pelvis/caderas: anclar XZ al valor del primer keyframe, conservar Y
+    if (/(Hips|Pelvis|Root)/i.test(t.name)) {
+      const v = t.values as Float32Array;
+      const x0 = v[0], z0 = v[2];
+      for (let i = 0; i < v.length; i += 3) {
+        v[i] = x0;
+        v[i + 2] = z0;
+      }
+    }
+  }
+  return clip;
+}
+
 /** Escala el modelo a una altura objetivo y apoya los pies en y=0 */
 function normalizeModel(model: THREE.Object3D, targetH: number): number {
   model.updateMatrixWorld(true);
@@ -826,7 +851,9 @@ export async function loadCharacterAssets(
     for (const [engine, raw] of RPM_MAP) {
       const file = `rpm-anims/${raw}.glb`;
       const gltf = loaded[file];
-      if (gltf && gltf.animations.length > 0) rpmClips[raw] = gltf.animations[0];
+      if (gltf && gltf.animations.length > 0) {
+        rpmClips[raw] = stripRootMotion(gltf.animations[0]);
+      }
       void engine;
     }
 
