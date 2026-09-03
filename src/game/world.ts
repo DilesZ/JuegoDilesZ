@@ -138,6 +138,7 @@ export class World {
     this.buildShrines();
     this.buildArena();
     this.buildRoost();
+    this.buildRain();
     if (renderer) this.buildEnvironmentMap(renderer);
   }
 
@@ -498,14 +499,24 @@ export class World {
     (su.top.value as THREE.Color).copy(s.skyTop);
     (su.mid.value as THREE.Color).copy(s.skyMid);
     (su.bottom.value as THREE.Color).copy(s.skyBottom);
+    // LLUVIA: cielo gris plomizo, dispersión atenuada
+    const rk = this.rainK;
+    if (rk > 0.01) {
+      const gray = new THREE.Color(0x5a636e);
+      (su.top.value as THREE.Color).lerp(gray, rk * 0.55);
+      (su.mid.value as THREE.Color).lerp(gray, rk * 0.7);
+      (su.bottom.value as THREE.Color).lerp(gray.clone().lerp(new THREE.Color(0x707a84), 0.4), rk * 0.75);
+      this.dn.sunGlow.value = s.sunGlow * (1 - rk * 0.6);
+    } else {
+      this.dn.sunGlow.value = s.sunGlow;
+    }
     this.dn.sunDir.value.copy(s.lightDir);
     this.dn.sunTint.value.copy(s.sunTint);
-    this.dn.sunGlow.value = s.sunGlow;
 
-    // estrellas, aurora, luciérnagas
-    this.dn.starsA.value = s.stars;
-    this.dn.auroraA.value = s.aurora;
-    this.dn.ffA.value = s.fireflies;
+    // estrellas, aurora, luciérnagas (ocultas bajo la lluvia)
+    this.dn.starsA.value = s.stars * (1 - rk);
+    this.dn.auroraA.value = s.aurora * (1 - rk);
+    this.dn.ffA.value = s.fireflies * (1 - rk * 0.7);
     // polen diurno: opuesto a luciérnagas (pleno día 0.8, anochecer 0)
     this.dn.pollenA.value = clamp(1 - s.night * 1.4, 0, 0.85);
     // Vía Láctea: solo de noche, con arranque suave (evita bandas fantasma de día)
@@ -513,10 +524,10 @@ export class World {
 
     // sol y luna visibles
     this.sunSprites.forEach((sp) => { sp.position.copy(s.lightDir).multiplyScalar(385); });
-    if (this.sunMat) this.sunMat.opacity = 0.85 * s.sunA;
-    if (this.sunGlowMat) this.sunGlowMat.opacity = 0.34 * s.sunA;
-    // god rays volumétricos (alba/ocaso)
-    this.updateSunBeams(s.lightDir, s.sunGlow, s.sunTint, s.sunA);
+    if (this.sunMat) this.sunMat.opacity = 0.85 * s.sunA * (1 - rk * 0.85);
+    if (this.sunGlowMat) this.sunGlowMat.opacity = 0.34 * s.sunA * (1 - rk * 0.85);
+    // god rays volumétricos (alba/ocaso, apagados por la lluvia)
+    this.updateSunBeams(s.lightDir, s.sunGlow * (1 - rk), s.sunTint, s.sunA * (1 - rk));
     if (this.moonGroup) {
       this.moonGroup.visible = s.moonA > 0.02;
       this.moonGroup.position.set(0, 0, 0);
@@ -524,9 +535,9 @@ export class World {
     if (this.moonMat) this.moonMat.opacity = s.moonA;
     this.moonHaloMats.forEach((m, i) => { m.opacity = (i === 0 ? 0.5 : 0.16) * s.moonA; });
 
-    // luz direccional con sombras (sol de día / luna de noche)
+    // luz direccional con sombras (sol de día / luna de noche; atenuada por lluvia)
     this.moonLight.color.copy(s.lightColor);
-    this.moonLight.intensity = s.lightIntensity;
+    this.moonLight.intensity = s.lightIntensity * (1 - rk * 0.55);
 
     // hemisférica + relleno
     this.hemi.color.copy(s.hemiSky);
@@ -1214,6 +1225,127 @@ export class World {
     }
   }
 
+  /* ---------- CLIMA: lluvia ocasional con charcos ---------- */
+
+  /** 0 = despejado · 1 = diluvio (transiciones suaves) */
+  private rainK = 0;
+  private rainTarget = 0;
+  private rainNextT = 55; // s hasta el próximo cambio de clima
+  private rainPoints: THREE.Points | null = null;
+  private rainMat: THREE.ShaderMaterial | null = null;
+  private puddles: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; baseY: number }[] = [];
+
+  private buildRain() {
+    // cortina de gotas: 900 puntos en un cilindro alrededor de la cámara
+    const N = 900;
+    const pos = new Float32Array(N * 3);
+    const speed = new Float32Array(N);
+    const rng = mulberry32(2024);
+    for (let i = 0; i < N; i++) {
+      pos[i * 3] = (rng() - 0.5) * 46;
+      pos[i * 3 + 1] = rng() * 26;
+      pos[i * 3 + 2] = (rng() - 0.5) * 46;
+      speed[i] = 22 + rng() * 14;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+    this.rainMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, fog: false,
+      uniforms: { uTime: this.skyTime, uA: { value: 0 } },
+      vertexShader: `attribute float aSpeed;
+        uniform float uTime; uniform float uA; varying float vA;
+        void main(){
+          vec3 p = position;
+          // caída en bucle dentro del volumen (26 de alto)
+          p.y = mod(p.y - uTime * aSpeed, 26.0);
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          // trazos verticales (línea) — el tamaño en X es mínimo
+          gl_PointSize = clamp(160.0 / max(0.1, -mv.z), 1.0, 7.0);
+          vA = uA * smoothstep(30.0, 8.0, -mv.z);
+          gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `varying float vA;
+        void main(){
+          // gota: punto estirado verticalmente (sub-pixel, gris azulado)
+          vec2 uv = gl_PointCoord - 0.5;
+          float a = (1.0 - smoothstep(0.08, 0.5, length(uv * vec2(3.2, 0.7)))) * vA;
+          if (a < 0.02) discard;
+          gl_FragColor = vec4(vec3(0.62, 0.72, 0.88), a * 0.5); }`,
+    });
+    const pts = new THREE.Points(geo, this.rainMat);
+    pts.frustumCulled = false;
+    pts.visible = false;
+    pts.renderOrder = 7;
+    this.scene.add(pts);
+    this.rainPoints = pts;
+
+    // charcos: 6 discos espejo cerca del campamento (la lluvia los revela)
+    const puddleTex = waterNormal();
+    for (let i = 0; i < 6; i++) {
+      const a = rng() * Math.PI * 2;
+      const r = 5 + rng() * 12;
+      const x = WORLD.bonfire.x + Math.cos(a) * r;
+      const z = WORLD.bonfire.z + Math.sin(a) * r;
+      const h = terrainHeight(x, z);
+      const mat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false,
+        uniforms: {
+          uTime: this.waterTime, uNormals: { value: puddleTex },
+          uA: { value: 0 },
+          uSky: { value: new THREE.Color(0x8aa8c0) },
+        },
+        vertexShader: `varying vec2 vUv;
+          void main(){ vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `varying vec2 vUv; uniform float uTime; uniform sampler2D uNormals;
+          uniform float uA; uniform vec3 uSky;
+          void main(){
+            // espejo ondulante del cielo (aprox. cúpula superior)
+            vec3 n = texture2D(uNormals, vUv * 2.6 + vec2(uTime * 0.014, uTime * 0.01)).xyz * 2.0 - 1.0;
+            float fres = 1.0 - length(vUv - 0.5) * 1.9; // más reflejo al borde
+            float ripple = 0.5 + 0.5 * sin((vUv.x + vUv.y) * 26.0 + uTime * 2.2 + n.x * 3.0);
+            vec3 col = uSky * (0.55 + 0.3 * fres + 0.15 * ripple);
+            float a = uA * smoothstep(0.5, 0.32, length(vUv - 0.5));
+            gl_FragColor = vec4(col, a * 0.85); }`,
+      });
+      const geoP = new THREE.CircleGeometry(0.7 + rng() * 1.3, 20);
+      geoP.rotateX(-Math.PI / 2);
+      const m = new THREE.Mesh(geoP, mat);
+      m.position.set(x, h + 0.04, z);
+      m.scale.set(1 + rng() * 0.5, 1, 0.65 + rng() * 0.45);
+      m.visible = false;
+      m.renderOrder = 2;
+      this.scene.add(m);
+      this.puddles.push({ mesh: m, mat, baseY: h });
+    }
+  }
+
+  /** avanza la máquina de clima (llamado desde update) */
+  private updateWeather(dt: number, camera: THREE.Camera) {
+    this.rainNextT -= dt;
+    if (this.rainNextT <= 0) {
+      // alterna despejado ↔ lluvia; la lluvia es menos frecuente
+      this.rainTarget = this.rainTarget > 0.5 ? 0 : (Math.random() < 0.65 ? 0.85 + Math.random() * 0.15 : 0);
+      this.rainNextT = this.rainTarget > 0.5 ? 40 + Math.random() * 30 : 55 + Math.random() * 90;
+    }
+    // transición suave hacia el objetivo
+    this.rainK += (this.rainTarget - this.rainK) * Math.min(1, dt * 0.22);
+    const raining = this.rainK > 0.04;
+    // la cortina sigue a la cámara (siempre alrededor del jugador)
+    if (this.rainPoints) {
+      this.rainPoints.visible = raining;
+      this.rainPoints.position.set(camera.position.x, camera.position.y - 8, camera.position.z);
+      if (this.rainMat) this.rainMat.uniforms.uA.value = this.rainK;
+    }
+    for (const p of this.puddles) {
+      p.mesh.visible = this.rainK > 0.12;
+      p.mat.uniforms.uA.value = Math.max(0, (this.rainK - 0.15)) * 1.2;
+    }
+  }
+
+  /** factor de lluvia actual (para oscurecer cielo/sol en applyDayNight) */
+  get rainFactor() { return this.rainK; }
+
   /* ---------- Fuente Lunar (agua estilizada) ---------- */
 
   private buildLunarBasin() {
@@ -1753,6 +1885,9 @@ export class World {
 
     // mariposas diurnas (mismo factor de visibilidad que el polen)
     this.updateButterflies(dt, this.dn.pollenA.value / 0.85);
+
+    // clima: lluvia ocasional con charcos
+    this.updateWeather(dt, camera);
 
     // deriva lenta de las nubes billboard
     for (let i = 0; i < this.cloudGroups.length; i++) {
