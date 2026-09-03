@@ -1407,6 +1407,84 @@ export class World {
   /** callback de trueno (lo engancha Game con su AudioEngine) */
   onLightning: (() => void) | null = null;
 
+  /* ---------- BANDADA: pájaros lejanos en V ---------- */
+
+  private flockGroup: THREE.Group | null = null;
+  private flockBirds: THREE.Mesh[] = [];
+  private flockNextT = 30;
+  private flockT = -1;             // < 0 = inactiva
+  private flockDur = 0;
+  private flockFrom = new THREE.Vector3();
+  private flockTo = new THREE.Vector3();
+  private flockYaw = 0;
+
+  private buildFlock() {
+    // silueta de pájaro: dos triángulos (alas) unidos al cuerpo
+    const shape = new THREE.BufferGeometry();
+    // triángulo simple estilo "gaviota" vista desde atrás
+    const v = new Float32Array([
+      0, 0, 0.5,   0, 0, -0.35,   -1.1, 0.15, 0.1,
+      0, 0, 0.5,   0, 0, -0.35,   1.1, 0.15, 0.1,
+    ]);
+    shape.setAttribute('position', new THREE.BufferAttribute(v, 3));
+    shape.computeVertexNormals();
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x1c2430, side: THREE.DoubleSide, fog: false,
+    });
+    const g = new THREE.Group();
+    for (let i = 0; i < 9; i++) {
+      const m = new THREE.Mesh(shape, mat);
+      // formación en V: el líder delante, el resto atrás en escalón
+      const side = i === 0 ? 0 : (i % 2 === 1 ? 1 : -1) * Math.ceil(i / 2);
+      m.position.set(side * 2.3, 0, -Math.abs(side) * 2.0);
+      m.scale.setScalar(1.15);
+      g.add(m);
+      this.flockBirds.push(m);
+    }
+    g.visible = false;
+    g.frustumCulled = false;
+    this.scene.add(g);
+    this.flockGroup = g;
+  }
+
+  /** mueve la bandada si está activa; programa la siguiente */
+  private updateFlock(dt: number) {
+    if (!this.flockGroup) { this.buildFlock(); }
+    if (this.flockT >= 0) {
+      // en vuelo: interpola la ruta con vaivén vertical
+      this.flockT += dt;
+      const k = this.flockT / this.flockDur;
+      if (k >= 1) {
+        this.flockT = -1;
+        this.flockGroup!.visible = false;
+        this.flockNextT = 60 + Math.random() * 60;
+        return;
+      }
+      const g = this.flockGroup!;
+      g.position.lerpVectors(this.flockFrom, this.flockTo, k);
+      g.position.y += Math.sin(k * Math.PI * 5) * 2.5;
+      g.rotation.y = this.flockYaw;
+      // aleteo: alas batiendo desfasadas por pájaro
+      for (let i = 0; i < this.flockBirds.length; i++) {
+        this.flockBirds[i].scale.y = 1 + Math.sin(this.time * 7.5 + i * 0.9) * 0.5;
+        this.flockBirds[i].rotation.x = Math.sin(this.time * 7.5 + i * 0.9) * 0.45;
+      }
+    } else {
+      this.flockNextT -= dt;
+      if (this.flockNextT <= 0) {
+        // nueva travesía: borde a borde del mapa a 90-130m
+        const a = Math.random() * Math.PI * 2;
+        const b = a + Math.PI + (Math.random() - 0.5) * 1.2;
+        this.flockFrom.set(Math.cos(a) * 300, 92 + Math.random() * 38, Math.sin(a) * 300);
+        this.flockTo.set(Math.cos(b) * 300, this.flockFrom.y + (Math.random() - 0.5) * 24, Math.sin(b) * 300);
+        this.flockYaw = Math.atan2(this.flockTo.x - this.flockFrom.x, this.flockTo.z - this.flockFrom.z);
+        this.flockT = 0;
+        this.flockDur = 36 + Math.random() * 18;
+        this.flockGroup!.visible = true;
+      }
+    }
+  }
+
   /* ---------- Fuente Lunar (agua estilizada) ---------- */
 
   private buildLunarBasin() {
@@ -2063,6 +2141,9 @@ export class World {
         });
       }
     }
+
+    // bandada de pájaros: cruza el cielo cada 60-120s (formación en V)
+    this.updateFlock(dt);
 
     // sistemas de partículas propios del mundo
     this.smoke.update(dt, camera.position);
