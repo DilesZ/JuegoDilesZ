@@ -7,7 +7,7 @@ import {
   buildSigil, grassGeometry, grassMaterial, canopyMat, pineCanopyMat,
   buildOakGeos, buildPineGeos, bushGeo, logGeo, rockRealGeo, monolithGeo,
   barkMat, stoneMat, woodMat, emisMat, stdMat, mushroomGeos, toonMat,
-  updateWindAndFlames, registerWind, flowerGeometry, flowerMaterial, type ToonMat,
+  updateWindAndFlames, registerWind, setGust, flowerGeometry, flowerMaterial, type ToonMat,
 } from './models';
 import { Particles } from './particles';
 import {
@@ -1386,6 +1386,8 @@ export class World {
     // transición suave hacia el objetivo
     this.rainK += (this.rainTarget - this.rainK) * Math.min(1, dt * 0.22);
     const raining = this.rainK > 0.04;
+    // viento: ráfagas crecientes con la tormenta (ondula copas y hierba)
+    setGust(this.rainK * (0.65 + 0.35 * Math.sin(this.time * 0.7) ** 2));
     // RELÁMPAGOS: solo con tormenta fuerte; flash doble + trueno retardado
     if (this.lightning > 0) {
       this.lightning -= dt * 3.6;

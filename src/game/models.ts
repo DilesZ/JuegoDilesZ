@@ -34,6 +34,8 @@ interface WindEntry { mat: THREE.Material; amp: number }
 const windMats: WindEntry[] = [];
 const flameMats: THREE.ShaderMaterial[] = [];
 const _time = { value: 0 };
+/** ráfaga global 0..1 (tormenta) — multiplica el balanceo del viento */
+const _gust = { value: 0 };
 
 export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | 'bottom' = 'top') {
   if (windMats.some(w => w.mat === mat)) return;
@@ -41,8 +43,9 @@ export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | '
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = _time;
     shader.uniforms.uAmp = { value: amp };
+    shader.uniforms.uGust = _gust;
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform float uAmp;')
+      .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform float uAmp;\nuniform float uGust;')
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         {
           float wx = 0.0, wz = 0.0;
@@ -51,8 +54,11 @@ export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | '
           #endif
           float swayF = pow(${anchor === 'top' ? 'max(uv.y, 0.0)' : 'max(1.0 - uv.y, 0.0)'}, 1.5);
           float sway = sin(uTime * 1.6 + wx * 0.35 + wz * 0.5) + 0.45 * sin(uTime * 2.9 + wx * 1.4 + wz * 0.8);
-          transformed.x += sway * uAmp * swayF;
-          transformed.z += sway * uAmp * 0.6 * swayF;
+          // con tormenta: ráfagas doblan el balanceo y aceleran la fase
+          float gust = 1.0 + uGust * 1.1;
+          float gsway = sway + uGust * 0.6 * sin(uTime * 5.2 + wx * 0.9 + wz * 1.3);
+          transformed.x += gsway * uAmp * swayF * gust;
+          transformed.z += gsway * uAmp * 0.6 * swayF * gust;
         }`);
   };
   mat.customProgramCacheKey = () => `wind_${amp}_${anchor}`;
@@ -61,6 +67,11 @@ export function registerWind(mat: THREE.Material, amp: number, anchor: 'top' | '
 export function updateWindAndFlames(t: number) {
   _time.value = t;
   for (const m of flameMats) m.uniforms.uTime.value = t;
+}
+
+/** fija la intensidad de ráfaga (0 calmado · 1 tormenta) */
+export function setGust(k: number) {
+  _gust.value = Math.max(0, Math.min(1, k));
 }
 
 /** Material de llama procedural (plano con forma de fuego animado) */
