@@ -1594,6 +1594,8 @@ export class Game {
         intensity = near ? 0.75 : 0.12;
       }
       this.audio.setIntensity(intensity);
+      // capa de lluvia procedural ligada al clima
+      this.audio.setRain(this.world.rainFactor);
     }
 
     // victoria

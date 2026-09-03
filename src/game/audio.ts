@@ -46,6 +46,10 @@ export class AudioEngine {
   private samples = new Map<string, AudioBuffer>();
   private themeSrc: AudioBufferSourceNode | null = null;
   private themeGain: GainNode | null = null;
+  /** capa de lluvia: fuente de ruido en bucle con ganancia controlada */
+  private rainSrc: AudioBufferSourceNode | null = null;
+  private rainGain: GainNode | null = null;
+  private rainCut: BiquadFilterNode | null = null;
   muted = false;
 
   unlock() {
@@ -414,10 +418,49 @@ export class AudioEngine {
     src.stop(t + dur + 0.05);
   }
 
+  /* ---------- LLUVIA PROCEDURAL: capa continua de ruido filtrado ---------- */
+
+  /** Arranca la capa de lluvia (idle, ganancia 0). Idempotente. */
+  private ensureRainLayer() {
+    if (!this.ctx || !this.noiseBuf || !this.master || this.rainSrc) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.loop = true;
+    // lowpass suave + highshelf cortando el estruendo: susurro de tormenta
+    const cut = this.ctx.createBiquadFilter();
+    cut.type = 'lowpass';
+    cut.frequency.value = 900;
+    cut.Q.value = 0.4;
+    const shelf = this.ctx.createBiquadFilter();
+    shelf.type = 'highshelf';
+    shelf.frequency.value = 400;
+    shelf.gain.value = -6;
+    const g = this.ctx.createGain();
+    g.gain.value = 0.0001;
+    src.connect(cut).connect(shelf).connect(g).connect(this.master);
+    src.start();
+    this.rainSrc = src;
+    this.rainGain = g;
+    this.rainCut = cut;
+  }
+
+  /** Intensidad de la lluvia 0..1 (fundido suave, llama cada frame) */
+  setRain(k: number) {
+    this.ensureRainLayer();
+    if (!this.ctx || !this.rainGain || !this.rainCut) return;
+    const t = this.now();
+    const v = Math.max(0.0001, k * 0.16);
+    this.rainGain.gain.setTargetAtTime(v, t, 0.8);
+    // con tormenta fuerte el ruido es más brillante (gotas contra hojas)
+    this.rainCut.frequency.setTargetAtTime(700 + k * 500, t, 1.2);
+  }
+
   dispose() {
     if (this.musicTimer) clearInterval(this.musicTimer);
     this.droneOscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
     try { this.themeSrc?.stop(); } catch { /* noop */ }
+    try { this.rainSrc?.stop(); } catch { /* noop */ }
+    this.rainSrc = null; this.rainGain = null; this.rainCut = null;
     if (this.ctx) this.ctx.close();
     this.ctx = null;
     this.started = false;
