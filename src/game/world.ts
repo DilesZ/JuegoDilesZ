@@ -94,6 +94,10 @@ export class World {
     ffA: { value: 1 },
     pollenA: { value: 0 },
   };
+  /** colores temporales reutilizables (evita GC en applyDayNight) */
+  private _c1 = new THREE.Color();
+  private _c2 = new THREE.Color();
+  private _c3 = new THREE.Color();
   private skyMat!: THREE.ShaderMaterial;
   private hemi!: THREE.HemisphereLight;
   private fill!: THREE.DirectionalLight;
@@ -505,10 +509,11 @@ export class World {
     // LLUVIA: cielo gris plomizo, dispersión atenuada
     const rk = this.rainK;
     if (rk > 0.01) {
-      const gray = new THREE.Color(0x5a636e);
+      const gray = this._c1.set(0x5a636e);   // gris tormenta (reutilizado)
+      const grayLo = this._c2.set(0x707a84); // gris horizonte
       (su.top.value as THREE.Color).lerp(gray, rk * 0.55);
       (su.mid.value as THREE.Color).lerp(gray, rk * 0.7);
-      (su.bottom.value as THREE.Color).lerp(gray.clone().lerp(new THREE.Color(0x707a84), 0.4), rk * 0.75);
+      (su.bottom.value as THREE.Color).lerp(this._c3.copy(gray).lerp(grayLo, 0.4), rk * 0.75);
       this.dn.sunGlow.value = s.sunGlow * (1 - rk * 0.6);
     } else {
       this.dn.sunGlow.value = s.sunGlow;
