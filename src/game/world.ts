@@ -77,6 +77,10 @@ export class World {
   private skyTime: { value: number } = { value: 0 };
   private waterTime: { value: number } = { value: 0 };
   private mist: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; baseO: number; spin: number }[] = [];
+  /** mantos de niebla de valle (volumétricos, crepusculares) */
+  private mistBanks: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; baseY: number; spin: number }[] = [];
+  /** factor crepuscular para los bancos (alba/ocaso → 1) */
+  private duskBank = 0;
   private smoke: Particles;
   private fx: Particles;
   private shrineWispT = 0;
@@ -500,6 +504,8 @@ export class World {
   applyDayNight(s: DayNightSample, renderer: THREE.WebGLRenderer) {
     this.nightK = s.night;
     this.mistMul = s.mistMul;
+    // bancos de valle: máximos al alba/ocaso (sunGlow 1.25-1.4), nulos de noche
+    this.duskBank = clamp((s.sunGlow - 0.5) / 0.9, 0, 1) * (1 - s.night * 0.6);
 
     // cielo
     const su = this.skyMat.uniforms;
@@ -1046,6 +1052,28 @@ export class World {
       m.renderOrder = 4;
       this.scene.add(m);
       this.mist.push({ mesh: m, mat, baseO: o, spin: (rng() - 0.5) * 0.02 });
+    }
+
+    // ==== BANCOS DE NIEBLA DE VALLE (volumétricos, crepusculares) ====
+    // 3 mantos enormes a media altura: se espesan al alba y al anochecer
+    const bankSpots: [number, number, number][] = [
+      // [x, z, altura del manto]
+      [-30, 26, 2.2], [44, 40, 2.8], [-46, -34, 2.4],
+    ];
+    for (const [x, z, lift] of bankSpots) {
+      const geo = new THREE.PlaneGeometry(74, 74);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, opacity: 0,
+        depthWrite: false, color: 0xd6e4f0, fog: true,
+      });
+      const m = new THREE.Mesh(geo, mat);
+      const y = terrainHeight(x, z);
+      m.position.set(x, y + lift, z);
+      m.rotation.y = rng() * Math.PI * 2;
+      m.renderOrder = 3;
+      this.scene.add(m);
+      this.mistBanks.push({ mesh: m, mat, baseY: y + lift, spin: 0.012 + rng() * 0.01 });
     }
   }
 
@@ -2008,6 +2036,15 @@ export class World {
     for (const m of this.mist) {
       m.mesh.rotation.y += m.spin * dt;
       m.mat.opacity = Math.min(0.9, m.baseO * this.mistMul * (0.8 + 0.2 * Math.sin(this.time * 0.35 + m.mesh.position.x)));
+    }
+
+    // bancos de valle: deriva lenta + respiración vertical
+    for (const b of this.mistBanks) {
+      b.mesh.rotation.y += b.spin * dt;
+      b.mesh.position.y = b.baseY + Math.sin(this.time * 0.14 + b.baseY) * 0.35;
+      // opacidad: 30% de base + factor crepuscular/nocturno
+      const k = Math.min(0.55, this.mistMul * 0.22 + this.duskBank * 0.3);
+      b.mat.opacity = k * (0.75 + 0.25 * Math.sin(this.time * 0.2 + b.baseY * 3.1));
     }
 
     // meteorito fugaz ocasional
