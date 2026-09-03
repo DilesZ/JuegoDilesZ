@@ -1342,7 +1342,18 @@ export class World {
             vec3 n = texture2D(uNormals, vUv * 2.6 + vec2(uTime * 0.014, uTime * 0.01)).xyz * 2.0 - 1.0;
             float fres = 1.0 - length(vUv - 0.5) * 1.9; // más reflejo al borde
             float ripple = 0.5 + 0.5 * sin((vUv.x + vUv.y) * 26.0 + uTime * 2.2 + n.x * 3.0);
-            vec3 col = uSky * (0.55 + 0.3 * fres + 0.15 * ripple);
+            // GOTAS: 3 anillos concéntricos expandiéndose (impacto de lluvia)
+            vec2 c = vUv - 0.5;
+            float rings = 0.0;
+            for (int i = 0; i < 3; i++) {
+              float ph = uTime * 1.7 + float(i) * 2.399;
+              vec2 off = vec2(sin(ph * 1.31 + float(i) * 4.7), cos(ph * 1.17 + float(i) * 2.9)) * 0.22;
+              float d = length(c - off);
+              float rt = fract(ph);                       // radio en expansión 0→0.3
+              float ring = smoothstep(0.016, 0.0, abs(d - rt * 0.3)) * (1.0 - rt);
+              rings += ring;
+            }
+            vec3 col = uSky * (0.55 + 0.3 * fres + 0.15 * ripple) + vec3(0.5, 0.55, 0.62) * rings * 0.4;
             float a = uA * smoothstep(0.5, 0.32, length(vUv - 0.5));
             gl_FragColor = vec4(col, a * 0.85); }`,
       });
