@@ -1357,7 +1357,14 @@ export class Game {
     this.player.updateMenu(dt, this.menuT);
     this.player.root.position.copy(this.player.pos);
     this.player.root.rotation.y = this.player.yaw;
-    if (this.grade) this.grade.uniforms.uTime.value = this.menuT;
+    if (this.grade) {
+      this.grade.uniforms.uTime.value = this.menuT;
+      // grading de cinemática: viñeta más cerrada y saturación leve extra
+      const uV = this.grade.uniforms.uVignette;
+      uV.value += (0.42 - uV.value) * Math.min(1, dt * 1.2);
+      const uS = this.grade.uniforms.uSat;
+      uS.value += (1.14 - uS.value) * Math.min(1, dt * 1.2);
+    }
 
     // órbita lenta alrededor de la hoguera
     const a = this.menuT * 0.055 + 2.2;
@@ -1932,6 +1939,9 @@ export class Game {
       const target = 0.3 + nightK * 0.16 + (this.bossActive ? 0.12 : 0);
       const uV = this.grade.uniforms.uVignette;
       uV.value += (target - uV.value) * Math.min(1, dt * 1.2);
+      // saturación de vuelta al valor de juego (tras el empuje del menú)
+      const uS = this.grade.uniforms.uSat;
+      uS.value += (1.06 - uS.value) * Math.min(1, dt * 1.2);
     }
   }
 
