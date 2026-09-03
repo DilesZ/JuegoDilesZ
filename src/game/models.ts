@@ -1399,6 +1399,42 @@ export function rockRealGeo(): THREE.BufferGeometry {
   return g;
 }
 
+/**
+ * MONOLITO HEROICO: pilar anguloso con estrías verticales y punta irregular.
+ * Vertex colors pintan líquenes: verde musgo en las caras norte (−z) y
+ * base húmeda, piedra fría en la cima — heroico y leíble a distancia.
+ */
+export function monolithGeo(seed = 7): THREE.BufferGeometry {
+  const rng = mulberry32(seed);
+  const g = new THREE.CylinderGeometry(0.55, 0.85, 5.2, 7, 4).toNonIndexed();
+  // punta irregular: contrae el anillo superior vértice a vértice
+  const p = g.getAttribute('position') as THREE.BufferAttribute;
+  const colors = new Float32Array(p.count * 3);
+  const moss = new THREE.Color(0x4f7a3a);
+  const cold = new THREE.Color(0x8a8f96);
+  const col = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    // estrías verticales: ruido por (ángulo, altura)
+    const ang = Math.atan2(x, z);
+    const n = Math.sin(ang * 7.0 + seed) * 0.5 + Math.sin(y * 3.1 + ang * 3.0) * 0.5;
+    const k = 1 + n * 0.1;
+    p.setXYZ(i, x * k, y + (y > 2.5 ? Math.sin(ang * 5.0 + seed) * 0.22 * (y - 2.5) : 0), z * k);
+    // base enterrada
+    if (y < -2.4) p.setY(i, y - 0.3);
+  }
+  // líquenes: más musgo abajo y en la cara sombría
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i), z = p.getZ(i);
+    const kMoss = Math.max(0, (1.6 - y) / 4.2) * (z < 0 ? 0.9 : 0.35);
+    col.copy(cold).lerp(moss, Math.min(1, kMoss * (0.7 + rng() * 0.5)));
+    colors[i * 3] = col.r; colors[i * 3 + 1] = col.g; colors[i * 3 + 2] = col.b;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 /** Seta luminosa (para instanciar en grupos) */
 export function mushroomGeos(): { stem: THREE.BufferGeometry; cap: THREE.BufferGeometry } {
   const stem = new THREE.CylinderGeometry(0.03, 0.045, 0.16, 6);

@@ -5,7 +5,7 @@ import { mulberry32, terrainHeight, WORLD, fbm, lerp, rand, clamp } from './core
 import {
   buildObelisk, buildBonfire, buildTorch, buildRuinedPillar, buildBrokenArch,
   buildSigil, grassGeometry, grassMaterial, canopyMat, pineCanopyMat,
-  buildOakGeos, buildPineGeos, bushGeo, logGeo, rockRealGeo,
+  buildOakGeos, buildPineGeos, bushGeo, logGeo, rockRealGeo, monolithGeo,
   barkMat, stoneMat, woodMat, emisMat, stdMat, mushroomGeos, toonMat,
   updateWindAndFlames, registerWind, flowerGeometry, flowerMaterial, type ToonMat,
 } from './models';
@@ -601,6 +601,19 @@ export class World {
         g = shade * (1 + k * 0.04);
         b = shade * (1 - k * 0.1);
       }
+      // VARIACIÓN POR ALTITUD: cumbres rocosas frías y desaturadas,
+      // valles verdes fértiles (vende la escala del relieve)
+      if (h > 4.5) {
+        const k = Math.min(1, (h - 4.5) / 3.5) * 0.55;
+        r = r * (1 - k * 0.06) + k * 0.06;
+        g = g * (1 - k * 0.1);
+        b = b * (1 + k * 0.05);
+      } else if (h < 0.6) {
+        // hondonadas umbrías con verdor profundo
+        const k = (1 - h / 0.6) * 0.3;
+        g = g * (1 + k * 0.06);
+        b = b * (1 + k * 0.03);
+      }
       c.setRGB(r, g, b);
       colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
     }
@@ -764,6 +777,36 @@ export class World {
     rocks.count = rocksPlaced;
     if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
     this.scene.add(rocks);
+
+    // ==== MONOLITOS HEROICOS: hitos de piedra con líquenes ====
+    // material propio (stoneMat es compartido y sin vertexColors)
+    const { map: smMap, normalMap: smNorm } = stoneMaps();
+    const monoMat = toonMat(0x9b948c, {
+      map: smMap, normalMap: smNorm,
+      roughness: 0.95, metalness: 0, vertexColors: true,
+    });
+    const monoCount = 9;
+    for (let i = 0; i < monoCount; i++) {
+      let x = 0, z = 0, ok = false;
+      for (let t = 0; t < 30 && !ok; t++) {
+        const a = rng() * Math.PI * 2;
+        const r = 22 + rng() * (WORLD.radius - 30);
+        x = Math.cos(a) * r; z = Math.sin(a) * r;
+        ok = !this.nearCamp(x, z, 13)
+          && Math.hypot(x - WORLD.roost.x, z - WORLD.roost.z) > WORLD.roost.r + 14
+          && Math.hypot(x, z - 60) > 26; // fuera de la arena del jefe 1
+      }
+      if (!ok) continue;
+      const h = terrainHeight(x, z);
+      const s = 0.7 + rng() * 0.9;
+      const m = new THREE.Mesh(monolithGeo(i * 13 + 7), monoMat);
+      m.position.set(x, h + s * 2.2, z);
+      m.scale.setScalar(s);
+      m.rotation.set((rng() - 0.5) * 0.1, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
+      m.castShadow = m.receiveShadow = true;
+      this.scene.add(m);
+      this.colliders.push({ x, z, r: s * 0.85 });
+    }
 
     // ==== Hierba instanciada con viento + variación de tono ====
     const grassCount = 16000;
