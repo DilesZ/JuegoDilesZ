@@ -1904,7 +1904,14 @@ export class Game {
     const lowHp = this.player.hp / this.player.maxHp < 0.3 && this.player.alive;
     const pulse = lowHp ? 0.22 + Math.sin(this.elapsed * 5) * 0.08 : 0;
     this.refs.vignette.style.opacity = `${Math.min(1, this.hurtFlash * 0.9 + pulse)}`;
-    if (this.grade) this.grade.uniforms.uTime.value = this.elapsed;
+    if (this.grade) {
+      this.grade.uniforms.uTime.value = this.elapsed;
+      // viñeta cinematográfica: más cerrada de noche y en combate de jefe
+      const nightK = this.cycle.nightFactor;
+      const target = 0.3 + nightK * 0.16 + (this.bossActive ? 0.12 : 0);
+      const uV = this.grade.uniforms.uVignette;
+      uV.value += (target - uV.value) * Math.min(1, dt * 1.2);
+    }
   }
 
   private addDamageNumber(pos: THREE.Vector3, text: string, color: string, big = false) {

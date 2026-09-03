@@ -91,6 +91,7 @@ export class World {
     starsA: { value: 1 },
     auroraA: { value: 1 },
     ffA: { value: 1 },
+    pollenA: { value: 0 },
   };
   private skyMat!: THREE.ShaderMaterial;
   private hemi!: THREE.HemisphereLight;
@@ -110,7 +111,9 @@ export class World {
   private terrainMat: THREE.MeshStandardMaterial | null = null;
 
   /* ---- nubes billboard fotorrealistas ---- */
-  private clouds: { sprite: THREE.Sprite; mat: THREE.SpriteMaterial; speed: number; baseY: number }[] = [];
+  private clouds: { mat: THREE.ShaderMaterial; speed: number; baseY: number }[] = [];
+  /** quaternion de la cámara activa, para billboards en onBeforeRender */
+  private cameraQuat = new THREE.Quaternion();
 
   /* ---- entornos HDRI (IBL) ---- */
   private envDay: THREE.Texture | null = null;
@@ -333,16 +336,47 @@ export class World {
   private buildClouds() {
     const rng = mulberry32(3141);
     const tex = cloudPuffTexture();
+    // shader propio: cada nube se ilumina según su lado respecto al sol
+    // (lado solar cálido+dorado · lado opuesto azulado) con normal falsa 2D
+    const mkCloudMat = () => new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, fog: false,
+      uniforms: {
+        map: { value: tex },
+        uTint: { value: new THREE.Color(0xffffff) },
+        uSunDir: this.dn.sunDir,
+        uSunTint: this.dn.sunTint,
+        uSunGlow: this.dn.sunGlow,
+        uNight: { value: 0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main(){ vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `
+        uniform sampler2D map; uniform vec3 uTint; uniform vec3 uSunDir;
+        uniform vec3 uSunTint; uniform float uSunGlow; uniform float uNight;
+        varying vec2 vUv;
+        void main(){
+          vec4 t = texture2D(map, vUv);
+          if (t.a < 0.02) discard;
+          // dirección de pantalla hacia el sol (proyección)
+          vec3 sd = normalize((viewMatrix * vec4(uSunDir, 0.0)).xyz);
+          // gradiente a lo ancho del sprite: iluminación direccional
+          float g = clamp((vUv.x - 0.5) * -sd.x * 2.2 + (vUv.y - 0.22) * sd.y * 1.4 + 0.5, 0.0, 1.0);
+          vec3 lit = mix(uTint * vec3(0.72, 0.78, 0.98), uTint * 1.06, g);
+          lit += uSunTint * pow(g, 3.0) * uSunGlow * 0.34;   // borde dorado lado solar
+          lit = mix(lit, lit * vec3(0.32, 0.4, 0.62), uNight); // tinte nocturno azulado
+          gl_FragColor = vec4(lit, t.a * (1.0 - uNight * 0.35));
+        }`,
+    });
     for (let i = 0; i < 12; i++) {
-      const mat = new THREE.SpriteMaterial({
-        map: tex, color: 0xffffff, transparent: true, opacity: 0.9,
-        depthWrite: false, fog: false,
-      });
+      const mat = mkCloudMat();
       const group = new THREE.Group();
       const puffs = 5 + ((rng() * 4) | 0);
       const w = 26 + rng() * 30;
       for (let p = 0; p < puffs; p++) {
-        const s = new THREE.Sprite(mat);
+        // plano billboard manual: siempre mira a cámara pero se ilumina por UV
+        const s = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
         const sz = w * (0.42 + rng() * 0.4);
         s.scale.set(sz, sz * (0.52 + rng() * 0.2), 1);
         s.position.set(
@@ -350,7 +384,7 @@ export class World {
           (rng() - 0.3) * w * 0.16,
           (rng() - 0.5) * w * 0.22,
         );
-        s.center.set(0.5, 0.28); // ancla abajo: base plana de nube
+        s.onBeforeRender = () => { s.quaternion.copy(this.cameraQuat); };
         group.add(s);
       }
       const a = rng() * Math.PI * 2;
@@ -358,13 +392,9 @@ export class World {
       const baseY = 78 + rng() * 34;
       group.position.set(Math.cos(a) * r, baseY, Math.sin(a) * r);
       this.scene.add(group);
-      // guardamos el primer sprite para el tinte (material compartido por nube)
-      this.clouds.push({ sprite: group.children[0] as THREE.Sprite, mat, speed: 0.5 + rng() * 0.9, baseY });
-      (group as unknown as { userData: { speed: number } }).userData.speed = 0.5 + rng() * 0.9;
-      void group;
+      this.clouds.push({ mat, speed: 0.5 + rng() * 0.9, baseY });
+      this.cloudGroups.push(group);
     }
-    // referencia a los grupos para deriva: reconstruimos con grupos almacenados
-    this.cloudGroups = this.clouds.map((c) => c.sprite.parent!);
   }
   private cloudGroups: THREE.Object3D[] = [];
 
@@ -475,6 +505,8 @@ export class World {
     this.dn.starsA.value = s.stars;
     this.dn.auroraA.value = s.aurora;
     this.dn.ffA.value = s.fireflies;
+    // polen diurno: opuesto a luciérnagas (pleno día 0.8, anochecer 0)
+    this.dn.pollenA.value = clamp(1 - s.night * 1.4, 0, 0.85);
     // Vía Láctea: solo de noche, con arranque suave (evita bandas fantasma de día)
     if (this.milkyWayMat) this.milkyWayMat.opacity = Math.max(0, s.stars - 0.25) * 0.62;
 
@@ -509,8 +541,11 @@ export class World {
       this.scene.fog.density = s.fogDensity;
     }
 
-    // nubes billboard: tinte según hora del día
-    for (const c of this.clouds) c.mat.color.copy(s.cloudTint);
+    // nubes billboard: tinte según hora + factor nocturno para el shader
+    for (const c of this.clouds) {
+      (c.mat.uniforms.uTint.value as THREE.Color).copy(s.cloudTint);
+      c.mat.uniforms.uNight.value = s.night;
+    }
 
     // agua de la Fuente Lunar
     if (this.waterMat) {
@@ -902,6 +937,9 @@ export class World {
     // ==== Luciérnagas ====
     this.buildFireflies();
 
+    // ==== Polen diurno (deriva dorada al sol) ====
+    this.buildPollen();
+
     // Antorchas alrededor de cada santuario y en la arena
     for (const s of WORLD.shrines) this.addTorchRing(s.x, s.z, s.r - 2, 4, rng, false);
     this.addTorchRing(WORLD.arena.x, WORLD.arena.z, WORLD.arena.r - 3, 6, rng, true);
@@ -990,6 +1028,59 @@ export class World {
           float a = smoothstep(0.5, 0.06, d) * vA;
           if (a < 0.01) discard;
           gl_FragColor = vec4(vec3(0.82, 1.0, 0.55) * 1.6, a); }`,
+    });
+    const pts = new THREE.Points(geo, mat);
+    pts.frustumCulled = false;
+    pts.renderOrder = 6;
+    this.scene.add(pts);
+  }
+
+  /* ---------- Polen diurno: motas doradas a la deriva ---------- */
+
+  private buildPollen() {
+    const rng = mulberry32(9090);
+    const N = 220;
+    const pos = new Float32Array(N * 3);
+    const phase = new Float32Array(N);
+    const speed = new Float32Array(N);
+    const size = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const a = rng() * Math.PI * 2;
+      const r = 6 + rng() * (WORLD.radius - 10);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = terrainHeight(x, z);
+      pos[i * 3] = x; pos[i * 3 + 1] = h + 0.5 + rng() * 3.2; pos[i * 3 + 2] = z;
+      phase[i] = rng() * Math.PI * 2;
+      speed[i] = 0.25 + rng() * 0.6;
+      size[i] = 1.6 + rng() * 2.4;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { uTime: this.skyTime, uGlobalA: this.dn.pollenA },
+      vertexShader: `attribute float aPhase; attribute float aSpeed; attribute float aSize;
+        uniform float uTime; uniform float uGlobalA; varying float vA;
+        void main(){
+          vec3 p = position;
+          // deriva lenta de brisa: círculos amplios + caída/flotación
+          p.x += sin(uTime * aSpeed * 0.5 + aPhase) * 2.6;
+          p.y += sin(uTime * aSpeed * 0.31 + aPhase * 1.7) * 0.8;
+          p.z += cos(uTime * aSpeed * 0.42 + aPhase * 0.7) * 2.2;
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          gl_PointSize = clamp(aSize * (140.0 / max(0.1, -mv.z)), 1.0, 14.0);
+          // parpadeo suave al girar (destello de polen al sol)
+          vA = (0.5 + 0.5 * sin(uTime * aSpeed * 2.3 + aPhase * 5.0)) * uGlobalA;
+          vA = 0.1 + vA * 0.9;
+          gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `varying float vA;
+        void main(){ vec2 uv = gl_PointCoord - 0.5; float d = length(uv);
+          float a = smoothstep(0.5, 0.05, d) * vA;
+          if (a < 0.01) discard;
+          gl_FragColor = vec4(vec3(1.0, 0.93, 0.68) * 1.35, a); }`,
     });
     const pts = new THREE.Points(geo, mat);
     pts.frustumCulled = false;
@@ -1514,6 +1605,7 @@ export class World {
     this.time += dt;
     this.skyTime.value = this.time;
     this.waterTime.value = this.time;
+    this.cameraQuat.copy(camera.quaternion);
     updateWindAndFlames(this.time);
     this.updateRoost(dt);
 
