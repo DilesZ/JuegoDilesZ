@@ -190,10 +190,11 @@ export class World {
         uSunDir: this.dn.sunDir,
         uSunTint: this.dn.sunTint,
         uSunGlow: this.dn.sunGlow,
+        uFlash: { value: 0 },
       },
       vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
       fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bottom;
-        uniform vec3 uSunDir; uniform vec3 uSunTint; uniform float uSunGlow;
+        uniform vec3 uSunDir; uniform vec3 uSunTint; uniform float uSunGlow; uniform float uFlash;
         void main(){
           vec3 n = normalize(vP);
           float h = n.y;
@@ -203,6 +204,8 @@ export class World {
           // dispersión atmosférica: resplandor alrededor del sol
           float sd = max(dot(n, normalize(uSunDir)), 0.0);
           c += uSunTint * (pow(sd, 5.0) * 0.32 + pow(sd, 42.0) * 0.55) * uSunGlow;
+          // FLASH DE RELÁMPAGO: ilumina la bóveda desde arriba
+          c += vec3(0.85, 0.9, 1.0) * uFlash * (0.35 + 0.65 * smoothstep(-0.1, 1.0, h));
           gl_FragColor = vec4(c, 1.0);
         }`,
     });
@@ -512,6 +515,8 @@ export class World {
     }
     this.dn.sunDir.value.copy(s.lightDir);
     this.dn.sunTint.value.copy(s.sunTint);
+    // destello de relámpago en la bóveda (calculado en updateWeather)
+    su.uFlash.value = this.skyFlash;
 
     // estrellas, aurora, luciérnagas (ocultas bajo la lluvia)
     this.dn.starsA.value = s.stars * (1 - rk);
@@ -1318,6 +1323,12 @@ export class World {
       this.scene.add(m);
       this.puddles.push({ mesh: m, mat, baseY: h });
     }
+
+    // luz de relámpago: direccional cenital blanca (sin sombras, barata)
+    const fl = new THREE.DirectionalLight(0xcfd8ff, 0);
+    fl.position.set(30, 120, -20);
+    this.scene.add(fl);
+    this.flashLight = fl;
   }
 
   /** avanza la máquina de clima (llamado desde update) */
@@ -1331,6 +1342,17 @@ export class World {
     // transición suave hacia el objetivo
     this.rainK += (this.rainTarget - this.rainK) * Math.min(1, dt * 0.22);
     const raining = this.rainK > 0.04;
+    // RELÁMPAGOS: solo con tormenta fuerte; flash doble + trueno retardado
+    if (this.lightning > 0) {
+      this.lightning -= dt * 3.6;
+      this.flashLight!.intensity = Math.max(0, this.lightning) * 260;
+      this.skyFlash = Math.max(0, this.lightning) * 0.55;
+      if (this.lightning <= 0) { this.flashLight!.intensity = 0; this.skyFlash = 0; }
+    } else if (raining && this.rainK > 0.72 && Math.random() < dt * 0.11) {
+      // disparo: doble pulsación (a golpe real)
+      this.lightning = 1 + Math.random() * 0.5;
+      this.onLightning?.();
+    }
     // la cortina sigue a la cámara (siempre alrededor del jugador)
     if (this.rainPoints) {
       this.rainPoints.visible = raining;
@@ -1345,6 +1367,12 @@ export class World {
 
   /** factor de lluvia actual (para oscurecer cielo/sol en applyDayNight) */
   get rainFactor() { return this.rainK; }
+
+  private lightning = 0;            // intensidad del flash en curso
+  private skyFlash = 0;            // parte del flash que va al cielo
+  private flashLight: THREE.DirectionalLight | null = null;
+  /** callback de trueno (lo engancha Game con su AudioEngine) */
+  onLightning: (() => void) | null = null;
 
   /* ---------- Fuente Lunar (agua estilizada) ---------- */
 

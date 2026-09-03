@@ -303,6 +303,8 @@ export class Game {
 
     // mundo y sistemas
     this.world = new World(this.scene, this.renderer);
+    // trueno al relampaguear (el flash lo pinta world, el sonido audio)
+    this.world.onLightning = () => this.audio.thunder();
     this.cycle = new DayNightCycle(this.world, this.scene, this.renderer);
     // hora inicial opcional por query (?tod=0.5 → mediodía, 0.9 → noche)
     const todParam = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('tod') : null;

@@ -455,6 +455,29 @@ export class AudioEngine {
     this.rainCut.frequency.setTargetAtTime(700 + k * 500, t, 1.2);
   }
 
+  /** TRUENO: estallido grave con cola larga (retardo aleatorio = distancia) */
+  thunder() {
+    if (!this.ctx || !this.noiseBuf || !this.master) return;
+    const t = this.now() + Math.random() * 0.7; // el rayo se ve antes de oírse
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.5 + Math.random() * 0.2;
+    // lowpass grave que se cierra (retumbo lejano)
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.setValueAtTime(340, t);
+    filt.frequency.exponentialRampToValueAtTime(60, t + 2.6);
+    filt.Q.value = 0.6;
+    // ataque rápido + cola de 2.6s
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.5, t + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 2.6);
+    src.connect(filt).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 2.7);
+  }
+
   dispose() {
     if (this.musicTimer) clearInterval(this.musicTimer);
     this.droneOscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
