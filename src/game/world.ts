@@ -13,6 +13,7 @@ import { Particles } from './particles';
 import {
   terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex, cloudPuffTexture,
   waterNormal, arenaFloorTexture, bannerTexture, stoneMaps, milkyWayTexture,
+  butterflyWingTexture,
 } from './textures';
 import type { DayNightSample } from './daynight';
 
@@ -825,6 +826,9 @@ export class World {
       this.scene.add(fm);
     }
 
+    // ==== MARIPOSAS DIURNAS (dos alas que baten, rutas flotantes) ====
+    this.buildButterflies(rng);
+
     // ==== Árboles muertos (silueta gótica cerca de ruinas) ====
     const deadGeo = (() => {
       const parts: THREE.BufferGeometry[] = [];
@@ -1088,6 +1092,85 @@ export class World {
     this.scene.add(pts);
   }
 
+  /* ---------- Mariposas diurnas: alas que baten con rutas flotantes ---------- */
+
+  private butterflies: {
+    root: THREE.Group;
+    wingL: THREE.Mesh;
+    wingR: THREE.Mesh;
+    cx: number; cy: number; cz: number;   // centro de deriva
+    rad: number;                           // radio de la ruta
+    spd: number; phase: number; beat: number;
+  }[] = [];
+
+  private buildButterflies(rng: () => number) {
+    const wingTex = butterflyWingTexture();
+    const mkWing = (mirror: number) => {
+      const mat = new THREE.MeshBasicMaterial({
+        map: wingTex, transparent: true, side: THREE.DoubleSide,
+        depthWrite: false, fog: true, alphaTest: 0.06,
+      });
+      const geo = new THREE.PlaneGeometry(0.16, 0.2);
+      geo.translate(0, 0.1, 0); // pivote en la base del ala (junto al cuerpo)
+      if (mirror < 0) geo.scale(-1, 1, 1);
+      const m = new THREE.Mesh(geo, mat);
+      m.renderOrder = 4;
+      return m;
+    };
+    const N = 14;
+    for (let i = 0; i < N; i++) {
+      const root = new THREE.Group();
+      // alas: la Z local del quad es el eje de batido
+      const wingL = mkWing(1);
+      const wingR = mkWing(-1);
+      wingL.rotation.y = 0.55;
+      wingR.rotation.y = -0.55;
+      root.add(wingL, wingR);
+      // posición de la ruta flotante
+      let x = 0, z = 0;
+      for (let t = 0; t < 20; t++) {
+        const a = rng() * Math.PI * 2;
+        const r = 8 + rng() * (WORLD.radius - 14);
+        x = Math.cos(a) * r; z = Math.sin(a) * r;
+        if (!this.nearCamp(x, z, 6) && terrainHeight(x, z) < 4.5) break;
+      }
+      const cy = terrainHeight(x, z) + 1 + rng() * 1.4;
+      this.butterflies.push({
+        root, wingL, wingR,
+        cx: x, cy, cz: z,
+        rad: 1.6 + rng() * 2.6,
+        spd: 0.3 + rng() * 0.5,
+        phase: rng() * Math.PI * 2,
+        beat: 11 + rng() * 7,
+      });
+      this.scene.add(root);
+    }
+    // visible solo de día (uniform compartido vía pollenA)
+    for (const b of this.butterflies) b.root.visible = true;
+  }
+
+  /** mueve las mariposas (llamado en update; dayK = visibilidad diurna) */
+  private updateButterflies(dt: number, dayK: number) {
+    for (const b of this.butterflies) {
+      b.phase += dt * b.spd;
+      // deriva orbital suave alrededor del centro + vaivén vertical
+      const px = b.cx + Math.sin(b.phase) * b.rad;
+      const pz = b.cz + Math.cos(b.phase * 0.83 + 1.7) * b.rad;
+      const py = b.cy + Math.sin(b.phase * 2.1) * 0.32;
+      const nx = px - b.root.position.x;
+      const nz = pz - b.root.position.z;
+      b.root.position.set(px, py, pz);
+      if (nx * nx + nz * nz > 1e-6) b.root.rotation.y = Math.atan2(nx, nz);
+      // batido: rotación en Z de cada ala alrededor del cuerpo
+      const flap = Math.sin(this.time * b.beat + b.phase * 3) * 0.9;
+      b.wingL.rotation.z = flap;
+      b.wingR.rotation.z = -flap;
+      // desvanecer de noche
+      const v = dayK > 0.05;
+      if (b.root.visible !== v) b.root.visible = v;
+    }
+  }
+
   /* ---------- Fuente Lunar (agua estilizada) ---------- */
 
   private buildLunarBasin() {
@@ -1124,19 +1207,35 @@ export class World {
       fragmentShader: `varying vec2 vUv; varying vec3 vW;
         uniform float uTime; uniform sampler2D uNormals; uniform vec3 uMoonDir; uniform vec3 uDeep; uniform vec3 uSky;
         void main(){
+          // tres capas de olas cruzadas (dominante + dos ripples de distinta escala)
           vec3 n1 = texture2D(uNormals, vUv * 2.2 + vec2(uTime * 0.016, uTime * 0.012)).xyz * 2.0 - 1.0;
           vec3 n2 = texture2D(uNormals, vUv * 3.4 - vec2(uTime * 0.02, -uTime * 0.009)).xyz * 2.0 - 1.0;
-          vec3 n = normalize(vec3((n1.x + n2.x) * 0.5, 7.0, (n1.y + n2.y) * 0.5));
+          vec3 n3 = texture2D(uNormals, vUv * 6.5 + vec2(uTime * 0.031, uTime * 0.024)).xyz * 2.0 - 1.0;
+          vec3 n = normalize(vec3(
+            n1.x * 0.5 + n2.x * 0.3 + n3.x * 0.2,
+            7.0,
+            n1.y * 0.5 + n2.y * 0.3 + n3.y * 0.2));
           vec3 V = normalize(cameraPosition - vW);
           float fres = pow(1.0 - max(dot(V, vec3(0.0, 1.0, 0.0)), 0.0), 3.0);
-          vec3 col = mix(uDeep, uSky, fres * 0.8);
+          // profundidad falsa: más oscuro hacia el centro (sima)
+          float r = length(vUv - 0.5) * 2.0;
+          vec3 deep = mix(uDeep, uDeep * 0.55, smoothstep(0.9, 0.3, r));
+          vec3 col = mix(deep, uSky, fres * 0.85);
           vec3 L = normalize(uMoonDir);
           vec3 H = normalize(L + V);
           float spec = pow(max(dot(n, H), 0.0), 90.0);
+          // doble especular: núcleo blanco + halo cálido
           col += vec3(0.85, 0.92, 1.0) * spec * 2.2;
+          col += uSky * pow(max(dot(n, H), 0.0), 18.0) * 0.35;
+          // caustics: retícula luminosa ondulante en el fondo
+          float ca = sin(n.x * 9.0 + uTime * 1.3) * sin(n.z * 9.0 - uTime * 1.1);
+          col += vec3(0.4, 0.65, 0.7) * max(ca, 0.0) * 0.05 * (1.0 - fres * 0.5);
           // ondas concéntricas suaves
-          float r = length(vUv - 0.5) * 2.0;
           col += vec3(0.3, 0.55, 0.6) * sin(r * 22.0 - uTime * 2.0) * 0.02 * (1.0 - r);
+          // espuma en la orilla: banda rompiente contra el brocal
+          float shore = smoothstep(0.82, 0.97, r);
+          float foam = shore * (0.55 + 0.45 * sin(r * 60.0 - uTime * 3.2 + n.x * 4.0));
+          col = mix(col, vec3(0.85, 0.93, 0.96), foam * 0.5);
           gl_FragColor = vec4(col, 0.93);
         }`,
     });
@@ -1608,6 +1707,9 @@ export class World {
     this.cameraQuat.copy(camera.quaternion);
     updateWindAndFlames(this.time);
     this.updateRoost(dt);
+
+    // mariposas diurnas (mismo factor de visibilidad que el polen)
+    this.updateButterflies(dt, this.dn.pollenA.value / 0.85);
 
     // deriva lenta de las nubes billboard
     for (let i = 0; i < this.cloudGroups.length; i++) {

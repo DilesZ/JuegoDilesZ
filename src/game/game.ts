@@ -13,8 +13,8 @@ import { World } from './world';
 import { DayNightCycle } from './daynight';
 import { Player, Projectile, Pickup, SwordTrail, type InputState, type GameCtx, type AttackDef } from './entities';
 import { Enemy, ENEMY_CFG, type EnemyType } from './enemies';
-import { SlashArcPool, ImpactDecalPool, HitFlarePool } from './vfx';
-import { glowSprite } from './textures';
+import { SlashArcPool, ImpactDecalPool, HitFlarePool, BlobShadowPool } from './vfx';
+import { glowSprite, softSprite } from './textures';
 import { Merchant, MERCHANT_NAME, MERCHANT_SPOT, merchantDist } from './merchant';
 import { Blacksmith, SMITH_NAME, SMITH_SPOT, smithDist } from './smith';
 import { createHeroCharacter, createEnemyCharacter, createFoxes, Fox, monsterAttackTimings, type CharacterPack, type EnemyVariant } from './characters';
@@ -215,6 +215,8 @@ export class Game {
   private slashArcs!: SlashArcPool;
   private impactDecals!: ImpactDecalPool;
   private hitFlares!: HitFlarePool;
+  /** sombras de contacto bajo personajes (jugador + enemigos) */
+  private blobShadows!: BlobShadowPool;
   /** bloom (para tinte horario en updateEffects) */
   private bloomPass: UnrealBloomPass | null = null;
 
@@ -325,6 +327,8 @@ export class Game {
     this.slashArcs = new SlashArcPool(this.scene, 5);
     this.impactDecals = new ImpactDecalPool(this.scene, 8);
     this.hitFlares = new HitFlarePool(this.scene, 12, glowSprite());
+    // sombras de contacto: 26 personajes simultáneos (jugador + enemigos + jefes)
+    this.blobShadows = new BlobShadowPool(this.scene, 26, softSprite());
 
     // IBL fotográfico (HDRIs CC0 de Poly Haven vía three.js)
     void this.world.loadHDRI();
@@ -1412,6 +1416,19 @@ export class Game {
         this.world.resolve(e.pos, e.radius);
         this.worldClamp(e.pos, e.radius);
       }
+      // sombra de contacto (vende la altura del dragón en vuelo)
+      if (e.alive) {
+        const gh = terrainHeight(e.pos.x, e.pos.z);
+        this.blobShadows.track(e, e.pos.x, gh, e.pos.z, e.radius * 1.15, Math.max(0, e.pos.y - gh));
+      } else {
+        this.blobShadows.release(e);
+      }
+    }
+    // sombra del jugador
+    {
+      const p = this.player;
+      const gh = terrainHeight(p.pos.x, p.pos.z);
+      this.blobShadows.track(p, p.pos.x, gh, p.pos.z, 0.62, Math.max(0, p.pos.y - gh));
     }
     // separación entre enemigos (array reutilizado, sin allocations)
     const live = this._liveEnemies;
@@ -1447,7 +1464,7 @@ export class Game {
     // limpiar cadáveres
     if (this.enemies.some(e => e.removable)) {
       for (const e of this.enemies) {
-        if (e.removable) { this.scene.remove(e.root); }
+        if (e.removable) { this.scene.remove(e.root); this.blobShadows.release(e); }
       }
       this.enemies = this.enemies.filter(e => !e.removable);
     }
@@ -2086,7 +2103,7 @@ export class Game {
 
   respawn() {
     // limpiar enemigos vivos, proyectiles, drops y reapariciones pendientes
-    for (const e of this.enemies) this.scene.remove(e.root);
+    for (const e of this.enemies) { this.scene.remove(e.root); this.blobShadows.release(e); }
     this.enemies = [];
     this.respawnQueue = [];
     this.boss = null;

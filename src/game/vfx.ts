@@ -258,3 +258,66 @@ export class HitFlarePool {
     }
   }
 }
+
+/* ============================================================
+   SOMBRAS DE CONTACTO (blob shadows)
+   Óvalo suave bajo cada personaje: ancla visual al suelo,
+   vende altura en saltos/picados y coste casi nulo.
+   ============================================================ */
+
+interface BlobSlot {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  owner: object | null;
+}
+
+export class BlobShadowPool {
+  private slots: BlobSlot[] = [];
+
+  /** tex: sprite radial suave (softSprite) · count: nº de personajes simultáneos */
+  constructor(scene: THREE.Scene, count: number, tex: THREE.Texture) {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);
+    for (let i = 0; i < count; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex, color: 0x000000, transparent: true, opacity: 0.34,
+        depthWrite: false, fog: true,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.visible = false;
+      mesh.renderOrder = 1; // sobre el terreno, bajo el personaje
+      scene.add(mesh);
+      this.slots.push({ mesh, mat, owner: null });
+    }
+  }
+
+  /**
+   * Coloca/asigna la sombra de `owner` en (x, groundY, z) con radio `r`.
+   * height: altura del personaje sobre el suelo (0 = en tierra).
+   */
+  track(owner: object, x: number, groundY: number, z: number, r: number, height: number) {
+    let s = this.slots.find(o => o.owner === owner);
+    if (!s) {
+      s = this.slots.find(o => o.owner === null);
+      if (!s) return; // pool agotado: personaje sin sombra este frame
+      s.owner = owner;
+      s.mesh.visible = true;
+    }
+    // encoge y aclara con la altura (vende saltos y picados del dragón)
+    const k = Math.max(0, 1 - height * 0.55);
+    s.mesh.position.set(x, groundY + 0.05, z);
+    s.mesh.scale.set(r * (1 + (1 - k) * 0.5), 1, r * (0.7 + (1 - k) * 0.5));
+    s.mat.opacity = 0.12 + 0.26 * k;
+  }
+
+  /** Libera las sombras de personajes muertos/desaparecidos */
+  release(owner: object) {
+    const s = this.slots.find(o => o.owner === owner);
+    if (s) { s.owner = null; s.mesh.visible = false; }
+  }
+
+  /** Limpia todos los dueños (fin de partida / reset) */
+  clearAll() {
+    for (const s of this.slots) { s.owner = null; s.mesh.visible = false; }
+  }
+}

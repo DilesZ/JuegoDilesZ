@@ -754,6 +754,53 @@ export function softSprite(): THREE.CanvasTexture {
   return t;
 }
 
+/** Ala de mariposa: forma redondeada con nervaduras y borde oscuro */
+export function butterflyWingTexture(): THREE.CanvasTexture {
+  if (cache.has('bwing')) return cache.get('bwing')!;
+  const S = 128;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+  // forma de ala superior: gota inclinada
+  ctx.save();
+  ctx.translate(S * 0.5, S * 0.5);
+  ctx.rotate(-0.5);
+  ctx.beginPath();
+  ctx.ellipse(0, -S * 0.06, S * 0.34, S * 0.46, 0, 0, Math.PI * 2);
+  const g = ctx.createLinearGradient(0, -S * 0.4, 0, S * 0.4);
+  g.addColorStop(0, '#e8892c');
+  g.addColorStop(0.55, '#c2477c');
+  g.addColorStop(1, '#5c2a66');
+  ctx.fillStyle = g;
+  ctx.fill();
+  // nervaduras
+  ctx.strokeStyle = 'rgba(40,12,44,0.55)';
+  ctx.lineWidth = 2;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, S * 0.38);
+    ctx.quadraticCurveTo(i * S * 0.1, 0, i * S * 0.16, -S * 0.4);
+    ctx.stroke();
+  }
+  // puntos decorativos
+  ctx.fillStyle = 'rgba(255,235,180,0.9)';
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.arc((i - 1) * S * 0.13, -S * 0.22 + (i % 2) * S * 0.08, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  // recorte suave de bordes del canvas
+  ctx.globalCompositeOperation = 'destination-in';
+  const m = ctx.createRadialGradient(S / 2, S / 2, S * 0.3, S / 2, S / 2, S * 0.52);
+  m.addColorStop(0, 'rgba(0,0,0,1)');
+  m.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = m;
+  ctx.fillRect(0, 0, S, S);
+  const t = toTexture(c, true, false);
+  cache.set('bwing', t);
+  return t;
+}
+
 /** Halo suave grande (luna, glorias) */
 export function glowSprite(): THREE.CanvasTexture {
   if (cache.has('glow')) return cache.get('glow')!;
