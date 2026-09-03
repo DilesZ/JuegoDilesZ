@@ -7,12 +7,12 @@ import {
   buildSigil, grassGeometry, grassMaterial, canopyMat, pineCanopyMat,
   buildOakGeos, buildPineGeos, bushGeo, logGeo, rockRealGeo,
   barkMat, stoneMat, woodMat, emisMat, stdMat, mushroomGeos, toonMat,
-  updateWindAndFlames, registerWind, type ToonMat,
+  updateWindAndFlames, registerWind, flowerGeometry, flowerMaterial, type ToonMat,
 } from './models';
 import { Particles } from './particles';
 import {
   terrainSplat, glowSprite, mistTexture, moonTexture, pbrTex, cloudPuffTexture,
-  waterNormal, arenaFloorTexture, bannerTexture, stoneMaps,
+  waterNormal, arenaFloorTexture, bannerTexture, stoneMaps, milkyWayTexture,
 } from './textures';
 import type { DayNightSample } from './daynight';
 
@@ -98,6 +98,8 @@ export class World {
   private moonGroup: THREE.Group | null = null;
   private moonHaloMats: THREE.SpriteMaterial[] = [];
   private moonMat: THREE.MeshBasicMaterial | null = null;
+  /** banda de Vía Láctea (opacidad por la noche) */
+  private milkyWayMat: THREE.MeshBasicMaterial | null = null;
   private sunSprites: THREE.Sprite[] = [];
   private sunMat: THREE.SpriteMaterial | null = null;
   private sunGlowMat: THREE.SpriteMaterial | null = null;
@@ -248,6 +250,20 @@ export class World {
     const stars = new THREE.Points(starGeo, starMat);
     stars.renderOrder = -9;
     this.scene.add(stars);
+
+    // VÍA LÁCTEA: cúpula interior con la banda estelar (visible de noche)
+    const mwMat = new THREE.MeshBasicMaterial({
+      map: milkyWayTexture(), transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      fog: false, side: THREE.BackSide,
+    });
+    const mw = new THREE.Mesh(new THREE.SphereGeometry(405, 32, 20), mwMat);
+    // la banda cruza el cielo en diagonal: rotamos para que atraviese el cenit
+    mw.rotation.z = 0.9;
+    mw.rotation.y = 0.6;
+    mw.renderOrder = -9;
+    this.scene.add(mw);
+    this.milkyWayMat = mwMat;
 
     // auroras boreales (3 cintas)
     const auroraGeo = new THREE.PlaneGeometry(560, 130, 1, 1);
@@ -459,6 +475,8 @@ export class World {
     this.dn.starsA.value = s.stars;
     this.dn.auroraA.value = s.aurora;
     this.dn.ffA.value = s.fireflies;
+    // Vía Láctea: solo de noche, con arranque suave (evita bandas fantasma de día)
+    if (this.milkyWayMat) this.milkyWayMat.opacity = Math.max(0, s.stars - 0.25) * 0.62;
 
     // sol y luna visibles
     this.sunSprites.forEach((sp) => { sp.position.copy(s.lightDir).multiplyScalar(385); });
@@ -529,7 +547,25 @@ export class World {
       const n = fbm(x * 0.11, z * 0.11, 3) * 0.5 + 0.5;
       const slope = 1 - Math.min(1, Math.abs(fbm(x * 0.05 + 31, z * 0.05 - 12, 2)) * 1.4);
       const shade = (0.93 + n * 0.12) * lerp(0.9, 1, slope);
-      c.setRGB(shade, shade, shade);
+      // MACRO-VARIACIÓN por zona: pradera cálida cerca del campamento,
+      // musgo frío hacia el nido del dragón, neutro en el resto
+      let r = shade, g = shade, b = shade;
+      const dRoost = Math.hypot(x - WORLD.roost.x, z - WORLD.roost.z);
+      const dCamp = Math.hypot(x - WORLD.bonfire.x, z - WORLD.bonfire.z);
+      if (dRoost < 42) {
+        // transición a musgo azulado cerca del cráter helado
+        const k = (1 - dRoost / 42) * 0.5;
+        r = shade * (1 - k * 0.16);
+        g = shade * (1 - k * 0.04);
+        b = shade * (1 + k * 0.12);
+      } else if (dCamp < 38) {
+        // pradera ligeramente dorada alrededor de la hoguera
+        const k = (1 - dCamp / 38) * 0.4;
+        r = shade * (1 + k * 0.1);
+        g = shade * (1 + k * 0.04);
+        b = shade * (1 - k * 0.1);
+      }
+      c.setRGB(r, g, b);
       colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -717,6 +753,42 @@ export class World {
     grass.count = gPlaced;
     if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
     this.scene.add(grass);
+
+    // ==== FLORES SILVESTRES (amapolas, margaritas, lavanda) ====
+    // dispersas en praderas (h<4), con manchas agrupadas como en la naturaleza
+    const flowerCfg: [0 | 1 | 2, number][] = [[0, 300], [1, 340], [2, 260]];
+    for (const [kind, count] of flowerCfg) {
+      const fm = new THREE.InstancedMesh(flowerGeometry(kind), flowerMaterial(kind), count);
+      let placed = 0; guard = 0;
+      // centro de la mancha actual: las flores nacen en racimos
+      let patchX = 0, patchZ = 0, patchLeft = 0;
+      while (placed < count && guard++ < count * 12) {
+        if (patchLeft <= 0) {
+          // nueva mancha (evita campamentos y el cráter del dragón)
+          const a = rng() * Math.PI * 2;
+          const r = 10 + rng() * (WORLD.radius - 16);
+          patchX = Math.cos(a) * r; patchZ = Math.sin(a) * r;
+          if (this.nearCamp(patchX, patchZ, 8) || Math.hypot(patchX - WORLD.roost.x, patchZ - WORLD.roost.z) < WORLD.roost.r + 4) {
+            patchLeft = 0; continue;
+          }
+          patchLeft = 6 + (rng() * 22 | 0);
+        }
+        const x = patchX + (rng() - 0.5) * 6.5;
+        const z = patchZ + (rng() - 0.5) * 6.5;
+        const h = terrainHeight(x, z);
+        if (h > 4.2) { patchLeft--; continue; }
+        dummy.position.set(x, h - 0.02, z);
+        const s = 0.75 + rng() * 0.7;
+        dummy.scale.set(s, s * (0.85 + rng() * 0.45), s);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.updateMatrix();
+        fm.setMatrixAt(placed, dummy.matrix);
+        placed++;
+        patchLeft--;
+      }
+      fm.count = placed;
+      this.scene.add(fm);
+    }
 
     // ==== Árboles muertos (silueta gótica cerca de ruinas) ====
     const deadGeo = (() => {

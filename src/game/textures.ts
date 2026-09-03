@@ -466,29 +466,46 @@ export function woodMaps(): { map: THREE.CanvasTexture; normalMap: THREE.CanvasT
 /** Hoja de hierba con alpha (para matas instanciadas) — tono natural PBR */
 export function grassBladeTexture(): THREE.CanvasTexture {
   if (cache.has('blade')) return cache.get('blade')!;
-  const W = 64, H = 64;
+  const W = 64, H = 128;
   const [c, ctx] = makeCanvas(W, H);
   ctx.clearRect(0, 0, W, H);
+  // degradado natural: raíz sombría → media saturada → punta soleada
   const g = ctx.createLinearGradient(0, H, 0, 0);
-  g.addColorStop(0, '#3a5a28');
-  g.addColorStop(0.55, '#5e7c34');
-  g.addColorStop(1, '#93a04a');
+  g.addColorStop(0, '#2c4720');
+  g.addColorStop(0.3, '#42602a');
+  g.addColorStop(0.62, '#5e7c34');
+  g.addColorStop(0.88, '#8fa04a');
+  g.addColorStop(1, '#b7bd66');
   ctx.fillStyle = g;
-  // hoja curvada
+  // hoja curvada (base ancha, punta fina)
   ctx.beginPath();
-  ctx.moveTo(W * 0.5 - 9, H);
-  ctx.quadraticCurveTo(W * 0.5 - 5, H * 0.45, W * 0.5 - 1, 2);
+  ctx.moveTo(W * 0.5 - 11, H);
+  ctx.quadraticCurveTo(W * 0.5 - 7, H * 0.4, W * 0.5 - 1, 2);
   ctx.quadraticCurveTo(W * 0.5 + 1, 0, W * 0.5 + 2, 3);
-  ctx.quadraticCurveTo(W * 0.5 + 6, H * 0.5, W * 0.5 + 9, H);
+  ctx.quadraticCurveTo(W * 0.5 + 7, H * 0.5, W * 0.5 + 11, H);
   ctx.closePath();
   ctx.fill();
-  // nervadura central sutil
-  ctx.strokeStyle = 'rgba(255,255,240,0.10)';
-  ctx.lineWidth = 1.4;
+  // nervadura central con brillo de hoja
+  ctx.strokeStyle = 'rgba(210,225,150,0.16)';
+  ctx.lineWidth = 1.6;
   ctx.beginPath();
-  ctx.moveTo(W * 0.5, H);
-  ctx.quadraticCurveTo(W * 0.5 + 2, H * 0.5, W * 0.5 + 1, 3);
+  ctx.moveTo(W * 0.5 + 1, H);
+  ctx.quadraticCurveTo(W * 0.5 + 3, H * 0.5, W * 0.5 + 1, 3);
   ctx.stroke();
+  // vetas laterales sutiles
+  ctx.strokeStyle = 'rgba(20,32,12,0.22)';
+  ctx.lineWidth = 0.9;
+  for (let i = 1; i <= 4; i++) {
+    const y = H - (i / 5) * H * 0.92;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5 - 8, y);
+    ctx.quadraticCurveTo(W * 0.5 - 3, y - 7, W * 0.5 + 1, y - 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5 + 8, y);
+    ctx.quadraticCurveTo(W * 0.5 + 3, y - 7, W * 0.5 - 1, y - 12);
+    ctx.stroke();
+  }
   const t = toTexture(c, true, false);
   cache.set('blade', t);
   return t;
@@ -663,6 +680,63 @@ export function cloudPuffTexture(): THREE.CanvasTexture {
 
 /* ---------- Sprites y efectos ---------- */
 
+/**
+ * CABEZA DE FLOR (billboard): pétalos radiando alrededor de un centro.
+ * kind 0 = amapola (roja, centro oscuro) · 1 = margarita (blanca, centro dorado)
+ * · 2 = lavanda (espiga violeta)
+ */
+export function flowerTexture(kind: 0 | 1 | 2): THREE.CanvasTexture {
+  const key = `flower${kind}`;
+  if (cache.has(key)) return cache.get(key)!;
+  const S = 128;
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+  const cx = S / 2, cy = S / 2;
+  const rng = mulberry32(kind * 331 + 7);
+  if (kind === 2) {
+    // espiga de lavanda: racimo de floretes violetas hacia arriba
+    for (let i = 0; i < 26; i++) {
+      const t = i / 26;
+      const y = S * 0.88 - t * S * 0.62;
+      const spread = (1 - t * 0.35) * S * 0.16;
+      const x = cx + (rng() - 0.5) * 2 * spread;
+      const r = 4 + rng() * 3.4;
+      ctx.fillStyle = `rgba(${150 + rng() * 40 | 0},${120 + rng() * 40 | 0},${210 + rng() * 35 | 0},0.95)`;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+  } else {
+    const petals = kind === 0 ? 5 : 9;
+    const pColor = kind === 0 ? '#d8383c' : '#f2f0e4';
+    const pLen = kind === 0 ? S * 0.24 : S * 0.2;
+    const pWide = kind === 0 ? S * 0.13 : S * 0.085;
+    for (let i = 0; i < petals; i++) {
+      const a = (i / petals) * Math.PI * 2 + (rng() - 0.5) * 0.2;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(a);
+      // pétalo elíptico con borde interno más claro
+      const grad = ctx.createLinearGradient(0, 0, 0, -pLen);
+      grad.addColorStop(0, kind === 0 ? '#a8242c' : '#d8d4c4');
+      grad.addColorStop(0.6, pColor);
+      grad.addColorStop(1, kind === 0 ? '#f2706a' : '#ffffff');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(0, -pLen * 0.55, pWide, pLen * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    // centro
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, S * 0.11);
+    cg.addColorStop(0, kind === 0 ? '#2a1418' : '#e8b93e');
+    cg.addColorStop(1, kind === 0 ? '#48262a' : '#a8842a');
+    ctx.fillStyle = cg;
+    ctx.beginPath(); ctx.arc(cx, cy, S * 0.11, 0, Math.PI * 2); ctx.fill();
+  }
+  const t = toTexture(c, true, false);
+  cache.set(key, t);
+  return t;
+}
+
 /** Sprite radial suave para partículas */
 export function softSprite(): THREE.CanvasTexture {
   if (cache.has('soft')) return cache.get('soft')!;
@@ -722,6 +796,65 @@ export function mistTexture(): THREE.CanvasTexture {
 function smoothEdge(x: number) {
   const e = Math.min(x, 1 - x) * 6;
   return Math.min(1, Math.max(0, e));
+}
+
+/**
+ * BANDA DE VÍA LÁCTEA: nubes estelares finas + nebulosas frías a lo largo
+ * de una diagonal. Se estampa sobre la cúpula del cielo con blending
+ * aditivo (opacity controlada por el ciclo noche en world.ts).
+ */
+export function milkyWayTexture(): THREE.CanvasTexture {
+  if (cache.has('milkyway')) return cache.get('milkyway')!;
+  const W = 1024, H = 512;
+  const [c, ctx] = makeCanvas(W, H);
+  ctx.clearRect(0, 0, W, H);
+  const rng = mulberry32(20240);
+  // banda diagonal central (gaussiana alrededor de la diagonal)
+  const bandY = (x: number) => H * 0.55 + Math.sin(x / W * Math.PI * 2) * H * 0.1;
+  // 1) nubes finas de polvo estelar (píxeles suaves acumulados)
+  for (let i = 0; i < 26000; i++) {
+    const x = rng() * W;
+    const spread = (rng() - 0.5) * (rng() - 0.5) * 4; // concentración gauss
+    const y = bandY(x) + spread * H * 0.22;
+    const a = 0.018 + rng() * 0.05;
+    const warm = rng();
+    ctx.fillStyle = warm > 0.85
+      ? `rgba(255,224,188,${a})`
+      : warm > 0.7 ? `rgba(198,214,255,${a})` : `rgba(228,236,255,${a})`;
+    ctx.fillRect(x, y, 1.4 + rng() * 1.6, 1.2 + rng() * 1.4);
+  }
+  // 2) nebulosas frías (brumas violeta/cian) a lo largo de la banda
+  for (let i = 0; i < 14; i++) {
+    const x = rng() * W;
+    const y = bandY(x) + (rng() - 0.5) * H * 0.16;
+    const r = 26 + rng() * 78;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const violet = rng() > 0.5;
+    g.addColorStop(0, violet ? 'rgba(122,94,220,0.10)' : 'rgba(84,140,220,0.10)');
+    g.addColorStop(0.55, violet ? 'rgba(92,76,180,0.045)' : 'rgba(70,110,190,0.045)');
+    g.addColorStop(1, 'rgba(60,60,140,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  // 3) estrellas brillantes sobre la banda (con destello en cruz)
+  for (let i = 0; i < 240; i++) {
+    const x = rng() * W;
+    const y = bandY(x) + (rng() - 0.5) * (rng() - 0.5) * 4 * H * 0.24;
+    const sz = 0.6 + rng() * 1.8;
+    ctx.fillStyle = `rgba(255,255,255,${0.5 + rng() * 0.5})`;
+    ctx.beginPath(); ctx.arc(x, y, sz, 0, Math.PI * 2); ctx.fill();
+    if (sz > 1.8) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(x - sz * 3.4, y); ctx.lineTo(x + sz * 3.4, y);
+      ctx.moveTo(x, y - sz * 3.4); ctx.lineTo(x, y + sz * 3.4);
+      ctx.stroke();
+    }
+  }
+  const t = toTexture(c, true, false);
+  cache.set('milkyway', t);
+  return t;
 }
 
 /** Superficie lunar con mares y cráteres */

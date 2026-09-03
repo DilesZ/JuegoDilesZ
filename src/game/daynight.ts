@@ -161,6 +161,9 @@ export class DayNightCycle {
   /** Factores de velocidad de enemigos / ambiente */
   get nightFactor() { return this.sample.night; }
 
+  /** Intensidad del sol (0 noche · ~0.5 mediodía · >1 alba/ocaso) — para bloom adaptativo */
+  get sunGlow() { return this.sample.sunGlow; }
+
   /** Hora del mundo formateada "07:12" */
   sampleClockText() { return this.sample.clock; }
 

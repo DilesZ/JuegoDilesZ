@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { mulberry32 } from './core';
 import {
   barkMaps, metalMaps, stoneMaps, woodMaps, grassBladeTexture,
-  foliageTexture, pineFoliageTexture,
+  foliageTexture, pineFoliageTexture, flowerTexture,
 } from './textures';
 
 /* ============================================================
@@ -1141,20 +1142,34 @@ export function buildMerchantStall(): { group: THREE.Group; lantern: THREE.Point
 export function grassGeometry(): THREE.BufferGeometry {
   const blades: THREE.BufferGeometry[] = [];
   const H = 0.68;
-  for (let i = 0; i < 5; i++) {
-    const p = new THREE.PlaneGeometry(0.16, H, 1, 3);
-    p.translate(0, H / 2, 0);
-    // curvatura de la hoja
+  const rng = mulberry32(20260);
+  // 7 hojas por mata con anchura, altura y curvatura variadas (fronda orgánica)
+  const perBlade = [
+    { w: 0.155, h: 1.0, bend: 0.16, tilt: 0 },
+    { w: 0.13, h: 0.92, bend: 0.22, tilt: 0.035 },
+    { w: 0.17, h: 0.8, bend: 0.1, tilt: -0.02 },
+    { w: 0.12, h: 1.05, bend: 0.26, tilt: 0.05 },
+    { w: 0.15, h: 0.88, bend: 0.18, tilt: -0.045 },
+    { w: 0.11, h: 0.95, bend: 0.3, tilt: 0.02 },
+    { w: 0.14, h: 0.84, bend: 0.13, tilt: -0.03 },
+  ];
+  for (let i = 0; i < perBlade.length; i++) {
+    const cfg = perBlade[i];
+    const h = H * cfg.h;
+    const p = new THREE.PlaneGeometry(cfg.w, h, 1, 4);
+    p.translate(0, h / 2, 0);
+    // curvatura progresiva hacia la punta + estrechamiento
     const pos = p.getAttribute('position') as THREE.BufferAttribute;
     for (let v = 0; v < pos.count; v++) {
       const y = pos.getY(v);
-      const k = Math.pow(y / H, 2);
-      pos.setZ(v, k * 0.16);
-      pos.setX(v, pos.getX(v) * (1 - k * 0.35));
+      const k = Math.pow(y / h, 1.8);
+      pos.setZ(v, k * cfg.bend + Math.pow(k, 2.2) * cfg.bend * 0.5);
+      pos.setX(v, pos.getX(v) * (1 - k * 0.42));
     }
-    p.rotateY((i / 5) * Math.PI + 0.25);
-    p.rotateX(((i * 37) % 10 - 5) * 0.02);
-    p.translate((i % 2 ? 0.05 : -0.05) * (i % 3), 0, ((i * 7) % 5 - 2) * 0.035);
+    p.rotateY((i / perBlade.length) * Math.PI + rng() * 0.5);
+    p.rotateX(cfg.tilt);
+    const off = (i % 2 ? 1 : -1) * 0.03 * (i % 3);
+    p.translate(off, 0, ((i * 7) % 5 - 2) * 0.03);
     blades.push(p);
   }
   const merged = mergeGeometries(blades)!;
@@ -1172,6 +1187,47 @@ export function grassMaterial(): THREE.MeshStandardMaterial {
     metalness: 0,
   });
   registerWind(mat, 0.1);
+  return mat;
+}
+
+/* ---------- Flores silvestres (instanciadas en praderas) ---------- */
+
+/** Geometría de flor: tallo curvado + cabeza billboard */
+export function flowerGeometry(kind: 0 | 1 | 2): THREE.BufferGeometry {
+  const H = kind === 2 ? 0.5 : 0.36;
+  const stem = new THREE.PlaneGeometry(0.05, H, 1, 3);
+  stem.translate(0, H / 2, 0);
+  // curva del tallo
+  const pos = stem.getAttribute('position') as THREE.BufferAttribute;
+  for (let v = 0; v < pos.count; v++) {
+    const y = pos.getY(v);
+    const k = Math.pow(y / H, 2);
+    pos.setZ(v, k * 0.06);
+    pos.setX(v, pos.getX(v) * (1 - k * 0.3));
+  }
+  // cabeza: plano cruzado (dos quads) con la textura de pétalos
+  const headSize = kind === 0 ? 0.16 : kind === 1 ? 0.13 : 0.1;
+  const h1 = new THREE.PlaneGeometry(headSize, headSize);
+  h1.translate(0, H + headSize * 0.3, 0.06);
+  const h2 = h1.clone();
+  h2.rotateY(Math.PI / 2);
+  const merged = mergeGeometries([stem.toNonIndexed(), h1.toNonIndexed(), h2.toNonIndexed()])!;
+  merged.computeVertexNormals();
+  return merged;
+}
+
+/** Material de flor por variedad (amapola / margarita / lavanda) */
+export function flowerMaterial(kind: 0 | 1 | 2): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    map: flowerTexture(kind),
+    alphaTest: 0.42,
+    side: THREE.DoubleSide,
+    color: 0xffffff,
+    roughness: 0.9,
+    metalness: 0,
+  });
+  registerWind(mat, 0.055);
+  mat.customProgramCacheKey = () => `flower${kind}`;
   return mat;
 }
 

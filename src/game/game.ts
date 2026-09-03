@@ -215,6 +215,8 @@ export class Game {
   private slashArcs!: SlashArcPool;
   private impactDecals!: ImpactDecalPool;
   private hitFlares!: HitFlarePool;
+  /** bloom (para tinte horario en updateEffects) */
+  private bloomPass: UnrealBloomPass | null = null;
 
   // medidor de estilo (DMC): puntos por golpe, decaimiento y rangos D→SSS
   private stylePts = 0;
@@ -394,6 +396,7 @@ export class Game {
     }
     const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.32, 0.6, 0.85);
     this.composer.addPass(bloom);
+    this.bloomPass = bloom;
     // grading EN HDR (lineal): viñeta/contraste/grano antes del tonemap ACES
     this.grade = new ShaderPass(GradeShader);
     this.composer.addPass(this.grade);
@@ -1874,6 +1877,12 @@ export class Game {
     this.slashArcs.update(dt);
     this.impactDecals.update(dt);
     this.hitFlares.update(dt);
+    // BLOOM RESPIRANTE: más intenso al alba/ocaso (sol bajo), suave de noche
+    if (this.bloomPass) {
+      const glow = this.cycle.sunGlow; // 0 noche · 0.4-0.55 mediodía · 1.25-1.4 alba/ocaso
+      const target = 0.24 + glow * 0.16;
+      this.bloomPass.strength += (target - this.bloomPass.strength) * Math.min(1, dt * 1.6);
+    }
     // números de daño
     const w = window.innerWidth, h = window.innerHeight;
     const v = this._gV4;
